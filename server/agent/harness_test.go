@@ -243,8 +243,8 @@ func TestSanitizeReportHTMLPreservesNormalContent(t *testing.T) {
 	input := `<div class="chart"><script>var x=1;</script><style>.a{color:red}</style><a href="https://example.com">link</a></div>`
 	result := sanitizeReportHTML(input)
 
-	if !strings.Contains(result, "<script>") {
-		t.Error("sanitizeReportHTML should preserve script tags (needed for ECharts)")
+	if strings.Contains(strings.ToLower(result), "<script") || strings.Contains(result, "var x=1") {
+		t.Errorf("sanitizeReportHTML should remove script tags; ECharts loads through report runtime assets, got %q", result)
 	}
 	if !strings.Contains(result, "<style>") {
 		t.Error("sanitizeReportHTML should preserve style tags")

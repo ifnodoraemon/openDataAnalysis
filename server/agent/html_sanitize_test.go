@@ -51,6 +51,20 @@ func TestSanitizeReportHTML_BlocksDangerousProtocols(t *testing.T) {
 	}
 }
 
+func TestSanitizeReportHTML_RemovesScriptElements(t *testing.T) {
+	t.Parallel()
+
+	input := `<div>safe</div><script src="/assets/echarts.min.js">alert(1)</script><SCRIPT>alert(2)</SCRIPT>`
+	result := sanitizeReportHTML(input)
+	lower := strings.ToLower(result)
+	if strings.Contains(lower, "<script") || strings.Contains(lower, "</script") || strings.Contains(lower, "alert(") {
+		t.Fatalf("expected script elements to be removed, got %s", result)
+	}
+	if !strings.Contains(result, "<div>safe</div>") {
+		t.Fatalf("expected safe content to remain, got %s", result)
+	}
+}
+
 func TestSanitizeReportHTML_PreservesSafeContent(t *testing.T) {
 	input := `<a href="https://example.com">link</a><p>text</p>`
 	result := sanitizeReportHTML(input)
@@ -63,10 +77,13 @@ func TestSanitizeReportHTML_PreservesSafeContent(t *testing.T) {
 }
 
 func TestApplyReportHTMLGuardrail(t *testing.T) {
-	input := `{"html":"<div onclick=\"alert(1)\">bad</div>","other":"safe"}`
+	input := `{"html":"<div onclick=\"alert(1)\">bad</div><script>alert(2)</script>","other":"safe"}`
 	result := applyReportHTMLGuardrail(input)
 	if strings.Contains(result, "onclick") {
 		t.Errorf("onclick not removed: %s", result)
+	}
+	if strings.Contains(strings.ToLower(result), "<script") || strings.Contains(result, "alert(2)") {
+		t.Errorf("script element not removed: %s", result)
 	}
 	if !strings.Contains(result, `"other":"safe"`) {
 		t.Errorf("non-html field modified: %s", result)

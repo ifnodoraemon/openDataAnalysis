@@ -7,6 +7,9 @@ import (
 )
 
 var (
+	htmlScriptElementRe = regexp.MustCompile(`(?is)<\s*script\b[^>]*>.*?<\s*/\s*script\s*>`)
+	htmlScriptTagRe     = regexp.MustCompile(`(?is)<\s*/?\s*script\b[^>]*>`)
+
 	htmlEventAttrRe = regexp.MustCompile(`(?i)\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]*)`)
 
 	htmlEventAttrNoSpaceRe = regexp.MustCompile(`(?i)/on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]*)`)
@@ -15,6 +18,9 @@ var (
 )
 
 func sanitizeReportHTML(html string) string {
+	html = htmlScriptElementRe.ReplaceAllString(html, "")
+	html = htmlScriptTagRe.ReplaceAllString(html, "")
+
 	html = htmlEventAttrNoSpaceRe.ReplaceAllString(html, "")
 
 	html = htmlEventAttrRe.ReplaceAllString(html, "")
