@@ -1,12 +1,35 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/ifnodoraemon/openDataAnalysis/tools"
 )
+
+type runtimeAwareTestTool struct {
+	ctx  context.Context
+	emit func(WSEvent)
+}
+
+func (t *runtimeAwareTestTool) Name() string { return "runtime_aware_test_tool" }
+func (t *runtimeAwareTestTool) Description() string {
+	return "test runtime-aware tool"
+}
+func (t *runtimeAwareTestTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{}}`)
+}
+func (t *runtimeAwareTestTool) Execute(json.RawMessage) (string, error) {
+	return `{"ok":true}`, nil
+}
+func (t *runtimeAwareTestTool) SetEventEmitter(emit func(WSEvent)) {
+	t.emit = emit
+}
+func (t *runtimeAwareTestTool) SetExecutionContext(ctx context.Context) {
+	t.ctx = ctx
+}
 
 func TestDelegateTaskToolReturnsStructuredFailureWhenAllowedToolsUnresolved(t *testing.T) {
 	t.Parallel()
@@ -169,5 +192,41 @@ func TestDelegateTaskToolContractDeclaresDisallowedTools(t *testing.T) {
 	}
 	if got := string(tool.Parameters()); !strings.Contains(got, "user_request_input") || !strings.Contains(got, "report_finalize") {
 		t.Fatalf("expected parameter schema to declare disallowed tools, got %q", got)
+	}
+}
+
+func TestDelegateTaskToolRestoresParentRuntimeHooks(t *testing.T) {
+	t.Parallel()
+
+	type ctxKey struct{}
+
+	parentEvents := 0
+	childEvents := 0
+	parentEmit := func(WSEvent) { parentEvents++ }
+	childEmit := func(WSEvent) { childEvents++ }
+	parentCtx := context.WithValue(context.Background(), ctxKey{}, "parent")
+	childCtx := context.WithValue(context.Background(), ctxKey{}, "child")
+
+	runtimeTool := &runtimeAwareTestTool{}
+	registry := tools.NewRegistry()
+	registry.Register(runtimeTool)
+
+	delegate := &DelegateTaskTool{BaseRegistry: registry}
+	prepareRegistryRuntimeTools(registry, childCtx, childEmit)
+	if got := runtimeTool.ctx.Value(ctxKey{}); got != "child" {
+		t.Fatalf("expected child context before restore, got %#v", got)
+	}
+	runtimeTool.emit(WSEvent{})
+	if childEvents != 1 || parentEvents != 0 {
+		t.Fatalf("expected child emitter before restore, parent=%d child=%d", parentEvents, childEvents)
+	}
+
+	delegate.restoreParentRegistryRuntimeTools(parentCtx, parentEmit)
+	if got := runtimeTool.ctx.Value(ctxKey{}); got != "parent" {
+		t.Fatalf("expected parent context after restore, got %#v", got)
+	}
+	runtimeTool.emit(WSEvent{})
+	if parentEvents != 1 || childEvents != 1 {
+		t.Fatalf("expected parent emitter after restore, parent=%d child=%d", parentEvents, childEvents)
 	}
 }

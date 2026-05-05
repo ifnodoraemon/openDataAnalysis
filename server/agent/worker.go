@@ -310,10 +310,13 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 		return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "no_allowed_tools_resolved", "no allowed tools resolved for delegate", nil), nil
 	}
 
-	ctx := t.ParentContext
-	if ctx == nil {
-		ctx = context.Background()
+	parentCtx := t.ParentContext
+	if parentCtx == nil {
+		parentCtx = context.Background()
 	}
+	parentEmit := t.EmitFunc
+
+	ctx := parentCtx
 	const delegateMaxDuration = 5 * time.Minute
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, delegateMaxDuration)
@@ -361,6 +364,7 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 		emit(ev)
 	}
 	prepareRegistryRuntimeTools(subReg, childCtx, childEmit)
+	defer t.restoreParentRegistryRuntimeTools(parentCtx, parentEmit)
 
 	if t.Subgoals != nil && payload.GoalID != "" {
 		if err := t.Subgoals.UpdateGoalStatus(payload.GoalID, StatusRunning, ""); err == nil {
@@ -545,6 +549,13 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 	return delegateToolFailure(childRunID, payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "delegate_max_iterations_reached", fmt.Sprintf("delegated agent %s max iterations reached", payload.RoleName), map[string]interface{}{
 		"child_run_status": string(domain.RunStatusFailed),
 	}), nil
+}
+
+func (t *DelegateTaskTool) restoreParentRegistryRuntimeTools(ctx context.Context, emit func(WSEvent)) {
+	if t.BaseRegistry == nil {
+		return
+	}
+	prepareRegistryRuntimeTools(t.BaseRegistry, ctx, emit)
 }
 
 func delegateToolSuccess(childRunID, roleName, taskInstruction string, allowedTools []string, goalID, summary string, trace []delegateTraceItem) string {
