@@ -1,27 +1,106 @@
 const SAFE_URL_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
 
 const MARKDOWN_ALLOWED_TAGS = new Set([
-  "A", "BLOCKQUOTE", "BR", "CODE", "DIV", "EM",
-  "H1", "H2", "H3", "H4", "H5", "H6",
-  "LI", "OL", "P", "PRE", "SPAN", "STRONG",
-  "TABLE", "TBODY", "TD", "TH", "THEAD", "TR", "UL",
+  "A",
+  "BLOCKQUOTE",
+  "BR",
+  "CODE",
+  "DIV",
+  "EM",
+  "H1",
+  "H2",
+  "H3",
+  "H4",
+  "H5",
+  "H6",
+  "LI",
+  "OL",
+  "P",
+  "PRE",
+  "SPAN",
+  "STRONG",
+  "TABLE",
+  "TBODY",
+  "TD",
+  "TH",
+  "THEAD",
+  "TR",
+  "UL",
 ]);
 
 const REPORT_ALLOWED_TAGS = new Set([
-  "HTML", "HEAD", "BODY", "META", "LINK", "TITLE", "STYLE", "SCRIPT",
-  "DIV", "SPAN", "P", "BR", "HR", "H1", "H2", "H3", "H4", "H5", "H6",
-  "TABLE", "THEAD", "TBODY", "TFOOT", "TR", "TH", "TD", "CAPTION",
-  "UL", "OL", "LI", "DL", "DT", "DD",
-  "A", "STRONG", "EM", "B", "I", "U", "S", "MARK", "SMALL", "SUB", "SUP",
-  "BLOCKQUOTE", "PRE", "CODE",
-  "IMG", "FIGURE", "FIGCAPTION",
-  "SECTION", "ARTICLE", "ASIDE", "HEADER", "FOOTER", "MAIN", "NAV",
-  "DETAILS", "SUMMARY",
+  "HTML",
+  "HEAD",
+  "BODY",
+  "META",
+  "LINK",
+  "TITLE",
+  "STYLE",
+  "SCRIPT",
+  "DIV",
+  "SPAN",
+  "P",
+  "BR",
+  "HR",
+  "H1",
+  "H2",
+  "H3",
+  "H4",
+  "H5",
+  "H6",
+  "TABLE",
+  "THEAD",
+  "TBODY",
+  "TFOOT",
+  "TR",
+  "TH",
+  "TD",
+  "CAPTION",
+  "UL",
+  "OL",
+  "LI",
+  "DL",
+  "DT",
+  "DD",
+  "A",
+  "STRONG",
+  "EM",
+  "B",
+  "I",
+  "U",
+  "S",
+  "MARK",
+  "SMALL",
+  "SUB",
+  "SUP",
+  "BLOCKQUOTE",
+  "PRE",
+  "CODE",
+  "IMG",
+  "FIGURE",
+  "FIGCAPTION",
+  "SECTION",
+  "ARTICLE",
+  "ASIDE",
+  "HEADER",
+  "FOOTER",
+  "MAIN",
+  "NAV",
+  "DETAILS",
+  "SUMMARY",
 ]);
 
 const REPORT_REMOVE_TAGS = new Set([
-  "IFRAME", "OBJECT", "EMBED", "BASE", "FORM", "INPUT",
-  "BUTTON", "SELECT", "TEXTAREA", "NOSCRIPT",
+  "IFRAME",
+  "OBJECT",
+  "EMBED",
+  "BASE",
+  "FORM",
+  "INPUT",
+  "BUTTON",
+  "SELECT",
+  "TEXTAREA",
+  "NOSCRIPT",
 ]);
 
 const DANGEROUS_ATTRS = new Set(["id", "content"]);
@@ -37,7 +116,8 @@ function sanitizeClassList(value) {
 function sanitizeURL(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
-  if (raw.startsWith("#") || (raw.startsWith("/") && !raw.startsWith("//"))) return raw;
+  if (raw.startsWith("#") || (raw.startsWith("/") && !raw.startsWith("//")))
+    return raw;
   try {
     const parsed = new URL(raw, window.location.origin);
     return SAFE_URL_PROTOCOLS.has(parsed.protocol) ? raw : "";
@@ -49,14 +129,20 @@ function sanitizeURL(value) {
 function sanitizeStyleValue(value) {
   const lower = String(value || "").toLowerCase();
   if (/[<]/.test(value)) return "";
-  if (/(?:expression|javascript|vbscript|behavior|@import)\s*\(/i.test(value)) return "";
-  if (/url\s*\(\s*["']?(?:javascript|vbscript|data|blob)\s*:/i.test(value)) return "";
+  if (/(?:expression|javascript|vbscript|behavior|@import)\s*\(/i.test(value))
+    return "";
+  if (/url\s*\(\s*["']?(?:javascript|vbscript|data|blob)\s*:/i.test(value))
+    return "";
   return value;
 }
 
 function cleanAttributes(
   node,
-  { allowMarkdownClasses = false, allowChartStyle = false, allowReportAttrs = false } = {},
+  {
+    allowMarkdownClasses = false,
+    allowChartStyle = false,
+    allowReportAttrs = false,
+  } = {},
 ) {
   const attrs = Array.from(node.attributes || []);
   for (const attr of attrs) {
@@ -101,14 +187,22 @@ function cleanAttributes(
     }
     if (name === "class") {
       const safe = sanitizeClassList(value);
-      if (!safe || (!allowMarkdownClasses && !allowReportAttrs && node.tagName !== "BODY")) {
+      if (
+        !safe ||
+        (!allowMarkdownClasses && !allowReportAttrs && node.tagName !== "BODY")
+      ) {
         node.removeAttribute("class");
       } else {
         node.setAttribute("class", safe);
       }
       continue;
     }
-    if (name === "target" || name === "rel" || name === "charset" || name === "name") {
+    if (
+      name === "target" ||
+      name === "rel" ||
+      name === "charset" ||
+      name === "name"
+    ) {
       continue;
     }
     if (name.startsWith("data-")) {
@@ -118,9 +212,18 @@ function cleanAttributes(
     }
     if (
       allowReportAttrs &&
-      ["title", "colspan", "rowspan", "width", "height", "alt", "role", "aria-", "lang", "dir"].some(
-        (ok) => name === ok || name.startsWith(ok),
-      )
+      [
+        "title",
+        "colspan",
+        "rowspan",
+        "width",
+        "height",
+        "alt",
+        "role",
+        "aria-",
+        "lang",
+        "dir",
+      ].some((ok) => name === ok || name.startsWith(ok))
     ) {
       continue;
     }
@@ -179,10 +282,15 @@ function isEChartsLoaderScript(node) {
   try {
     const url = new URL(src, window.location.origin);
     const path = url.pathname.toLowerCase();
-    if (url.origin === window.location.origin && path === "/assets/echarts.min.js") {
+    if (
+      url.origin === window.location.origin &&
+      path === "/assets/echarts.min.js"
+    ) {
       return true;
     }
-    return ECHARTS_CDN_HOSTS.has(url.hostname) && path.endsWith("echarts.min.js");
+    return (
+      ECHARTS_CDN_HOSTS.has(url.hostname) && path.endsWith("echarts.min.js")
+    );
   } catch {
     return false;
   }
@@ -194,44 +302,13 @@ function isChartRuntimeScript(node) {
   if (id !== "oda-chart-runtime" || !src) return false;
   try {
     const url = new URL(src, window.location.origin);
-    return url.origin === window.location.origin && url.pathname === "/oda-chart-runtime.js";
+    return (
+      url.origin === window.location.origin &&
+      url.pathname === "/oda-chart-runtime.js"
+    );
   } catch {
     return false;
   }
-}
-
-const RUNTIME_DANGEROUS_PATTERNS = [
-  /\bfetch\s*\(/,
-  /\bXMLHttpRequest\b/,
-  /\bimport\s*\(/,
-  /\brequire\s*\(/,
-  /\beval\s*\(/,
-  /\bdocument\.(?!(?:addEventListener|querySelectorAll)\b)\w+/,
-  /\bwindow\.(?!addEventListener\b)\w+/,
-  /\bself\b/,
-  /\blocalStorage\b/,
-  /\bsessionStorage\b/,
-  /\bWebSocket\b/,
-  /\bWorker\b/,
-  /\bSharedWorker\b/,
-  /\bServiceWorker\b/,
-  /\bpostMessage\s*\(/,
-  /\blocation\s*[.=]/,
-  /\blocation\b/,
-];
-
-function isSafeRuntimeScript(node) {
-  if (node.getAttribute("src")) return false;
-  const id = node.getAttribute("id") || "";
-  if (id !== "oda-chart-runtime") return false;
-  const text = node.textContent || "";
-  const lines = text.split("\n").filter((l) => l.trim() && !l.trim().startsWith("//"));
-  if (lines.length > 1000) return false;
-  if (!text.includes("echarts.init(")) return false;
-  if (!text.includes("document.addEventListener('DOMContentLoaded'")) return false;
-  if (!text.includes("document.querySelectorAll('.chart-box[data-chart-id=")) return false;
-  if (RUNTIME_DANGEROUS_PATTERNS.some((pat) => pat.test(text))) return false;
-  return true;
 }
 
 export function sanitizeReportHTML(html) {
@@ -247,7 +324,7 @@ export function sanitizeReportHTML(html) {
 
   doc.querySelectorAll("script").forEach((node) => {
     const isLoader = isEChartsLoaderScript(node);
-    const isRuntime = isChartRuntimeScript(node) || isSafeRuntimeScript(node);
+    const isRuntime = isChartRuntimeScript(node);
     if (!isLoader && !isRuntime) {
       node.remove();
     }

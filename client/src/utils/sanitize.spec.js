@@ -42,7 +42,7 @@ describe("sanitizeReportHTML", () => {
     const sanitized = sanitizeReportHTML(html);
 
     expect(sanitized).toContain('id="oda-echarts-loader"');
-    expect(sanitized).toContain('/assets/echarts.min.js');
+    expect(sanitized).toContain("/assets/echarts.min.js");
     expect(sanitized).toContain('id="oda-chart-runtime"');
     expect(sanitized).toContain('src="/oda-chart-runtime.js"');
     expect(sanitized).toContain('data-chart-id="chart_sales"');
@@ -57,5 +57,23 @@ describe("sanitizeReportHTML", () => {
 
     const sanitized = sanitizeReportHTML(html);
     expect(sanitized).not.toContain("alert('xss')");
+  });
+
+  it("removes inline chart runtime scripts even when they look valid", () => {
+    const html = `<!DOCTYPE html><html><body>
+      <div class="chart-box" data-chart-id="chart_sales" data-chart-option='{"series":[{"type":"bar","data":[1]}]}'></div>
+      <script id="oda-chart-runtime">
+        document.addEventListener('DOMContentLoaded', function () {
+          document.querySelectorAll('.chart-box[data-chart-id]').forEach(function (el) {
+            echarts.init(el).setOption(JSON.parse(el.dataset.chartOption));
+          });
+        });
+      </script>
+      <script id="oda-chart-runtime" src="/oda-chart-runtime.js"></script>
+    </body></html>`;
+
+    const sanitized = sanitizeReportHTML(html);
+    expect(sanitized).not.toContain("echarts.init(el)");
+    expect(sanitized).toContain('src="/oda-chart-runtime.js"');
   });
 });
