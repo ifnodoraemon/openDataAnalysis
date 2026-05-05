@@ -30,10 +30,10 @@ func init() {
 			return nil
 		}
 		return &ConfirmSourceProfileTool{
-			Confirmer:    ctx.ProfileConfirmer,
-			Detail:       ctx.ProfileDetailProvider,
-			SessionID:    ctx.SessionID,
-			WorkspaceID:  ctx.WorkspaceID,
+			Confirmer:   ctx.ProfileConfirmer,
+			Detail:      ctx.ProfileDetailProvider,
+			SessionID:   ctx.SessionID,
+			WorkspaceID: ctx.WorkspaceID,
 		}
 	})
 }
@@ -109,7 +109,7 @@ type ConfirmSourceProfileTool struct {
 
 func (t *ConfirmSourceProfileTool) Name() string { return "state_source_confirm_profile" }
 func (t *ConfirmSourceProfileTool) Description() string {
-	return "Resolve semantic ambiguities detected during data profiling. Accepts a profile_id and a JSON object of overrides specifying which interpretations to confirm (e.g. primary time column, percentage unit columns, metric definitions). After confirmation, the profile's ambiguity_count decreases. This tool does not create or modify data sources."
+	return "Resolve semantic ambiguities detected during data profiling. Accepts a profile_id and a JSON object of overrides specifying which interpretations to confirm (e.g. primary time column, percentage unit columns, metric definitions). Writes confirmation overrides for the requested scope and returns the confirmed profile_id and scope. This tool does not create or modify data sources."
 }
 func (t *ConfirmSourceProfileTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
@@ -140,6 +140,7 @@ func (t *ConfirmSourceProfileTool) Execute(args json.RawMessage) (string, error)
 	}
 	return toolSuccess("state_source_confirm_profile", map[string]interface{}{
 		"profile_id": params.ProfileID,
-		"ui_summary": fmt.Sprintf("Profile %s confirmed with scope=%s. Run state_session_sources_inspect to see updated ambiguity counts.", params.ProfileID, params.Scope),
+		"scope":      params.Scope,
+		"ui_summary": fmt.Sprintf("Profile %s confirmed with scope=%s.", params.ProfileID, params.Scope),
 	}), nil
 }
