@@ -95,7 +95,7 @@ export const useAgentStore = defineStore("agent", () => {
     });
   }
 
-let _msgSeq = 0;
+  let _msgSeq = 0;
 
   function addMessage(msg) {
     messages.value.push({
@@ -123,8 +123,12 @@ let _msgSeq = 0;
       blockId: quote.blockId || "",
       blockLabel: quote.blockLabel || "",
       selectionText: String(quote.selectionText || "").trim(),
-      selectionStart: Number.isInteger(quote.selectionStart) ? quote.selectionStart : null,
-      selectionEnd: Number.isInteger(quote.selectionEnd) ? quote.selectionEnd : null,
+      selectionStart: Number.isInteger(quote.selectionStart)
+        ? quote.selectionStart
+        : null,
+      selectionEnd: Number.isInteger(quote.selectionEnd)
+        ? quote.selectionEnd
+        : null,
       selectionRangeSet: quote.selectionRangeSet === true,
       preserveOtherBlocks: quote.preserveOtherBlocks !== false,
     };
@@ -237,10 +241,7 @@ let _msgSeq = 0;
     if (!runId || !preview?.summary) return false;
     const run = findRunById(runs.value, runId);
     if (!run) return false;
-    const nextPreview = [
-      ...(run.previewMessages || []),
-      preview,
-    ].slice(-limit);
+    const nextPreview = [...(run.previewMessages || []), preview].slice(-limit);
     runs.value = patchRunInTree(runs.value, runId, {
       previewMessages: nextPreview,
       updatedAt: new Date().toISOString(),

@@ -48,7 +48,9 @@
     <div v-if="mode === 'preview' && reportHTML" class="edit-strip">
       <template v-if="selectedBlockId">
         <div class="edit-meta">
-          <span class="edit-label">{{ selectedByText ? "选中文本" : "当前章节" }}</span>
+          <span class="edit-label">{{
+            selectedByText ? "选中文本" : "当前章节"
+          }}</span>
           <span class="edit-value">{{ selectedBlockLabel }}</span>
         </div>
         <p class="selection-preview">{{ selectedBlockText }}</p>
@@ -254,7 +256,11 @@ function handleFrameMouseUp() {
 
 function handleBlockClick(event) {
   const frameSelection = reportFrame.value?.contentWindow?.getSelection?.();
-  if (frameSelection && !frameSelection.isCollapsed && frameSelection.toString().trim()) {
+  if (
+    frameSelection &&
+    !frameSelection.isCollapsed &&
+    frameSelection.toString().trim()
+  ) {
     return;
   }
   event.preventDefault();
@@ -275,15 +281,20 @@ function selectReportBlock(block, options = {}) {
   selectedFragmentIndex.value = fragmentIdx;
   selectedBlockLabel.value = extractBlockLabel(block);
   selectedBlockText.value = trimSelectionText(options.text || "");
-  selectedSelectionStart.value = Number.isInteger(options.selectionStart) ? options.selectionStart : null;
-  selectedSelectionEnd.value = Number.isInteger(options.selectionEnd) ? options.selectionEnd : null;
+  selectedSelectionStart.value = Number.isInteger(options.selectionStart)
+    ? options.selectionStart
+    : null;
+  selectedSelectionEnd.value = Number.isInteger(options.selectionEnd)
+    ? options.selectionEnd
+    : null;
   selectedByText.value = !!options.byText;
   applySelectionHighlight(fragmentIdx);
 }
 
 function findClosestReportBlock(node) {
   if (!node) return null;
-  const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  const element =
+    node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
   return element?.closest?.("[data-block-id]") || null;
 }
 
@@ -319,13 +330,17 @@ function quoteSelection() {
     selectionText: selectedBlockText.value,
     selectionStart: selectedSelectionStart.value,
     selectionEnd: selectedSelectionEnd.value,
-    selectionRangeSet: selectedByText.value && Number.isInteger(selectedSelectionStart.value) && Number.isInteger(selectedSelectionEnd.value),
+    selectionRangeSet:
+      selectedByText.value &&
+      Number.isInteger(selectedSelectionStart.value) &&
+      Number.isInteger(selectedSelectionEnd.value),
     preserveOtherBlocks: true,
   });
 }
 
 function quoteWholeReport() {
-  const label = selectedReport.value?.title || selectedRun.value?.id || "当前报告";
+  const label =
+    selectedReport.value?.title || selectedRun.value?.id || "当前报告";
   store.setReportQuote({
     mode: "revise_report",
     targetRunId: selectedRun.value?.id || activeRun.value?.id || "",
@@ -338,8 +353,12 @@ function quoteWholeReport() {
 }
 
 function trimSelectionText(text) {
-  const normalized = String(text || "").replace(/\s+/g, " ").trim();
-  return normalized.length > 3000 ? `${normalized.slice(0, 3000)}...` : normalized;
+  const normalized = String(text || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized.length > 3000
+    ? `${normalized.slice(0, 3000)}...`
+    : normalized;
 }
 
 function computeSelectionOffsets(block, range) {

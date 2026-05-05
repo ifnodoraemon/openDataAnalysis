@@ -181,7 +181,9 @@ describe("useWebSocket deduplication", () => {
     expect(store.isRunning).toBe(false);
     expect(store.activeRunId).toBe("");
     expect(store.getRun("run-root")?.status).toBe("completed");
-    expect(store.getRun("run-root")?.previewMessages.at(-1)?.summary).toBe("root finished");
+    expect(store.getRun("run-root")?.previewMessages.at(-1)?.summary).toBe(
+      "root finished",
+    );
     expect(store.messages.length).toBe(0);
 
     disconnect();
@@ -496,7 +498,11 @@ describe("useWebSocket deduplication", () => {
     store.setToken("test-token");
     store.setSession("sess-1");
     store.upsertSession({ id: "sess-1", title: "Existing title" });
-    store.upsertRun({ id: "run-1", sessionId: "sess-1", status: "waiting_user_input" });
+    store.upsertRun({
+      id: "run-1",
+      sessionId: "sess-1",
+      status: "waiting_user_input",
+    });
     store.startRun("run-1");
     store.setRunning(false);
     store.patchRun("run-1", { status: "waiting_user_input" });
@@ -626,7 +632,12 @@ describe("useWebSocket deduplication", () => {
     store.setToken("test-token");
     store.setSession("sess-1");
     store.upsertRun({ id: "run-root", sessionId: "sess-1", status: "running" });
-    store.upsertRun({ id: "run-history", sessionId: "sess-1", status: "completed", reportFileId: "rep-1" });
+    store.upsertRun({
+      id: "run-history",
+      sessionId: "sess-1",
+      status: "completed",
+      reportFileId: "rep-1",
+    });
     store.setSelectedRun("run-history");
     store.updateReport("<p>historical report</p>");
 

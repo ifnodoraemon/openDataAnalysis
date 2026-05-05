@@ -1,15 +1,23 @@
 <template>
   <div class="input-bar">
     <div class="upload-area" v-if="dataSourceStore.sessionSources.length > 0">
-      <span v-for="src in dataSourceStore.sessionSources" :key="src.source_id" class="source-tag">
+      <span
+        v-for="src in dataSourceStore.sessionSources"
+        :key="src.source_id"
+        class="source-tag"
+      >
         🔗 {{ src.analysis_table_name || src.source_name }}
-        <span class="source-meta" v-if="src.row_count">({{ src.row_count }} rows)</span>
+        <span class="source-meta" v-if="src.row_count"
+          >({{ src.row_count }} rows)</span
+        >
       </span>
     </div>
     <div v-if="reportQuote && !isWaitingUserInput" class="quote-context">
       <div class="quote-main">
         <span class="quote-kicker">引用报告选区</span>
-        <span class="quote-title">{{ reportQuote.blockLabel || reportQuote.blockId || "报告片段" }}</span>
+        <span class="quote-title">{{
+          reportQuote.blockLabel || reportQuote.blockId || "报告片段"
+        }}</span>
         <p>{{ quotePreview }}</p>
       </div>
       <button
@@ -64,7 +72,9 @@
       >
         发送 ⏎
       </button>
-      <button v-else-if="isRunning" class="stop-btn" @click="handleStop">■ 停止</button>
+      <button v-else-if="isRunning" class="stop-btn" @click="handleStop">
+        ■ 停止
+      </button>
       <button v-else class="send-btn" disabled>等待确认</button>
     </div>
     <DataSourceDrawer
@@ -95,8 +105,12 @@ const showSourcesDrawer = ref(false);
 const reportQuote = computed(() => store.reportQuote);
 const selectedRun = computed(() => store.getRun(store.selectedRunId) || null);
 const activeRun = computed(() => store.getRun(store.activeRunId) || null);
-const isWaitingUserInput = computed(() => activeRun.value?.status === "waiting_user_input");
-const inputDisabled = computed(() => isRunning.value || isWaitingUserInput.value);
+const isWaitingUserInput = computed(
+  () => activeRun.value?.status === "waiting_user_input",
+);
+const inputDisabled = computed(
+  () => isRunning.value || isWaitingUserInput.value,
+);
 const inputPlaceholder = computed(() => {
   if (isWaitingUserInput.value) return "请在上方确认卡片中回复...";
   if (reportQuote.value) return "说明希望如何修改引用区域...";
@@ -108,7 +122,9 @@ const quotePreview = computed(() => {
 });
 
 const pendingProfiles = computed(() =>
-  dataSourceStore.sessionSources.filter(s => s.semantic_status === 'draft' || s.semantic_status === 'profiled')
+  dataSourceStore.sessionSources.filter(
+    (s) => s.semantic_status === "draft" || s.semantic_status === "profiled",
+  ),
 );
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
@@ -145,7 +161,9 @@ async function handleFile(e) {
           `/api/upload?session_id=${encodeURIComponent(sessionId)}`,
           {
             method: "POST",
-            headers: store.token ? { Authorization: `Bearer ${store.token}` } : {},
+            headers: store.token
+              ? { Authorization: `Bearer ${store.token}` }
+              : {},
             body: formData,
           },
         );
@@ -180,12 +198,13 @@ async function handleFile(e) {
 async function handleSend() {
   if (!input.value.trim() || isRunning.value) return;
   const quote = reportQuote.value;
-  const turnContext = selectedRun.value?.id && selectedRun.value?.report
-    ? {
-        reportTargetRunId: selectedRun.value.id,
-        reportTitle: selectedRun.value.report?.title || "",
-      }
-    : null;
+  const turnContext =
+    selectedRun.value?.id && selectedRun.value?.report
+      ? {
+          reportTargetRunId: selectedRun.value.id,
+          reportTitle: selectedRun.value.report?.title || "",
+        }
+      : null;
   const editContext = quote
     ? {
         mode: quote.mode || "regenerate_selection",
@@ -193,8 +212,12 @@ async function handleSend() {
         blockId: quote.blockId || "",
         blockLabel: quote.blockLabel || "",
         selectionText: quote.selectionText || "",
-        selectionStart: Number.isInteger(quote.selectionStart) ? quote.selectionStart : undefined,
-        selectionEnd: Number.isInteger(quote.selectionEnd) ? quote.selectionEnd : undefined,
+        selectionStart: Number.isInteger(quote.selectionStart)
+          ? quote.selectionStart
+          : undefined,
+        selectionEnd: Number.isInteger(quote.selectionEnd)
+          ? quote.selectionEnd
+          : undefined,
         selectionRangeSet: quote.selectionRangeSet === true,
         preserveOtherBlocks: quote.preserveOtherBlocks !== false,
       }

@@ -206,7 +206,13 @@ marked.setOptions({
     if (language && hljs.getLanguage(language)) {
       return hljs.highlight(code, { language }).value;
     }
-    return hljs.highlightAuto(code, ["python", "sql", "json", "javascript", "bash"]).value;
+    return hljs.highlightAuto(code, [
+      "python",
+      "sql",
+      "json",
+      "javascript",
+      "bash",
+    ]).value;
   },
 });
 
@@ -255,8 +261,10 @@ function truncate(str, max) {
 function toolResultSummary(msg) {
   const payload = msg?.parsedResult;
   if (!payload || typeof payload !== "object") return "";
-  if (typeof payload.ui_summary === "string" && payload.ui_summary.trim()) return payload.ui_summary;
-  if (typeof payload.message === "string" && payload.message.trim()) return payload.message;
+  if (typeof payload.ui_summary === "string" && payload.ui_summary.trim())
+    return payload.ui_summary;
+  if (typeof payload.message === "string" && payload.message.trim())
+    return payload.message;
   return "";
 }
 
@@ -268,7 +276,6 @@ function editContextLabel(editContext) {
     "选区"
   );
 }
-
 </script>
 
 <style scoped>
@@ -512,5 +519,4 @@ function editContextLabel(editContext) {
   background: rgba(255, 152, 0, 0.08);
   border: 1px solid rgba(255, 152, 0, 0.3);
 }
-
 </style>

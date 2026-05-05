@@ -37,7 +37,10 @@ function flushPendingMessages(socket) {
 
 function getReconnectDelay() {
   const jitter = Math.random() * 500;
-  const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts), RECONNECT_MAX_MS);
+  const delay = Math.min(
+    RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts),
+    RECONNECT_MAX_MS,
+  );
   return delay + jitter;
 }
 
@@ -59,7 +62,9 @@ export function useWebSocket() {
   }
 
   function shouldShowRunEvent(eventRunId) {
-    return !store.selectedRunId || !eventRunId || eventRunId === store.selectedRunId;
+    return (
+      !store.selectedRunId || !eventRunId || eventRunId === store.selectedRunId
+    );
   }
 
   function appendRunPreview(event) {
@@ -83,9 +88,15 @@ export function useWebSocket() {
         const raw = event.data?.result || "";
         try {
           const parsed = JSON.parse(raw);
-          return clipPreviewText(parsed.ui_summary || parsed.message || `${event.data?.name || "tool_result"}: ${raw}`);
+          return clipPreviewText(
+            parsed.ui_summary ||
+              parsed.message ||
+              `${event.data?.name || "tool_result"}: ${raw}`,
+          );
         } catch {
-          return clipPreviewText(`${event.data?.name || "tool_result"}: ${raw}`);
+          return clipPreviewText(
+            `${event.data?.name || "tool_result"}: ${raw}`,
+          );
         }
       }
       case "run_completed":
@@ -102,7 +113,9 @@ export function useWebSocket() {
   }
 
   function clipPreviewText(input, max = 120) {
-    const text = String(input || "").trim().replace(/\s+/g, " ");
+    const text = String(input || "")
+      .trim()
+      .replace(/\s+/g, " ");
     if (!text) return "";
     return text.length > max ? `${text.slice(0, max)}...` : text;
   }
@@ -118,7 +131,9 @@ export function useWebSocket() {
 
   async function loadRunReport(runId) {
     if (!runId) return;
-    const res = await fetch(`/api/runs/${runId}/report`, { headers: authHeaders() });
+    const res = await fetch(`/api/runs/${runId}/report`, {
+      headers: authHeaders(),
+    });
     if (!res.ok) {
       if (res.status !== 404) throw new Error(await res.text());
       return;
@@ -167,7 +182,9 @@ export function useWebSocket() {
   }
 
   function deriveSessionTitle(input) {
-    const value = String(input || "").trim().replace(/\s+/g, " ");
+    const value = String(input || "")
+      .trim()
+      .replace(/\s+/g, " ");
     if (!value) return "未命名分析";
     return value.length > 28 ? `${value.slice(0, 28)}...` : value;
   }
@@ -198,7 +215,9 @@ export function useWebSocket() {
     }
     if (
       !data.runtimeState?.report_html &&
-      (latestRun?.runKind === "report" || latestRun?.reportFileId || latestRun?.report)
+      (latestRun?.runKind === "report" ||
+        latestRun?.reportFileId ||
+        latestRun?.report)
     ) {
       await tryLoadRunReport(latestRun.id);
     }
@@ -229,11 +248,18 @@ export function useWebSocket() {
   }
 
   async function createSession({ refreshSessions = true } = {}) {
-    const res = await fetch("/api/sessions", { method: "POST", headers: authHeaders() });
+    const res = await fetch("/api/sessions", {
+      method: "POST",
+      headers: authHeaders(),
+    });
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
     if (data.session) store.upsertSession(data.session);
-    const latestRun = applySessionState(data.session?.id || "", data.runs || [], data.runtimeState);
+    const latestRun = applySessionState(
+      data.session?.id || "",
+      data.runs || [],
+      data.runtimeState,
+    );
     if (refreshSessions) await loadSessions();
     return { ...data.session, latestRun };
   }
@@ -264,15 +290,23 @@ export function useWebSocket() {
   }
 
   async function openSession(sessionId) {
-    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { headers: authHeaders() });
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      headers: authHeaders(),
+    });
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
     disconnect();
-    const latestRun = applySessionState(data.session?.id || "", data.runs || [], data.runtimeState);
+    const latestRun = applySessionState(
+      data.session?.id || "",
+      data.runs || [],
+      data.runtimeState,
+    );
     try {
       if (
         !data.runtimeState?.report_html &&
-        (latestRun?.runKind === "report" || latestRun?.reportFileId || latestRun?.report)
+        (latestRun?.runKind === "report" ||
+          latestRun?.reportFileId ||
+          latestRun?.report)
       ) {
         await tryLoadRunReport(latestRun.id);
       }
@@ -287,7 +321,9 @@ export function useWebSocket() {
     store.updateReport("");
 
     try {
-      const res = await fetch(`/api/runs/${encodeURIComponent(runId)}`, { headers: authHeaders() });
+      const res = await fetch(`/api/runs/${encodeURIComponent(runId)}`, {
+        headers: authHeaders(),
+      });
       if (res.ok) {
         const data = await res.json();
         if (data.run) store.upsertRun(data.run);
@@ -296,29 +332,72 @@ export function useWebSocket() {
             let parsedArgs = msg.content;
             let parsedResult = null;
             if (msg.type === "tool_call") {
-              try { parsedArgs = JSON.parse(msg.content); } catch { parsedArgs = msg.content; }
+              try {
+                parsedArgs = JSON.parse(msg.content);
+              } catch {
+                parsedArgs = msg.content;
+              }
             } else if (msg.type === "user_request_input") {
-              try { parsedArgs = JSON.parse(msg.content); } catch { parsedArgs = {}; }
+              try {
+                parsedArgs = JSON.parse(msg.content);
+              } catch {
+                parsedArgs = {};
+              }
             }
             if (msg.type === "tool_result") {
-              try { parsedResult = JSON.parse(msg.content); } catch { parsedResult = null; }
+              try {
+                parsedResult = JSON.parse(msg.content);
+              } catch {
+                parsedResult = null;
+              }
             }
             return {
               id: msg.id,
               type: msg.type,
-              content: (msg.type !== "tool_call" && msg.type !== "tool_result" && msg.type !== "user_request_input")
-                ? msg.content : undefined,
+              content:
+                msg.type !== "tool_call" &&
+                msg.type !== "tool_result" &&
+                msg.type !== "user_request_input"
+                  ? msg.content
+                  : undefined,
               name: msg.name,
               arguments: msg.type === "tool_call" ? parsedArgs : undefined,
-              question: msg.type === "user_request_input" ? parsedArgs?.question : undefined,
-              reason: msg.type === "user_request_input" ? parsedArgs?.reason : undefined,
-              scope: msg.type === "user_request_input" ? parsedArgs?.scope : undefined,
-              context_ref: msg.type === "user_request_input" ? parsedArgs?.context_ref : undefined,
-              input_hint: msg.type === "user_request_input" ? parsedArgs?.input_hint : undefined,
-              required: msg.type === "user_request_input" ? parsedArgs?.required || false : undefined,
-              selection_mode: msg.type === "user_request_input" ? parsedArgs?.selection_mode || "single" : undefined,
-              allow_custom: msg.type === "user_request_input" ? parsedArgs?.allow_custom !== false : undefined,
-              options: msg.type === "user_request_input" ? parsedArgs?.options || [] : undefined,
+              question:
+                msg.type === "user_request_input"
+                  ? parsedArgs?.question
+                  : undefined,
+              reason:
+                msg.type === "user_request_input"
+                  ? parsedArgs?.reason
+                  : undefined,
+              scope:
+                msg.type === "user_request_input"
+                  ? parsedArgs?.scope
+                  : undefined,
+              context_ref:
+                msg.type === "user_request_input"
+                  ? parsedArgs?.context_ref
+                  : undefined,
+              input_hint:
+                msg.type === "user_request_input"
+                  ? parsedArgs?.input_hint
+                  : undefined,
+              required:
+                msg.type === "user_request_input"
+                  ? parsedArgs?.required || false
+                  : undefined,
+              selection_mode:
+                msg.type === "user_request_input"
+                  ? parsedArgs?.selection_mode || "single"
+                  : undefined,
+              allow_custom:
+                msg.type === "user_request_input"
+                  ? parsedArgs?.allow_custom !== false
+                  : undefined,
+              options:
+                msg.type === "user_request_input"
+                  ? parsedArgs?.options || []
+                  : undefined,
               result: msg.type === "tool_result" ? msg.content : undefined,
               parsedResult,
               duration: msg.duration,
@@ -383,7 +462,10 @@ export function useWebSocket() {
       }
 
       socket.onopen = () => {
-        if (wsInstance !== socket) { resolveOnce(socket); return; }
+        if (wsInstance !== socket) {
+          resolveOnce(socket);
+          return;
+        }
         connected.value = true;
         reconnectAttempts = 0;
         store.setConnectionState("connected");
@@ -394,12 +476,19 @@ export function useWebSocket() {
       socket.onmessage = (event) => {
         if (wsInstance !== socket) return;
         let data;
-        try { data = JSON.parse(event.data); } catch { return; }
+        try {
+          data = JSON.parse(event.data);
+        } catch {
+          return;
+        }
         handleEvent(data, store);
       };
 
       socket.onclose = () => {
-        if (wsInstance !== socket) { rejectOnce(new Error("连接已被替换")); return; }
+        if (wsInstance !== socket) {
+          rejectOnce(new Error("连接已被替换"));
+          return;
+        }
         wsInstance = null;
         connected.value = false;
         rejectOnce(new Error("WebSocket 连接已关闭"));
@@ -409,16 +498,22 @@ export function useWebSocket() {
         }
         if (reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
           store.setConnectionState("disconnected");
-          console.error(`WebSocket: 已达最大重连次数 (${RECONNECT_MAX_ATTEMPTS})，停止重连`);
+          console.error(
+            `WebSocket: 已达最大重连次数 (${RECONNECT_MAX_ATTEMPTS})，停止重连`,
+          );
           return;
         }
         store.setConnectionState("reconnecting");
         const delay = getReconnectDelay();
         reconnectAttempts++;
-        console.log(`WebSocket 断开，${Math.round(delay)}ms 后重连 (第 ${reconnectAttempts} 次)...`);
+        console.log(
+          `WebSocket 断开，${Math.round(delay)}ms 后重连 (第 ${reconnectAttempts} 次)...`,
+        );
         clearReconnectTimer();
         reconnectTimer = setTimeout(() => {
-          void connect({ resetReconnectAttempts: false }).catch((err) => console.error("WebSocket 重连失败:", err));
+          void connect({ resetReconnectAttempts: false }).catch((err) =>
+            console.error("WebSocket 重连失败:", err),
+          );
         }, delay);
       };
 
@@ -433,10 +528,28 @@ export function useWebSocket() {
   }
 
   function handleEvent(event, store) {
-    if (event.sessionId && store.sessionId && event.sessionId !== store.sessionId) return;
-    const relevantRunIds = [store.activeRunId, store.selectedRunId].filter(Boolean);
-    const selectedRunScopedTypes = new Set(["assistant_status", "tool_call", "tool_result", "user_request_input"]);
-    if (event.runId && relevantRunIds.length > 0 && !relevantRunIds.includes(event.runId) && selectedRunScopedTypes.has(event.type)) return;
+    if (
+      event.sessionId &&
+      store.sessionId &&
+      event.sessionId !== store.sessionId
+    )
+      return;
+    const relevantRunIds = [store.activeRunId, store.selectedRunId].filter(
+      Boolean,
+    );
+    const selectedRunScopedTypes = new Set([
+      "assistant_status",
+      "tool_call",
+      "tool_result",
+      "user_request_input",
+    ]);
+    if (
+      event.runId &&
+      relevantRunIds.length > 0 &&
+      !relevantRunIds.includes(event.runId) &&
+      selectedRunScopedTypes.has(event.type)
+    )
+      return;
 
     switch (event.type) {
       case "session_ready": {
@@ -445,7 +558,9 @@ export function useWebSocket() {
         if (event.data.sessionId) {
           dataSourceStore.fetchSessionSources(event.data.sessionId);
         }
-        const existingSession = store.sessions.find((s) => s.id === event.data.sessionId);
+        const existingSession = store.sessions.find(
+          (s) => s.id === event.data.sessionId,
+        );
         store.upsertSession({
           id: event.data.sessionId,
           title: event.data.title || existingSession?.title || "未命名分析",
@@ -462,29 +577,50 @@ export function useWebSocket() {
       case "run_started":
         store.startRun(event.data.runId);
         store.upsertRun({
-          id: event.data.runId, sessionId: store.sessionId, status: "running",
-          inputMessage: store.messages.filter((msg) => msg.type === "user").at(-1)?.content || "",
+          id: event.data.runId,
+          sessionId: store.sessionId,
+          status: "running",
+          inputMessage:
+            store.messages.filter((msg) => msg.type === "user").at(-1)
+              ?.content || "",
           createdAt: new Date().toISOString(),
         });
         break;
       case "assistant_status":
         appendRunPreview(event);
         if (!shouldShowRunEvent(event.runId)) break;
-        store.addMessage({ type: "assistant_status", content: event.data.content });
+        store.addMessage({
+          type: "assistant_status",
+          content: event.data.content,
+        });
         break;
       case "tool_call":
         appendRunPreview(event);
         if (!shouldShowRunEvent(event.runId)) break;
-        store.addMessage({ type: "tool_call", name: event.data.name, arguments: event.data.arguments, id: event.data.id });
+        store.addMessage({
+          type: "tool_call",
+          name: event.data.name,
+          arguments: event.data.arguments,
+          id: event.data.id,
+        });
         break;
       case "tool_result": {
         appendRunPreview(event);
         if (!shouldShowRunEvent(event.runId)) break;
         let parsedResult = null;
-        try { parsedResult = JSON.parse(event.data.result); } catch { parsedResult = null; }
+        try {
+          parsedResult = JSON.parse(event.data.result);
+        } catch {
+          parsedResult = null;
+        }
         store.addMessage({
-          type: "tool_result", name: event.data.name, result: event.data.result,
-          parsedResult, duration: event.data.duration, success: event.data.success, id: event.data.id,
+          type: "tool_result",
+          name: event.data.name,
+          result: event.data.result,
+          parsedResult,
+          duration: event.data.duration,
+          success: event.data.success,
+          id: event.data.id,
         });
         break;
       }
@@ -499,17 +635,33 @@ export function useWebSocket() {
           store.updateReport(event.data.html);
         }
         if (event.data.title && store.sessionId) {
-          store.upsertSession({ id: store.sessionId, title: event.data.title, lastSeenAt: new Date().toISOString() });
+          store.upsertSession({
+            id: store.sessionId,
+            title: event.data.title,
+            lastSeenAt: new Date().toISOString(),
+          });
         }
         if (event.data.reportFileId && event.runId) {
-          if (!store.patchRun(event.runId, { reportFileId: event.data.reportFileId })) {
-            store.upsertRun({ id: event.runId, reportFileId: event.data.reportFileId });
+          if (
+            !store.patchRun(event.runId, {
+              reportFileId: event.data.reportFileId,
+            })
+          ) {
+            store.upsertRun({
+              id: event.runId,
+              reportFileId: event.data.reportFileId,
+            });
           }
         }
         break;
       case "run_completed": {
-        const patch = { status: "completed", summary: event.data.summary, updatedAt: new Date().toISOString() };
-        if (!store.patchRun(event.runId, patch)) store.upsertRun({ id: event.runId, ...patch });
+        const patch = {
+          status: "completed",
+          summary: event.data.summary,
+          updatedAt: new Date().toISOString(),
+        };
+        if (!store.patchRun(event.runId, patch))
+          store.upsertRun({ id: event.runId, ...patch });
         appendRunPreview(event);
         if (shouldShowRunEvent(event.runId) && event.data.summary) {
           store.addMessage({ type: "complete", content: event.data.summary });
@@ -518,19 +670,31 @@ export function useWebSocket() {
         break;
       }
       case "run_cancelled": {
-        const patch = { status: "cancelled", updatedAt: new Date().toISOString() };
-        if (!store.patchRun(event.runId, patch)) store.upsertRun({ id: event.runId, ...patch });
+        const patch = {
+          status: "cancelled",
+          updatedAt: new Date().toISOString(),
+        };
+        if (!store.patchRun(event.runId, patch))
+          store.upsertRun({ id: event.runId, ...patch });
         appendRunPreview(event);
         if (shouldShowRunEvent(event.runId)) {
-          store.addMessage({ type: "cancelled", content: event.data.message || "任务已取消" });
+          store.addMessage({
+            type: "cancelled",
+            content: event.data.message || "任务已取消",
+          });
         }
         store.finishRun(event.runId);
         break;
       }
       case "error": {
         if (event.runId) {
-          const patch = { status: "failed", errorMessage: event.data.message, updatedAt: new Date().toISOString() };
-          if (!store.patchRun(event.runId, patch)) store.upsertRun({ id: event.runId, ...patch });
+          const patch = {
+            status: "failed",
+            errorMessage: event.data.message,
+            updatedAt: new Date().toISOString(),
+          };
+          if (!store.patchRun(event.runId, patch))
+            store.upsertRun({ id: event.runId, ...patch });
         }
         appendRunPreview(event);
         if (shouldShowRunEvent(event.runId)) {
@@ -541,7 +705,11 @@ export function useWebSocket() {
       }
       case "user_request_input":
         store.setRunning(false);
-        if (event.runId) store.patchRun(event.runId, { status: "waiting_user_input", updatedAt: new Date().toISOString() });
+        if (event.runId)
+          store.patchRun(event.runId, {
+            status: "waiting_user_input",
+            updatedAt: new Date().toISOString(),
+          });
         appendRunPreview(event);
         if (!shouldShowRunEvent(event.runId)) break;
         store.addMessage({
@@ -567,7 +735,8 @@ export function useWebSocket() {
         store.setReportEditState(event.data || null);
         break;
       case "state_child_runs_updated":
-        if (event.data?.childRuns) store.setRunChildren(event.data.parentRunId, event.data.childRuns);
+        if (event.data?.childRuns)
+          store.setRunChildren(event.data.parentRunId, event.data.childRuns);
         break;
     }
   }
@@ -639,7 +808,8 @@ export function useWebSocket() {
   async function ensureSocketOpen() {
     if (wsInstance?.readyState === WebSocket.OPEN) return wsInstance;
     await connect();
-    if (wsInstance?.readyState !== WebSocket.OPEN) throw new Error("连接尚未建立，请稍后重试。");
+    if (wsInstance?.readyState !== WebSocket.OPEN)
+      throw new Error("连接尚未建立，请稍后重试。");
     return wsInstance;
   }
 
@@ -651,7 +821,8 @@ export function useWebSocket() {
       await ensureSession();
       await ensureSocketOpen();
     } catch (err) {
-      const message = err instanceof Error ? err.message : "连接尚未建立，请稍后重试。";
+      const message =
+        err instanceof Error ? err.message : "连接尚未建立，请稍后重试。";
       store.addMessage({ type: "error", content: message });
       return false;
     }
@@ -661,8 +832,10 @@ export function useWebSocket() {
     const isAnsweringUserRequest = waitingRun?.status === "waiting_user_input";
 
     const payload = { content: String(options.payloadContent || value).trim() };
-    if (!isAnsweringUserRequest && options.editContext) payload.editContext = options.editContext;
-    if (!isAnsweringUserRequest && options.turnContext) payload.turnContext = options.turnContext;
+    if (!isAnsweringUserRequest && options.editContext)
+      payload.editContext = options.editContext;
+    if (!isAnsweringUserRequest && options.turnContext)
+      payload.turnContext = options.turnContext;
     if (!send("user_message", payload)) {
       store.addMessage({ type: "error", content: "消息发送失败，请重试。" });
       return false;
@@ -670,10 +843,17 @@ export function useWebSocket() {
 
     store.setRunning(true);
     if (isAnsweringUserRequest) {
-      store.patchRun(waitingRunId, { status: "running", updatedAt: new Date().toISOString() });
+      store.patchRun(waitingRunId, {
+        status: "running",
+        updatedAt: new Date().toISOString(),
+      });
     }
     if (!isAnsweringUserRequest && store.sessionId) {
-      store.upsertSession({ id: store.sessionId, title: deriveSessionTitle(value), lastSeenAt: new Date().toISOString() });
+      store.upsertSession({
+        id: store.sessionId,
+        title: deriveSessionTitle(value),
+        lastSeenAt: new Date().toISOString(),
+      });
     }
     store.addMessage({
       type: "user",
@@ -715,7 +895,8 @@ export function useWebSocket() {
   async function deleteSession(sessionId) {
     if (!sessionId) return;
     const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-      method: "DELETE", headers: authHeaders(),
+      method: "DELETE",
+      headers: authHeaders(),
     });
     if (!res.ok) throw new Error(await res.text());
     await loadSessions();
@@ -723,8 +904,22 @@ export function useWebSocket() {
   }
 
   return {
-    connected, bootstrap, initializeApp, connect, login, switchWorkspace,
-    loadSessions, openSession, openRun, disconnect, sendMessage, stop,
-    resetSession, createNewSession, ensureSession, renameSession, deleteSession,
+    connected,
+    bootstrap,
+    initializeApp,
+    connect,
+    login,
+    switchWorkspace,
+    loadSessions,
+    openSession,
+    openRun,
+    disconnect,
+    sendMessage,
+    stop,
+    resetSession,
+    createNewSession,
+    ensureSession,
+    renameSession,
+    deleteSession,
   };
 }

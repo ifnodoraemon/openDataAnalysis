@@ -13,7 +13,11 @@
       </div>
     </div>
 
-    <div v-if="hasOptions" class="ask-options" :class="{ 'multi-select': isMultiple }">
+    <div
+      v-if="hasOptions"
+      class="ask-options"
+      :class="{ 'multi-select': isMultiple }"
+    >
       <button
         v-for="option in normalizedOptions"
         :key="option.id"
@@ -93,7 +97,9 @@ const label = computed(() => {
   if (!hasOptions.value) return "等待您描述";
   return isMultiple.value ? "请选择一个或多个选项" : "请选择一个选项";
 });
-const customLabel = computed(() => (hasOptions.value ? "自定义或补充说明" : "您的回复"));
+const customLabel = computed(() =>
+  hasOptions.value ? "自定义或补充说明" : "您的回复",
+);
 const customPlaceholder = computed(() => {
   if (props.msg.input_hint) return props.msg.input_hint;
   return hasOptions.value ? "可以补充约束或说明..." : "请直接描述你的回复...";
@@ -102,13 +108,19 @@ const metaRows = computed(() => {
   const rows = [];
   if (props.msg.reason) rows.push(`需要确认：${props.msg.reason}`);
   if (props.msg.context_ref) rows.push(`上下文：${props.msg.context_ref}`);
-  if (props.msg.input_hint && hasOptions.value) rows.push(`输入提示：${props.msg.input_hint}`);
+  if (props.msg.input_hint && hasOptions.value)
+    rows.push(`输入提示：${props.msg.input_hint}`);
   return rows;
 });
-const canSubmit = computed(() => !submitted.value && (selectedIds.value.length > 0 || customValue.value.length > 0));
+const canSubmit = computed(
+  () =>
+    !submitted.value &&
+    (selectedIds.value.length > 0 || customValue.value.length > 0),
+);
 const submitHint = computed(() => {
   if (canSubmit.value) return "";
-  if (hasOptions.value && allowCustom.value) return "选择一个选项，或填写自定义说明。";
+  if (hasOptions.value && allowCustom.value)
+    return "选择一个选项，或填写自定义说明。";
   if (hasOptions.value) return "请选择一个选项。";
   if (!allowCustom.value) return "请求没有可用的回复方式。";
   return "请填写回复内容。";
@@ -125,7 +137,9 @@ function toggleOption(id) {
 }
 
 function selectedOptions() {
-  const byID = new Map(normalizedOptions.value.map((option) => [option.id, option]));
+  const byID = new Map(
+    normalizedOptions.value.map((option) => [option.id, option]),
+  );
   return selectedIds.value
     .map((id) => byID.get(id))
     .filter(Boolean)
@@ -151,7 +165,12 @@ async function submit() {
   const options = selectedOptions();
   const custom = customValue.value;
   const payload = {
-    response_type: options.length > 0 && custom ? "selection_with_custom" : options.length > 0 ? "selection" : "custom",
+    response_type:
+      options.length > 0 && custom
+        ? "selection_with_custom"
+        : options.length > 0
+          ? "selection"
+          : "custom",
     question: props.msg.question || "",
     selected_option_ids: options.map((option) => option.id),
     selected_options: options,
