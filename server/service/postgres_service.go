@@ -34,10 +34,13 @@ type PGImportResult struct {
 	ColCount          int
 	RowsImported      int
 	RowsSkipped       int
+	ImportRowLimit    int
+	ImportTruncated   bool
 	ImportDurationMs  int
 	ProfileDurationMs int
 	SnapshotSizeBytes int64
 	ProfileMode       domain.ProfileMode
+	DataSizeTier      string
 	ProfErr           error
 }
 
@@ -179,15 +182,21 @@ func (s *SourceService) TestPostgresConnection(ctx context.Context, sourceID, au
 	}
 }
 
-func (s *SourceService) ImportPostgresSnapshot(ctx context.Context, sourceID, sessionID, schemaName, objectName string, sessIngester *data.Ingester, authSecret string) (*PGImportResult, error) {
+func (s *SourceService) ImportPostgresSnapshot(ctx context.Context, sourceID, sessionID, schemaName, objectName string, sessIngester *data.Ingester, authSecret string, importRowLimit int) (*PGImportResult, error) {
 	conn, err := s.findDBConnection(ctx, sourceID)
 	if err != nil {
 		return nil, err
+	}
+	if importRowLimit < 0 {
+		importRowLimit = 0
 	}
 
 	resolvedSchema := schemaName
 	if resolvedSchema == "" {
 		resolvedSchema = conn.DefaultSchema
+	}
+	if strings.TrimSpace(resolvedSchema) == "" {
+		return nil, fmt.Errorf("schema_name or connection default_schema is required")
 	}
 
 	allowlist, allowErr := ParseAllowlist(conn.AllowlistJSON)
@@ -239,7 +248,7 @@ func (s *SourceService) ImportPostgresSnapshot(ctx context.Context, sourceID, se
 
 	importStart := time.Now()
 
-	rowCount, colCount, rowsSkipped, err := s.streamImportToSQLite(ctx, pgDB, schema, objectName, sessIngester, tableName)
+	rowCount, colCount, rowsSkipped, importTruncated, err := s.streamImportToSQLite(ctx, pgDB, schema, objectName, sessIngester, tableName, importRowLimit)
 	importDuration := time.Since(importStart)
 
 	if err != nil {
@@ -248,15 +257,7 @@ func (s *SourceService) ImportPostgresSnapshot(ctx context.Context, sourceID, se
 		return nil, fmt.Errorf("import failed: %w", err)
 	}
 
-	// Determine profile mode from row count
-	var rowCountForMode int
-	rowCountForMode = rowCount
-	var profileMode domain.ProfileMode = domain.ProfileModeSampled
-	if rowCountForMode < 10000 {
-		profileMode = domain.ProfileModeExact
-	} else if rowCountForMode < 100000 {
-		profileMode = domain.ProfileModeMixed
-	}
+	profileMode := ProfileModeForRows(rowCount)
 
 	var schemaInfo *data.SchemaInfo
 	var schemaErr error
@@ -290,7 +291,7 @@ func (s *SourceService) ImportPostgresSnapshot(ctx context.Context, sourceID, se
 		}
 	}
 
-	facts := s.BuildProfileFacts(schemaInfo, semanticProfile, nil, string(profileMode), snapshotSizeBytes)
+	facts := s.BuildProfileFacts(schemaInfo, semanticProfile, nil, string(profileMode), snapshotSizeBytes, importRowLimit, importTruncated)
 	if rowsSkipped > 0 {
 		facts.Warnings = append(facts.Warnings, fmt.Sprintf("%d upstream rows were skipped during import because they could not be scanned", rowsSkipped))
 	}
@@ -300,7 +301,7 @@ func (s *SourceService) ImportPostgresSnapshot(ctx context.Context, sourceID, se
 		log.Printf("pg import: failed to update snapshot status to ready snapshot_id=%s err=%v", preSnapshot.ID, err)
 	}
 	if err := s.SnapshotRepo.UpdateSnapshotCompletion(ctx, preSnapshot.ID, rowCount, colCount, schemaSig,
-		rowCount, rowsSkipped, int(importDuration.Milliseconds()), int(profileDuration.Milliseconds()), snapshotSizeBytes, profileMode); err != nil {
+		rowCount, rowsSkipped, importRowLimit, importTruncated, int(importDuration.Milliseconds()), int(profileDuration.Milliseconds()), snapshotSizeBytes, profileMode); err != nil {
 		log.Printf("pg import: failed to update snapshot completion facts snapshot_id=%s err=%v", preSnapshot.ID, err)
 	}
 
@@ -333,47 +334,69 @@ func (s *SourceService) ImportPostgresSnapshot(ctx context.Context, sourceID, se
 		ColCount:          colCount,
 		RowsImported:      rowCount,
 		RowsSkipped:       rowsSkipped,
+		ImportRowLimit:    importRowLimit,
+		ImportTruncated:   importTruncated,
 		ImportDurationMs:  int(importDuration.Milliseconds()),
 		ProfileDurationMs: int(profileDuration.Milliseconds()),
 		SnapshotSizeBytes: snapshotSizeBytes,
 		ProfileMode:       profileMode,
+		DataSizeTier:      DataSizeTierForRows(rowCount),
 		ProfErr:           profErr,
 	}, nil
 }
 
 var pgIdentifierPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
-func sanitizePGIdentifier(name string) string {
+func quotePGIdentifier(name string) (string, error) {
 	clean := strings.TrimSpace(name)
-	if clean == "" || !pgIdentifierPattern.MatchString(clean) {
-		return "_invalid"
+	if clean == "" {
+		return "", fmt.Errorf("empty PostgreSQL identifier")
 	}
-	return clean
+	if strings.ContainsRune(clean, 0) {
+		return "", fmt.Errorf("PostgreSQL identifier contains NUL byte")
+	}
+	return `"` + strings.ReplaceAll(clean, `"`, `""`) + `"`, nil
 }
 
-func (s *SourceService) streamImportToSQLite(ctx context.Context, pgDB *sql.DB, schema, object string, ingester *data.Ingester, tableName string) (int, int, int, error) {
-	schema = sanitizePGIdentifier(schema)
-	object = sanitizePGIdentifier(object)
+func (s *SourceService) streamImportToSQLite(ctx context.Context, pgDB *sql.DB, schema, object string, ingester *data.Ingester, tableName string, importRowLimit int) (int, int, int, bool, error) {
 	if err := data.ValidateSQLIdent(tableName); err != nil {
-		return 0, 0, 0, fmt.Errorf("invalid SQLite table name after sanitization: %w", err)
+		return 0, 0, 0, false, fmt.Errorf("invalid SQLite table name after sanitization: %w", err)
 	}
-	qualifiedName := fmt.Sprintf("\"%s\".\"%s\"", schema, object)
+	quotedSchema, err := quotePGIdentifier(schema)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	quotedObject, err := quotePGIdentifier(object)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	qualifiedName := fmt.Sprintf("%s.%s", quotedSchema, quotedObject)
 
 	query := fmt.Sprintf("SELECT * FROM %s", qualifiedName)
+	if importRowLimit > 0 {
+		query = fmt.Sprintf("%s LIMIT %d", query, importRowLimit+1)
+	}
 	rows, err := pgDB.QueryContext(ctx, query)
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("failed to query upstream data: %w", err)
+		return 0, 0, 0, false, fmt.Errorf("failed to query upstream data: %w", err)
 	}
 	defer rows.Close()
 
 	colTypes, err := rows.ColumnTypes()
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("failed to read column types: %w", err)
+		return 0, 0, 0, false, fmt.Errorf("failed to read column types: %w", err)
 	}
 	colCount := len(colTypes)
 	colNames := make([]string, colCount)
+	seenCols := make(map[string]int)
 	for i, ct := range colTypes {
-		colNames[i] = sanitizePGColumnName(ct.Name())
+		base := sanitizePGColumnName(ct.Name())
+		finalName := base
+		if count := seenCols[base]; count > 0 {
+			finalName = fmt.Sprintf("%s_%d", base, count)
+		}
+		seenCols[base]++
+		colNames[i] = finalName
 	}
 
 	sqliteColTypes := make([]data.ColumnType, colCount)
@@ -390,13 +413,14 @@ func (s *SourceService) streamImportToSQLite(ctx context.Context, pgDB *sql.DB, 
 	}
 
 	if err := ingester.CreateTypedTable(tableName, colNames, sqliteColTypes); err != nil {
-		return 0, 0, 0, fmt.Errorf("failed to create SQLite table: %w", err)
+		return 0, 0, 0, false, fmt.Errorf("failed to create SQLite table: %w", err)
 	}
 
 	batchSize := 5000
 	batch := make([][]string, 0, batchSize)
 	rowCount := 0
 	rowsSkipped := 0
+	importTruncated := false
 
 	vals := make([]interface{}, colCount)
 	valPtrs := make([]interface{}, colCount)
@@ -405,6 +429,10 @@ func (s *SourceService) streamImportToSQLite(ctx context.Context, pgDB *sql.DB, 
 	}
 
 	for rows.Next() {
+		if importRowLimit > 0 && rowCount+len(batch) >= importRowLimit {
+			importTruncated = true
+			break
+		}
 		if err := rows.Scan(valPtrs...); err != nil {
 			log.Printf("pg import: scan error on row %d table=%s err=%v", rowCount, tableName, err)
 			rowsSkipped++
@@ -421,7 +449,7 @@ func (s *SourceService) streamImportToSQLite(ctx context.Context, pgDB *sql.DB, 
 		batch = append(batch, row)
 		if len(batch) >= batchSize {
 			if err := ingester.InsertBatchTyped(tableName, colNames, sqliteColTypes, batch); err != nil {
-				return rowCount, colCount, rowsSkipped, err
+				return rowCount, colCount, rowsSkipped, importTruncated, err
 			}
 			rowCount += len(batch)
 			batch = batch[:0]
@@ -429,18 +457,18 @@ func (s *SourceService) streamImportToSQLite(ctx context.Context, pgDB *sql.DB, 
 	}
 	if len(batch) > 0 {
 		if err := ingester.InsertBatchTyped(tableName, colNames, sqliteColTypes, batch); err != nil {
-			return rowCount, colCount, rowsSkipped, err
+			return rowCount, colCount, rowsSkipped, importTruncated, err
 		}
 		rowCount += len(batch)
 	}
 	if err := rows.Err(); err != nil {
-		return rowCount, colCount, rowsSkipped, fmt.Errorf("failed while reading upstream data: %w", err)
+		return rowCount, colCount, rowsSkipped, importTruncated, fmt.Errorf("failed while reading upstream data: %w", err)
 	}
 	if rowCount == 0 && rowsSkipped > 0 {
-		return rowCount, colCount, rowsSkipped, fmt.Errorf("all %d upstream rows failed to import", rowsSkipped)
+		return rowCount, colCount, rowsSkipped, importTruncated, fmt.Errorf("all %d upstream rows failed to import", rowsSkipped)
 	}
 
-	return rowCount, colCount, rowsSkipped, nil
+	return rowCount, colCount, rowsSkipped, importTruncated, nil
 }
 
 func (s *SourceService) findDBConnection(ctx context.Context, sourceID string) (*domain.DatabaseConnection, error) {

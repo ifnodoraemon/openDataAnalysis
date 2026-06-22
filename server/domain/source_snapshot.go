@@ -34,6 +34,8 @@ type SourceSnapshot struct {
 	ImportedAt        time.Time
 	RowsImported      int
 	RowsSkipped       int
+	ImportRowLimit    int
+	ImportTruncated   bool
 	ImportDurationMs  int
 	ProfileDurationMs int
 	SnapshotSizeBytes int64

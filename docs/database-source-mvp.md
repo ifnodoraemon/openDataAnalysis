@@ -1,420 +1,124 @@
-# 数据库连接与语义确认 MVP 设计
+# 数据库数据源
 
-本文档定义当前仓库的数据库连接 MVP 方案，以及当上传文件或导入表结构语义不清时的 `AI 小样本预分析 + 人工确认` 流程。
+更新日期：2026-06-22
 
-日期：2026-03-13
+本文档记录当前数据库数据源实现和边界。历史 source-first 计划已合并进本文档；过期草案不再保留。
 
-## 1. 目标
+## 当前状态
 
-当前系统已经具备：
+已支持 PostgreSQL workspace data source，并以 snapshot import 方式导入到当前 session 的 SQLite 分析库。
 
-- 工作区、session、run、file 基础模型
-- 上传 CSV / Excel 到对象存储
-- 导入到 session analysis SQLite
-- 基于工具调用的 SQL / Python 分析和报告生成
+当前不支持：
 
-但还缺两块关键能力：
+- live upstream query
+- 写回数据库
+- 任意数据库类型
+- 跨数据库实时 join
+- 自动修改上游 schema
 
-1. 把数据库连接做成一等数据源
-2. 当表名、列名、口径、join 关系不明确时，不让模型直接硬猜
+## 为什么先做 Snapshot Import
 
-本 MVP 的目标是：
+当前分析执行层是 session-scoped SQLite。PostgreSQL 表/视图先导入成固定 snapshot，再由 agent 使用同一套 `data_query_sql`、图表和报告工具分析。
 
-- 支持工作区级只读 PostgreSQL 连接
-- 支持从数据库中选择表/视图导入当前 session analysis SQLite
-- 在上传或导入完成后，自动做一次小样本语义预分析
-- 对低置信度语义和关系进入人工确认，再继续分析
+这样做的原因：
 
-## 2. 为什么先做 snapshot import
+- 分析可复现，报告能追溯到导入时刻。
+- 权限、超时、行数上限和资源消耗更容易控制。
+- 文件上传和数据库导入在 agent 观察面中保持同质。
+- 不把上游数据库暴露为任意 SQL 执行面。
 
-当前架构里，分析执行中心仍然是每个 session 的 SQLite 工作库，见：
+## 领域模型
 
-- [README.md](/home/ifnodoraemon/myagent/data-analysis/README.md#L28)
-- [server/session/types.go](/home/ifnodoraemon/myagent/data-analysis/server/session/types.go#L18)
+| 实体 | 作用 |
+|---|---|
+| `DataSource` | 工作区级数据源；当前包括 `file_upload` 和 `postgres_connection` |
+| `DatabaseConnection` | PostgreSQL 连接配置、allowlist、测试状态和加密凭证 |
+| `SourceSnapshot` | 某个 source 在某个 session 中导入到 SQLite 的固定快照 |
+| `SessionSourceBinding` | session 当前绑定的 source/object -> active snapshot |
+| `SemanticProfile` | schema、候选语义、候选 join、歧义、warning 等结构化事实 |
+| `SemanticConfirmation` | 用户对口径、时间列、单位或 join 的 session/workspace 级确认 |
 
-因此数据库连接第一阶段不直接做 live query，原因如下：
+## PostgreSQL 连接边界
 
-- 更符合当前 session analysis SQLite 的执行架构
-- 更利于报告复现，因为分析基于固定快照
-- 更利于 trace 审计，因为每次分析绑定导入时刻
-- 更容易控制权限、超时、限行数和资源消耗
-- 更适合当前 benchmark 和回归体系
+- 使用 `pgx/v5/stdlib`。
+- 上游连接设置 `default_transaction_read_only=on`。
+- 创建 SQL 数据源时要求 `AUTH_SECRET` 长度至少 32，用于 AES-GCM 加密密码。
+- 只允许导入 allowlist 中的 schema/table/view。
+- catalog API 只返回 allowlist 对象，不扫描整库暴露元数据。
 
-结论：
+## 导入边界
 
-- 第一阶段只做 `snapshot import`
-- `live query` 单独作为后续能力设计
+默认配置：
 
-## 3. 领域模型
-
-当前 `file` 代表的是对象存储中的物理文件，不适合直接承载数据库连接。
-
-参考当前实现：
-
-- [server/domain/file.go](/home/ifnodoraemon/myagent/data-analysis/server/domain/file.go#L1)
-- [server/service/file_service.go](/home/ifnodoraemon/myagent/data-analysis/server/service/file_service.go#L20)
-
-建议新增以下领域实体：
-
-### 3.1 `DataSource`
-
-表示一个工作区可用的数据源。
-
-字段建议：
-
-- `id`
-- `workspace_id`
-- `name`
-- `source_type`
-  - `file_upload`
-  - `database_connection`
-  - `object_storage_file`
-- `status`
-  - `active`
-  - `invalid`
-  - `disabled`
-- `created_by`
-- `created_at`
-- `updated_at`
-
-### 3.2 `DatabaseConnection`
-
-表示数据库连接的可管理配置。
-
-字段建议：
-
-- `source_id`
-- `driver`
-  - `postgres`
-  - `mysql`
-- `host`
-- `port`
-- `database_name`
-- `default_schema`
-- `ssl_mode`
-- `auth_mode`
-  - `password`
-  - `url_secret_ref`
-- `username`
-- `secret_ref`
-- `allowlist_json`
-- `last_tested_at`
-- `last_test_status`
-- `last_error_message`
-
-### 3.3 `SessionSourceBinding`
-
-表示某个 session 当前使用了哪些数据源。
-
-字段建议：
-
-- `session_id`
-- `source_id`
-- `binding_type`
-  - `uploaded`
-  - `imported_snapshot`
-- `snapshot_id`
-- `created_at`
-
-### 3.4 `ImportedSnapshot`
-
-表示从外部数据库导入到当前 session analysis SQLite 的一次快照。
-
-字段建议：
-
-- `id`
-- `session_id`
-- `source_id`
-- `upstream_driver`
-- `upstream_schema`
-- `upstream_table`
-- `import_mode`
-  - `full`
-  - `sample`
-- `row_count`
-- `column_count`
-- `imported_at`
-- `analysis_table_name`
-- `freshness_hint`
-
-### 3.5 `SemanticProfile`
-
-表示数据源导入后的小样本语义预分析结果。
-
-字段建议：
-
-- `id`
-- `session_id`
-- `source_id`
-- `analysis_table_name`
-- `profile_status`
-  - `draft`
-  - `confirmed`
-  - `rejected`
-- `column_roles_json`
-- `metric_candidates_json`
-- `join_candidates_json`
-- `warnings_json`
-- `confidence_score`
-- `created_at`
-- `updated_at`
-
-### 3.6 `SemanticConfirmation`
-
-表示用户对 AI 预分析结果做出的确认或修正。
-
-字段建议：
-
-- `id`
-- `semantic_profile_id`
-- `workspace_id`
-- `session_id`
-- `confirmed_by`
-- `scope`
-  - `session`
-  - `workspace`
-- `overrides_json`
-- `created_at`
-
-## 4. 查询与分析路径
-
-### 4.1 上传文件路径
-
-1. 用户上传 CSV / Excel
-2. 文件进入对象存储并写入 `file`
-3. 用户执行导入
-4. 数据进入 session analysis SQLite
-5. 系统抽取列统计和少量样本
-6. AI 生成 `SemanticProfile`
-7. 若高置信度则自动进入可分析状态
-8. 若低置信度则提示用户确认
-
-### 4.2 数据库导入路径
-
-1. 用户在工作区新增 PostgreSQL 连接
-2. 系统测试连接
-3. 用户选择 allowlist 内的 schema/table
-4. 系统把表/视图导入 session analysis SQLite
-5. 系统抽取列统计和少量样本
-6. AI 生成 `SemanticProfile`
-7. 若存在歧义则等待人工确认
-8. 确认完成后再允许 agent 做多表关联和报告生成
-
-## 5. AI 小样本预分析 + 人工确认
-
-这是必须补的能力，而且应该成为默认路径。
-
-### 5.1 适用场景
-
-- 表名不规范，如 `Sheet1`、`data_final_v3`
-- 列名语义弱，如 `id`、`name`、`value1`、`amt`
-- 多表中有多个可能 join key
-- 指标列和维度列难以仅靠类型判断
-- 时间列存在多个候选
-- 中英文混合列名、缩写、业务黑话较多
-
-### 5.2 为什么不能直接让模型全量猜
-
-- 会把低质量列名误当成可靠语义
-- 会在多表场景下静默选错 join key
-- 会把业务指标口径猜成确定事实
-- 后续报告看起来完整，但证据基础是错的
-
-### 5.3 预分析输入
-
-AI 预分析只使用轻量输入：
-
-- 表名
-- 列名
-- 推断类型
-- 非空率
-- 近似唯一值数量
-- 少量样本值
-- 多表之间的样本重合度
-
-默认不要在这个阶段把整表都喂给模型。
-
-### 5.4 预分析输出
-
-系统应生成以下候选结果：
-
-- 列角色：
-  - 时间列
-  - 主键候选
-  - 外键候选
-  - 维度列
-  - 指标列
-  - 金额列
-  - 比例列
-- 指标口径候选：
-  - GMV
-  - revenue
-  - cost
-  - orders
-  - users
-- join 候选：
-  - 左表字段
-  - 右表字段
-  - 置信度
-  - 风险提示
-- 风险告警：
-  - 多个时间列
-  - 多个金额列
-  - 主键不唯一
-  - join 候选冲突
-
-### 5.5 何时必须人工介入
-
-命中任一条件即进入确认态：
-
-- join 候选超过 1 个且置信度接近
-- 指标口径存在多个合理解释
-- 关键列置信度低于阈值
-- 主键候选不唯一
-- 时间列超过 1 个且影响分析结论
-- AI 检测到样本值与列名语义明显冲突
-
-### 5.6 用户确认项
-
-用户至少可以确认或修正：
-
-- 某列是不是时间列
-- 某列是不是金额/比例/类别
-- 哪两个字段用于 join
-- 指标列的业务名称
-- 该确认只用于本次 session，还是复用到工作区
-
-### 5.7 确认后的行为
-
-- session 级确认立即生效
-- workspace 级确认可在同类数据源下复用
-- agent 后续分析优先使用确认结果
-- 后续追问时，系统不再重复问同一问题
-
-## 6. API 草案
-
-以下是建议的最小 API 面：
-
-### 6.1 数据源管理
-
-- `POST /api/data-sources`
-  - 创建工作区数据源
-- `GET /api/data-sources`
-  - 列出当前工作区数据源
-- `GET /api/data-sources/{sourceID}`
-  - 查看数据源详情
-- `POST /api/data-sources/{sourceID}/test`
-  - 测试数据库连接
-- `GET /api/data-sources/{sourceID}/catalog`
-  - 浏览 allowlist 内 schema/table
-
-### 6.2 数据导入
-
-- `POST /api/data-sources/{sourceID}/import`
-  - 导入指定 schema/table 到当前 session
-- `GET /api/sessions/{sessionID}/sources`
-  - 查看当前 session 已绑定数据源
-- `GET /api/sessions/{sessionID}/snapshots`
-  - 查看当前 session 快照导入记录
-
-### 6.3 语义确认
-
-- `GET /api/sessions/{sessionID}/semantic-profiles`
-  - 查看当前 session 的 AI 预分析结果
-- `POST /api/semantic-profiles/{profileID}/confirm`
-  - 提交用户确认或修正
-- `GET /api/workspaces/{workspaceID}/semantic-overrides`
-  - 查看工作区复用的语义确认
-
-## 7. Agent 上下文建议
-
-当前的 file context 只暴露上传文件列表，参考：
-
-- [server/session/types.go](/home/ifnodoraemon/myagent/data-analysis/server/session/types.go#L93)
-
-后续建议改成 source context，至少包含：
-
-- 可用数据源
-- 来源类型
-- 已导入表
-- 上游来源
-- 导入时间
-- 语义确认状态
-- 可用 join 候选
-- 待确认风险
-
-示例：
-
-```text
-当前会话可用数据源:
-- source_id: src_pg_sales, type: postgres_snapshot, table: sales_orders, imported_at: 2026-03-13T10:20:00Z
-  semantic_status: pending_confirmation
-  warnings:
-  - create_time / pay_time 都可能是时间列
-  - customer_id / member_id 都可能与 users 表关联
+```env
+POSTGRES_IMPORT_ROW_LIMIT=1000000
 ```
 
-## 8. UI 最小交互
+行为：
 
-### 8.1 数据库连接
+- `0` 表示不限制导入行数。
+- 大于 `0` 时，导入查询使用 `LIMIT row_limit + 1` 探测是否被截断。
+- 如果超过上限，snapshot 保存 `import_truncated=true` 和 `import_row_limit`。
+- profile 和 UI 会明确显示截断状态，报告不应把受限快照包装成全量事实。
 
-- 工作区设置页新增“数据库连接”
-- 表单字段：
-  - 名称
-  - host
-  - port
-  - database
-  - schema
-  - username
-  - password
-  - allowlist
-- 操作：
-  - 测试连接
-  - 保存连接
-  - 浏览表
-  - 导入到当前 session
+数据规模分层：
 
-### 8.2 语义确认面板
+| 规模 | 行数 | profile mode |
+|---|---:|---|
+| small | < 10,000 | exact |
+| medium | 10,000 - 99,999 | mixed |
+| large | 100,000 - 999,999 | sampled |
+| xlarge | >= 1,000,000 | sampled |
 
-上传或导入完成后，如果存在歧义，显示确认面板：
+## 语义画像和确认
 
-- 识别到的时间列候选
-- 识别到的主键/外键候选
-- 推荐 join 关系
-- 风险提示
-- 接受建议 / 手动修改 / 暂时跳过
+导入完成后会生成 `SemanticProfile`：
 
-### 8.3 运行中的阻塞提示
+- 确定性 schema 和列统计始终可用。
+- 配置 LLM 时，可补充业务别名和关系候选。
+- sampled/mixed profile 中估计字段会标记为 `estimated`。
+- 多时间列、多个指标口径、单位冲突和 join 冲突会保留为 `ambiguities`。
 
-如果分析被语义问题阻塞，不能只返回一段报错文本，应明确提示：
+用户确认通过 `SemanticConfirmation` 保存：
 
-- 当前缺少什么确认
-- 为什么不确认就不能继续
-- 用户应操作哪个字段或关系
+- `session` 范围只影响当前会话。
+- `workspace` 范围可在 schema signature 匹配时复用。
+- session override 后应用，覆盖 workspace override。
 
-## 9. Benchmark 补充
+## API
 
-数据库连接和语义确认进入 MVP 后，benchmark 至少新增以下 case：
+- `POST /api/data-sources`：创建 PostgreSQL source。
+- `GET /api/data-sources`：列出工作区 sources。
+- `PUT /api/data-sources/{sourceID}`：更新 source 和连接配置。
+- `DELETE /api/data-sources/{sourceID}`：删除工作区 SQL source，并移除相关 snapshot/profile。
+- `POST /api/data-sources/{sourceID}/test`：测试连接和 allowlist。
+- `GET /api/data-sources/{sourceID}/catalog`：返回 allowlist 对象。
+- `POST /api/data-sources/{sourceID}/import`：导入 allowlist 对象到 session snapshot。
+- `GET /api/sessions/{sessionID}/sources`：查看当前 session source/snapshot/profile 摘要。
+- `GET /api/semantic-profiles/{profileID}`：查看 profile 详情。
+- `POST /api/semantic-profiles/{profileID}/confirm`：保存确认或覆盖。
 
-- PostgreSQL 单表导入后分析
-- PostgreSQL 多表导入 + join 候选确认
-- 上传 Excel 后时间列候选确认
-- 低置信度指标口径确认
-- 确认后再次分析，不应重复追问
+## Agent 工具面
 
-建议新增指标：
+主要 observation tools：
 
-- `semantic_profile_generation_success`
-- `semantic_confirmation_required_rate`
-- `semantic_confirmation_resolution_rate`
-- `post_confirmation_task_success_rate`
+- `state_session_sources_inspect`
+- `state_semantic_profile_inspect`
+- `state_source_confirm_profile`
 
-## 10. 明确不做的事
+分析工具仍只面向 session SQLite snapshot：
 
-在这个阶段不做：
+- `data_list_tables`
+- `data_describe_table`
+- `data_query_sql`
 
-- 任意数据库全支持
-- 跨数据库实时 join
-- 写回数据库
-- 自动修改数据库 schema
-- 跳过人工确认直接在低置信度关系上继续分析
+Agent 不直接生成上游 PostgreSQL SQL。
+
+## 后续方向
+
+后续如果要支持 live query，应作为独立执行层设计，并单独处理：
+
+- 上游 SQL 权限和超时。
+- pushdown 与 session snapshot 的一致性。
+- 报告复现和数据期间标注。
+- 大表筛选、分区、增量导入或 DuckDB/ClickHouse 等执行引擎选择。

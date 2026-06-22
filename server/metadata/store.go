@@ -221,6 +221,8 @@ func (s *Store) migrate() error {
 				imported_at DATETIME NOT NULL,
 				rows_imported INTEGER NOT NULL DEFAULT 0,
 				rows_skipped INTEGER NOT NULL DEFAULT 0,
+				import_row_limit INTEGER NOT NULL DEFAULT 0,
+				import_truncated BOOLEAN NOT NULL DEFAULT 0,
 				import_duration_ms INTEGER NOT NULL DEFAULT 0,
 				profile_duration_ms INTEGER NOT NULL DEFAULT 0,
 			snapshot_size_bytes INTEGER NOT NULL DEFAULT 0,
@@ -302,6 +304,12 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if err := ensureColumn(s.DB, "source_snapshots", "rows_skipped", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(s.DB, "source_snapshots", "import_row_limit", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(s.DB, "source_snapshots", "import_truncated", "BOOLEAN NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := ensureSessionSourceBindingsShape(s.DB); err != nil {

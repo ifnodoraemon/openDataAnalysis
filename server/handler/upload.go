@@ -112,6 +112,9 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 		resp["profile_duration_ms"] = ingestResult.ProfileDurationMs
 		resp["snapshot_size_bytes"] = ingestResult.SnapshotSizeBytes
 		resp["profile_mode"] = ingestResult.ProfileMode
+		resp["data_size_tier"] = ingestResult.DataSizeTier
+		resp["import_row_limit"] = ingestResult.ImportRowLimit
+		resp["import_truncated"] = ingestResult.ImportTruncated
 		resp["large_dataset"] = ingestResult.RowCount >= 1000000
 		if ingestResult.ProfErr != nil {
 			resp["ingest_status"] = "partial"
@@ -137,6 +140,9 @@ type ingestResult struct {
 	ProfileDurationMs int
 	SnapshotSizeBytes int64
 	ProfileMode       string
+	DataSizeTier      string
+	ImportRowLimit    int
+	ImportTruncated   bool
 	ProfErr           error
 }
 
@@ -154,12 +160,7 @@ func materializeAndProfile(ctx context.Context, sess *session.Session, source *d
 		return nil, fmt.Errorf("import failed: %w", err)
 	}
 
-	var profileMode domain.ProfileMode = domain.ProfileModeSampled
-	if rowCount < 10000 {
-		profileMode = domain.ProfileModeExact
-	} else if rowCount < 100000 {
-		profileMode = domain.ProfileModeMixed
-	}
+	profileMode := service.ProfileModeForRows(rowCount)
 
 	var schema *data.SchemaInfo
 	var schemaErr error
@@ -182,14 +183,14 @@ func materializeAndProfile(ctx context.Context, sess *session.Session, source *d
 		}
 	}
 
-	facts := sourceService.BuildProfileFacts(schema, nil, nil, string(profileMode), snapshotSizeBytes)
+	facts := sourceService.BuildProfileFacts(schema, nil, nil, string(profileMode), snapshotSizeBytes, 0, false)
 	profileDuration := time.Since(profileStart)
 
 	snapshot, err := sourceService.CreateSnapshot(
 		ctx, sess.ID, source.ID,
 		"file_upload", "", file.DisplayName,
 		tableName, rowCount, colCount, schemaSig,
-		rowCount, 0, int(importDuration.Milliseconds()), int(profileDuration.Milliseconds()), snapshotSizeBytes, profileMode,
+		rowCount, 0, 0, false, int(importDuration.Milliseconds()), int(profileDuration.Milliseconds()), snapshotSizeBytes, profileMode,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create snapshot: %w", err)
@@ -224,6 +225,9 @@ func materializeAndProfile(ctx context.Context, sess *session.Session, source *d
 		ProfileDurationMs: int(profileDuration.Milliseconds()),
 		SnapshotSizeBytes: snapshotSizeBytes,
 		ProfileMode:       string(profileMode),
+		DataSizeTier:      service.DataSizeTierForRows(rowCount),
+		ImportRowLimit:    0,
+		ImportTruncated:   false,
 		ProfErr:           profErr,
 	}, nil
 }

@@ -49,6 +49,7 @@ This repository follows an agentic runtime model.
 ## Project References
 
 - Agentic direction details: `docs/agentic-principles.md`
+- Product first principles: `docs/product-first-principles.zh-CN.md`
 
 ## Prompt Layering & Migration
 

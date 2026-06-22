@@ -44,9 +44,15 @@
             <span v-if="source.row_count"
               >{{ source.row_count.toLocaleString() }} rows</span
             >
+            <span v-if="source.data_size_tier" class="badge size-tier">{{
+              source.data_size_tier
+            }}</span>
             <span v-if="source.rows_skipped" class="badge warning"
               >{{ source.rows_skipped.toLocaleString() }} skipped</span
             >
+            <span v-if="source.import_truncated" class="badge warning">
+              capped at {{ source.import_row_limit?.toLocaleString() }} rows
+            </span>
             <span v-if="source.large_dataset" class="badge large"
               >large dataset</span
             >
@@ -668,10 +674,15 @@ const editSource = ref({
 
 async function handleCreateSource() {
   creating.value = true;
+  sourceMessage.value = "";
   try {
-    await store.createPostgresSource(newSource.value.name, {
+    const result = await store.createPostgresSource(newSource.value.name, {
       ...newSource.value,
     });
+    if (result?.ok === false) {
+      sourceMessage.value = result.error || "创建失败";
+      return;
+    }
     showCreateForm.value = false;
     newSource.value = {
       name: "",
@@ -1132,6 +1143,10 @@ function getAuthHeaders() {
 .badge.warning {
   background: #fff8e1;
   color: #b26a00;
+}
+.badge.size-tier {
+  background: #e8f5e9;
+  color: #2e7d32;
 }
 .table-name {
   font-family: monospace;

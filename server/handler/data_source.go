@@ -282,6 +282,84 @@ type AllowlistEntry struct {
 	Kind   string `json:"kind"`
 }
 
+func normalizePostgresConnectionInput(pg *PostgresConnection, requirePassword bool) (*domain.DatabaseConnection, error) {
+	if pg == nil {
+		return nil, fmt.Errorf("missing postgres connection config")
+	}
+	host := strings.TrimSpace(pg.Host)
+	databaseName := strings.TrimSpace(pg.DatabaseName)
+	defaultSchema := strings.TrimSpace(pg.DefaultSchema)
+	username := strings.TrimSpace(pg.Username)
+	password := strings.TrimSpace(pg.Password)
+	if host == "" || databaseName == "" || username == "" {
+		return nil, fmt.Errorf("host, database_name and username are required")
+	}
+	if requirePassword && password == "" {
+		return nil, fmt.Errorf("password is required")
+	}
+	if pg.Port <= 0 || pg.Port > 65535 {
+		return nil, fmt.Errorf("port must be between 1 and 65535")
+	}
+	sslMode := strings.TrimSpace(pg.SSLMode)
+	if sslMode == "" {
+		sslMode = "disable"
+	}
+	switch sslMode {
+	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
+	default:
+		return nil, fmt.Errorf("unsupported ssl_mode: %s", sslMode)
+	}
+
+	allowlist, err := normalizeAllowlist(pg.Allowlist, defaultSchema)
+	if err != nil {
+		return nil, err
+	}
+	allowlistJSON, _ := json.Marshal(allowlist)
+
+	return &domain.DatabaseConnection{
+		Driver:        "postgres",
+		Host:          host,
+		Port:          pg.Port,
+		DatabaseName:  databaseName,
+		DefaultSchema: defaultSchema,
+		SSLMode:       sslMode,
+		Username:      username,
+		AllowlistJSON: string(allowlistJSON),
+	}, nil
+}
+
+func normalizeAllowlist(entries []AllowlistEntry, defaultSchema string) ([]AllowlistEntry, error) {
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("allowlist must include at least one table or view")
+	}
+	normalized := make([]AllowlistEntry, 0, len(entries))
+	seen := map[string]struct{}{}
+	for _, entry := range entries {
+		schema := strings.TrimSpace(entry.Schema)
+		if schema == "" {
+			schema = strings.TrimSpace(defaultSchema)
+		}
+		name := strings.TrimSpace(entry.Name)
+		kind := strings.ToLower(strings.TrimSpace(entry.Kind))
+		if kind == "" {
+			kind = "table"
+		}
+		if schema == "" || name == "" {
+			return nil, fmt.Errorf("allowlist entries require schema and name")
+		}
+		if kind != "table" && kind != "view" {
+			return nil, fmt.Errorf("allowlist kind must be table or view")
+		}
+		key := strings.ToLower(schema + "." + name + "." + kind)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, AllowlistEntry{Schema: schema, Name: name, Kind: kind})
+	}
+	return normalized, nil
+}
+
 func CreateDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 	identity, ok := auth.FromContext(r.Context())
 	if !ok || identity.UserID == "" {
@@ -299,8 +377,14 @@ func CreateDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "only postgres_connection type is supported", http.StatusBadRequest)
 		return
 	}
-	if req.Postgres == nil {
-		http.Error(w, "missing postgres connection config", http.StatusBadRequest)
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		http.Error(w, "name cannot be empty", http.StatusBadRequest)
+		return
+	}
+	conn, validationErr := normalizePostgresConnectionInput(req.Postgres, true)
+	if validationErr != nil {
+		http.Error(w, validationErr.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -308,20 +392,6 @@ func CreateDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "AUTH_SECRET too short, cannot create SQL data source", http.StatusForbidden)
 		return
 	}
-
-	conn := &domain.DatabaseConnection{
-		Driver:        "postgres",
-		Host:          req.Postgres.Host,
-		Port:          req.Postgres.Port,
-		DatabaseName:  req.Postgres.DatabaseName,
-		DefaultSchema: req.Postgres.DefaultSchema,
-		SSLMode:       req.Postgres.SSLMode,
-		Username:      req.Postgres.Username,
-	}
-
-	allowlistJSON, _ := json.Marshal(req.Postgres.Allowlist)
-	conn.AllowlistJSON = string(allowlistJSON)
-
 	ciphertext, encErr := service.EncryptPassword(req.Postgres.Password, config.Cfg.AuthSecret)
 	if encErr != nil {
 		http.Error(w, fmt.Sprintf("credential encryption failed: %v", encErr), http.StatusInternalServerError)
@@ -329,7 +399,7 @@ func CreateDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	conn.SecretCiphertext = ciphertext
 
-	ds, err := sourceService.CreatePostgresSource(r.Context(), identity.WorkspaceID, req.Name, identity.UserID, conn)
+	ds, err := sourceService.CreatePostgresSource(r.Context(), identity.WorkspaceID, name, identity.UserID, conn)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to create data source: %v", err), http.StatusInternalServerError)
 		return
@@ -388,27 +458,20 @@ func UpdateDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "connection config does not exist", http.StatusNotFound)
 			return
 		}
-		if strings.TrimSpace(req.Postgres.Host) == "" || strings.TrimSpace(req.Postgres.DatabaseName) == "" || strings.TrimSpace(req.Postgres.Username) == "" {
-			http.Error(w, "host, database_name and username are required", http.StatusBadRequest)
-			return
-		}
-		if req.Postgres.Port <= 0 {
-			http.Error(w, "port must be greater than 0", http.StatusBadRequest)
+		normalizedConn, validationErr := normalizePostgresConnectionInput(req.Postgres, false)
+		if validationErr != nil {
+			http.Error(w, validationErr.Error(), http.StatusBadRequest)
 			return
 		}
 
 		conn.Driver = "postgres"
-		conn.Host = strings.TrimSpace(req.Postgres.Host)
-		conn.Port = req.Postgres.Port
-		conn.DatabaseName = strings.TrimSpace(req.Postgres.DatabaseName)
-		conn.DefaultSchema = strings.TrimSpace(req.Postgres.DefaultSchema)
-		conn.SSLMode = strings.TrimSpace(req.Postgres.SSLMode)
-		if conn.SSLMode == "" {
-			conn.SSLMode = "disable"
-		}
-		conn.Username = strings.TrimSpace(req.Postgres.Username)
-		allowlistJSON, _ := json.Marshal(req.Postgres.Allowlist)
-		conn.AllowlistJSON = string(allowlistJSON)
+		conn.Host = normalizedConn.Host
+		conn.Port = normalizedConn.Port
+		conn.DatabaseName = normalizedConn.DatabaseName
+		conn.DefaultSchema = normalizedConn.DefaultSchema
+		conn.SSLMode = normalizedConn.SSLMode
+		conn.Username = normalizedConn.Username
+		conn.AllowlistJSON = normalizedConn.AllowlistJSON
 		if strings.TrimSpace(req.Postgres.Password) != "" {
 			if len(config.Cfg.AuthSecret) < 32 {
 				http.Error(w, "AUTH_SECRET too short, cannot update SQL data source secret", http.StatusForbidden)
@@ -598,7 +661,7 @@ func ImportDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 	sess.LockUpload()
 	result, err := sourceService.ImportPostgresSnapshot(
 		r.Context(), sourceID, req.SessionID, req.SchemaName, req.ObjectName,
-		sess.Ingester, config.Cfg.AuthSecret,
+		sess.Ingester, config.Cfg.AuthSecret, config.Cfg.PostgresImportRowLimit,
 	)
 	sess.UnlockUpload()
 	if err != nil {
@@ -615,10 +678,13 @@ func ImportDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		"column_count":        result.ColCount,
 		"rows_imported":       result.RowsImported,
 		"rows_skipped":        result.RowsSkipped,
+		"import_row_limit":    result.ImportRowLimit,
+		"import_truncated":    result.ImportTruncated,
 		"import_duration_ms":  result.ImportDurationMs,
 		"profile_duration_ms": result.ProfileDurationMs,
 		"snapshot_size_bytes": result.SnapshotSizeBytes,
 		"profile_mode":        string(result.ProfileMode),
+		"data_size_tier":      result.DataSizeTier,
 		"large_dataset":       result.RowCount >= 1000000,
 	}
 	if result.ProfErr != nil {

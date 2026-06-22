@@ -45,6 +45,9 @@ type Config struct {
 	TraceRetentionDays int    // LLM debug trace 保留天数，0 = 永久保留
 	TempCleanupOnStart bool   // 启动时清理 TempDir
 	ReportEchartsUrl   string // ECharts 资源路径，默认为前端自托管静态资源
+
+	// 数据源导入
+	PostgresImportRowLimit int // PostgreSQL snapshot import row cap, 0 = unlimited
 }
 
 var Cfg *Config
@@ -100,6 +103,8 @@ func Load() {
 		TraceRetentionDays: getEnvInt("TRACE_RETENTION_DAYS", 0),
 		TempCleanupOnStart: getEnvBool("TEMP_CLEANUP_ON_START", false),
 		ReportEchartsUrl:   getEnv("REPORT_ECHARTS_URL", "/assets/echarts.min.js"),
+
+		PostgresImportRowLimit: getEnvInt("POSTGRES_IMPORT_ROW_LIMIT", 1000000),
 	}
 
 	if Cfg.LLMAPIKey == "" {

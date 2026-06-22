@@ -90,9 +90,13 @@ export const useDataSourceStore = defineStore("dataSource", () => {
     });
     if (res.ok) {
       await fetchWorkspaceDataSources();
-      return true;
+      return { ok: true, data: await res.json() };
     }
-    return false;
+    const errBody = await res.text().catch(() => "");
+    return {
+      ok: false,
+      error: errBody || `create failed (HTTP ${res.status})`,
+    };
   }
 
   async function updatePostgresSource(sourceId, name, config) {

@@ -28,8 +28,8 @@ type SourceSnapshotRepository interface {
 	ListBySession(ctx context.Context, sessionID string) ([]domain.SourceSnapshot, error)
 	ListBySource(ctx context.Context, sourceID string) ([]domain.SourceSnapshot, error)
 	UpdateStatus(ctx context.Context, id string, status domain.SnapshotStatus, errorMsg *string) error
-	UpdateRuntimeFacts(ctx context.Context, id string, rowsImported, rowsSkipped, importDurationMs, profileDurationMs int, snapshotSizeBytes int64, profileMode domain.ProfileMode) error
-	UpdateSnapshotCompletion(ctx context.Context, id string, rowCount, colCount int, schemaSignature string, rowsImported, rowsSkipped, importDurationMs, profileDurationMs int, snapshotSizeBytes int64, profileMode domain.ProfileMode) error
+	UpdateRuntimeFacts(ctx context.Context, id string, rowsImported, rowsSkipped, importRowLimit int, importTruncated bool, importDurationMs, profileDurationMs int, snapshotSizeBytes int64, profileMode domain.ProfileMode) error
+	UpdateSnapshotCompletion(ctx context.Context, id string, rowCount, colCount int, schemaSignature string, rowsImported, rowsSkipped, importRowLimit int, importTruncated bool, importDurationMs, profileDurationMs int, snapshotSizeBytes int64, profileMode domain.ProfileMode) error
 	Delete(ctx context.Context, id string) error
 }
 

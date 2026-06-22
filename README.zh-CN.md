@@ -2,255 +2,115 @@
 
 [English](README.md)
 
-面向表格数据的交互式智能分析工具，交互方式类似 Claude Code。上传 CSV 或 Excel 文件后，Agent 会自主检查、查询、分析数据，并生成带交互图表的研报。
+面向表格数据的交互式智能分析工具。用户上传 CSV/Excel 或导入 PostgreSQL snapshot 后，Agent 通过 SQL、Python 和报告工具完成探索、分析、图表和研报生成。
 
 ![数据分析智能体界面](docs/images/screenshot.png)
 
-## 功能概览
+## 当前能力
 
-- Agent 自主决定工具调用顺序，不是硬编码 DAG
-- 已支持工作区、会话、任务、文件归属和鉴权
-- 通过 WebSocket 实时推送执行过程，并支持恢复最近一次 run/report
-- 已抽象对象存储接口，当前默认本地存储，后续可切 S3 兼容实现
-- 前端使用 Vue 3，后端使用 Go，当前运行时采用 SQLite 元数据库 + SQLite 分析工作库
-
-## 当前架构
-
-### 运行时数据分层
-
-1. 元数据 SQLite  
-   存储用户、工作区、成员关系、会话、文件元数据和分析任务。
-
-2. 会话分析 SQLite  
-   每个 session 都有自己的分析工作库，用于导入 CSV/Excel 并执行 SQL 查询。
-
-目前运行时还没有接入 PostgreSQL。仓库已经保留了未来迁移所需的领域边界和 schema 方向，但当前产品代码路径仍然使用 SQLite。
-
-### 存储
-
-应用没有把业务逻辑绑定到 MinIO。文件对外只暴露 `file_id`，后端通过存储抽象解析实际对象位置。
-
-当前默认实现：
-
-- Provider：本地文件系统
-- 上传文件对象 key：`workspaces/{workspace_id}/files/{file_id}/source/{filename}`
-- 报告对象 key：`workspaces/{workspace_id}/runs/{run_id}/report/report.html`
-
-### 本地 Docker 调试
-
-通过 `docker compose` 启动本地环境时，服务端默认开启 `LLM_DEBUG=true`，并将模型输入输出写入独立的 trace 调试目录：
-
-- 路径：`data/llm-debug/`
-- 格式：`YYYY-MM-DD/<trace_id>/request.json + response.json + index.jsonl`
-- 隔离：不与程序标准日志混写
-
-## 技术栈
-
-| 层 | 技术 |
-|---|---|
-| Frontend | Vue 3, Vite, Pinia |
-| Backend | Go, Chi, Gorilla WebSocket |
-| Agent | Tool-calling ReAct loop |
-| Data ingestion | CSV / Excel -> SQLite |
-| Charts | ECharts 5 |
-| Storage | Local object storage abstraction |
-| Deployment | Docker, Docker Compose |
-
-## Agentic 方向
-
-这个项目把后端视为 agent runtime，而不是隐藏的 workflow engine。系统负责暴露目标、工具、状态和薄 guardrail；下一步做什么由模型自己裁决。
-
-参考：
-
-- `docs/agentic-principles.md` (核心原则与方向)
-- `AGENTS.md` (核心运行时约束、提示分层及迁移指南)
-
-非目标：
-
-- 写死的步骤顺序
-- 隐式阶段切换
-- 由 runtime 替模型写行动建议
-
-当前核心工具：
-
-- `state_session_sources_inspect`
-- `state_semantic_profile_inspect`
-- `data_list_tables`
-- `data_describe_table`
-- `data_query_sql`
-- `report_create_chart`
-- `report_manage_blocks`
-- `report_configure_layout`
-- `report_finalize`
-- `code_run_python`
-- `memory_save_fact`
-- `state_memory_inspect`
-- `state_goal_inspect`
-- `state_report_inspect`
-- `state_report_edit_inspect`
-- `state_source_confirm_profile`
-- `state_time_context_inspect`
-- `goal_manage`
-- `task_delegate`
-- `user_request_input`
-
-说明：
-
-- `goal_manage` 是可选 scratchpad 状态，不是强制规划阶段
-- 各类 state inspect 工具只暴露事实，不替模型做判断
-- 稳定项目约束放在 `AGENTS.md`，不放在 runtime prompt 里
-
-## 鉴权
-
-后端当前运行在鉴权模式下。除 `/api/auth/login` 和 `/api/health` 外，其余接口都要求携带有效 token。
-
-默认管理员账号通过环境变量配置，不写死在业务逻辑中。
-
-`server/.env.example` 中的默认示例：
-
-```env
-DEFAULT_USER_ID=admin
-DEFAULT_USER_EMAIL=admin
-DEFAULT_USER_NAME=Administrator
-DEFAULT_USER_PASSWORD=admin@123
-DEFAULT_WORKSPACE_ID=default
-DEFAULT_WORKSPACE_NAME=Default Workspace
-AUTH_SECRET=change-me
-```
+- Agent 自主决定工具调用顺序，不使用隐藏 DAG。
+- 支持鉴权、工作区、会话、run、文件归属和报告恢复。
+- 支持 CSV/Excel 上传，以及 PostgreSQL 工作区数据源的 bounded snapshot import。
+- 后端使用 Go，前端使用 Vue 3，分析工作库使用 session-scoped SQLite。
+- 文件和报告通过存储抽象管理，当前默认本地文件系统。
 
 ## 快速开始
 
-### 本地只支持 Docker Compose
+本地调试统一使用 Docker Compose。
 
 ```bash
-# 1. 准备环境变量
 cp server/.env.example server/.env
-
-# 2. 填写 LLM 配置
-#    配置 LLM_PROVIDER / LLM_API_KEY / LLM_MODEL 等参数
-
-# 3. 启动全部服务
+# 填写 LLM_PROVIDER / LLM_API_KEY / LLM_MODEL / AUTH_SECRET 等配置
 docker compose up -d --build
-
-# 4. 打开页面
-#    浏览器访问 http://localhost
 ```
 
-本地调试统一只走 `docker compose`。仓库不再把 `go run main.go` 或 `npm run dev` 视为主支持路径。
+浏览器访问 `http://localhost`。
 
-### 重建与日志
+常用命令：
 
 ```bash
-# 全量重建服务
 docker compose up -d --build --force-recreate
-
-# 查看后端日志
 docker compose logs -f server
-
-# 查看前端日志
 docker compose logs -f client
-
-# 查看 python executor 日志
 docker compose logs -f python-executor
-
-# 停止所有服务
 docker compose down
 ```
 
-### 运行期目录
+## 架构概览
 
-Docker 模式下，运行产物统一收敛到挂载的 `data/` 目录：
+| 层 | 说明 |
+|---|---|
+| Frontend | Vue 3 + Vite + Pinia |
+| Backend | Go + Chi + Gorilla WebSocket |
+| Agent Runtime | Tool-calling ReAct loop，状态和工具由 runtime 暴露，路径由模型判断 |
+| Analysis DB | 每个 session 一个 SQLite 分析工作库 |
+| Metadata DB | SQLite，保存用户、工作区、会话、文件、run、报告和数据源事实 |
+| Python Executor | 独立服务，用于 SQL 不适合的高级分析 |
+| Storage | 本地对象存储抽象，保留 S3-compatible 迁移边界 |
 
-- `data/metadata/`：metadata SQLite
-- `data/cache/`：每个 session 的分析 SQLite 工作文件
-- `data/storage/`：上传源文件和生成的报告对象
-- `data/tmp/`：物化出来的临时文件
-- `data/llm-debug/`：LLM 请求/响应 trace
+运行期目录都收敛到 `data/`：
 
-LLM 调试日志按日期和 trace ID 落盘：
+- `data/metadata/`：元数据库
+- `data/cache/`：session SQLite
+- `data/storage/`：源文件和报告对象
+- `data/tmp/`：临时文件
+- `data/llm-debug/`：LLM trace
 
-- `data/llm-debug/YYYY-MM-DD/index.jsonl`
-- `data/llm-debug/YYYY-MM-DD/<trace_id>/request.json`
-- `data/llm-debug/YYYY-MM-DD/<trace_id>/response.json` 或 `response.error.txt`
-- `data/llm-debug/YYYY-MM-DD/<trace_id>/index.jsonl`
+## 数据源边界
 
-## 主要接口
+| 类型 | 当前状态 |
+|---|---|
+| CSV | 推荐用于大文件；流式批量导入，无行数硬上限 |
+| Excel | 单 sheet 100,000 行硬上限 |
+| PostgreSQL | 工作区级只读连接，导入为 session SQLite snapshot；默认受 `POSTGRES_IMPORT_ROW_LIMIT=1000000` 限制 |
+| Live upstream query | 暂不支持；后续应作为独立能力设计 |
 
-当前受保护接口包括：
+数据规模分层：
 
+| 规模 | 行数 | 默认画像模式 |
+|---|---:|---|
+| small | < 10,000 | exact |
+| medium | 10,000 - 99,999 | mixed |
+| large | 100,000 - 999,999 | sampled |
+| xlarge | >= 1,000,000 | sampled；数据库导入默认使用受限快照 |
+
+## 主要 API
+
+- `POST /api/auth/login`
 - `POST /api/auth/switch-workspace`
 - `GET /api/bootstrap`
 - `GET /api/sessions`
-- `GET /api/sessions/{sessionID}`
 - `GET /api/runs`
-- `GET /api/runs/{runID}`
-- `GET /api/runs/{runID}/report`
 - `POST /api/upload?session_id=...`
+- `GET /api/sessions/{sessionID}/sources`
+- `POST /api/data-sources`
+- `GET /api/data-sources`
+- `POST /api/data-sources/{sourceID}/test`
+- `GET /api/data-sources/{sourceID}/catalog`
+- `POST /api/data-sources/{sourceID}/import`
 - `GET /ws?token=...&session_id=...`
 
-## 界面行为
+除 `/api/auth/login` 和 `/api/health` 外，API 默认需要 token。
 
-- 切换工作区时会重新签发 token 并重连 WebSocket
-- 启动后会恢复最近的 session 和 runs
-- 刷新页面后仍可重新打开最终报告 HTML
-- 上传的源文件保持 session 作用域，不会和生成的报告产物混在一起
+## 开发检查
 
-## 产品边界
-
-当前已知的能力边界和设计约束：
-
-| 维度 | 状态 |
-|---|---|
-| **CSV** | 推荐用于大文件；流式批量导入，无行数上限 |
-| **Excel** | 单 sheet 10 万行硬上限，超限时返回明确错误 |
-| **数据库数据源** | 尚不可用；设计文档见 `docs/database-source-mvp.md` |
-| **语义分析** | 需要配置 `LLM_API_KEY`。未配置时，基础 schema（列名、类型、统计）仍完整可用；语义别名和 join hints 将缺失 |
-| **Python 分析** | 需要 `python-executor` 服务运行。用于 SQL 无法表达的升级分析场景，不是默认分析路径 |
-| **存储** | 当前仅支持本地文件系统。S3 兼容后端已抽象但尚未实现 |
-| **元数据库** | 当前使用 SQLite。PostgreSQL 迁移路径已准备但未启用 |
-| **并发执行** | 每个 session 同时只有一个活跃 run |
-
-## 项目结构
-
-```text
-.
-├── client/
-│   ├── src/
-│   │   ├── components/
-│   │   ├── composables/
-│   │   └── stores/
-│   ├── Dockerfile
-│   └── nginx.conf
-├── server/
-│   ├── agent/
-│   ├── auth/
-│   ├── config/
-│   ├── data/
-│   ├── domain/
-│   ├── handler/
-│   ├── metadata/
-│   ├── migrations/
-│   ├── repository/
-│   ├── service/
-│   ├── session/
-│   ├── storage/
-│   ├── tools/
-│   ├── Dockerfile
-│   └── main.go
-├── data/
-├── docker-compose.yml
-├── README.md
-└── README.zh-CN.md
+```bash
+cd server && go test ./...
+cd client && npm run test
+cd client && npm run build
+cd client && npm run format:check
+cd python-executor && python -m pytest test_sandbox.py
 ```
 
-## 产品方向
+## 文档索引
 
-这个仓库对应的是新产品，因此当前优先级是减少未来技术债，而不是保留历史兼容逻辑。当前实现重点收敛在这些边界：
-
-- 认证与工作区归属
-- 会话与任务生命周期
-- 文件身份与存储抽象
-- 报告持久化与恢复
+- `AGENTS.md`：仓库级 agent 约束和提示分层规则。
+- `docs/product-first-principles.zh-CN.md`：产品第一性原则。
+- `docs/agentic-principles.md`：agent runtime 设计原则。
+- `docs/building-agent-lessons.zh-CN.md`：Agent runtime 实践经验。
+- `docs/database-source-mvp.md`：数据库数据源当前实现和边界。
+- `docs/benchmark.md`：回归评测方案。
+- `samples/coverage_scenarios/README.zh-CN.md`：覆盖场景说明。
 
 ## 许可证
 

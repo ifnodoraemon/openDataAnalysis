@@ -44,6 +44,8 @@ create table source_snapshots (
   imported_at timestamptz not null default now(),
   rows_imported integer not null default 0,
   rows_skipped integer not null default 0,
+  import_row_limit integer not null default 0,
+  import_truncated boolean not null default false,
   import_duration_ms integer not null default 0,
   profile_duration_ms integer not null default 0,
   snapshot_size_bytes bigint not null default 0,

@@ -57,6 +57,37 @@ type SourceRuntimeTable struct {
 	TableName string
 }
 
+const (
+	DataSizeTierSmall  = "small"
+	DataSizeTierMedium = "medium"
+	DataSizeTierLarge  = "large"
+	DataSizeTierXLarge = "xlarge"
+)
+
+func DataSizeTierForRows(rowCount int) string {
+	switch {
+	case rowCount < 10000:
+		return DataSizeTierSmall
+	case rowCount < 100000:
+		return DataSizeTierMedium
+	case rowCount < 1000000:
+		return DataSizeTierLarge
+	default:
+		return DataSizeTierXLarge
+	}
+}
+
+func ProfileModeForRows(rowCount int) domain.ProfileMode {
+	switch {
+	case rowCount < 10000:
+		return domain.ProfileModeExact
+	case rowCount < 100000:
+		return domain.ProfileModeMixed
+	default:
+		return domain.ProfileModeSampled
+	}
+}
+
 func SourceObjectKey(sourceID, upstreamKind, upstreamSchema, upstreamObject string) string {
 	kind := strings.TrimSpace(upstreamKind)
 	if kind == "" {
@@ -131,7 +162,7 @@ func (s *SourceService) EnsureFileSource(ctx context.Context, workspaceID, fileI
 	return ds, nil
 }
 
-func (s *SourceService) CreateSnapshot(ctx context.Context, sessionID, sourceID, upstreamKind, upstreamSchema, upstreamObject, analysisTableName string, rowCount, colCount int, schemaSignature string, rowsImported, rowsSkipped, importDurationMs, profileDurationMs int, snapshotSizeBytes int64, profileMode domain.ProfileMode) (*domain.SourceSnapshot, error) {
+func (s *SourceService) CreateSnapshot(ctx context.Context, sessionID, sourceID, upstreamKind, upstreamSchema, upstreamObject, analysisTableName string, rowCount, colCount int, schemaSignature string, rowsImported, rowsSkipped, importRowLimit int, importTruncated bool, importDurationMs, profileDurationMs int, snapshotSizeBytes int64, profileMode domain.ProfileMode) (*domain.SourceSnapshot, error) {
 	sourceObjectKey := SourceObjectKey(sourceID, upstreamKind, upstreamSchema, upstreamObject)
 	s.cleanupOldSnapshots(ctx, sessionID, sourceID, sourceObjectKey)
 
@@ -150,6 +181,8 @@ func (s *SourceService) CreateSnapshot(ctx context.Context, sessionID, sourceID,
 		ImportedAt:        time.Now(),
 		RowsImported:      rowsImported,
 		RowsSkipped:       rowsSkipped,
+		ImportRowLimit:    importRowLimit,
+		ImportTruncated:   importTruncated,
 		ImportDurationMs:  importDurationMs,
 		ProfileDurationMs: profileDurationMs,
 		SnapshotSizeBytes: snapshotSizeBytes,
@@ -251,8 +284,11 @@ func (s *SourceService) GetSessionSources(ctx context.Context, sessionID string)
 			ColCount:               snapshot.ColumnCount,
 			LastImportedAt:         snapshot.ImportedAt,
 			LargeDataset:           snapshot.RowCount >= 1000000,
+			DataSizeTier:           DataSizeTierForRows(snapshot.RowCount),
 			RowsImported:           snapshot.RowsImported,
 			RowsSkipped:            snapshot.RowsSkipped,
+			ImportRowLimit:         snapshot.ImportRowLimit,
+			ImportTruncated:        snapshot.ImportTruncated,
 			ImportDurationMs:       snapshot.ImportDurationMs,
 			ProfileDurationMs:      snapshot.ProfileDurationMs,
 			SnapshotSizeBytes:      snapshot.SnapshotSizeBytes,
@@ -395,6 +431,9 @@ func (s *SourceService) GetProfileDetail(ctx context.Context, profileID string) 
 type ProfiledFacts struct {
 	Schema             *data.SchemaInfo    `json:"schema"`
 	ProfileMode        string              `json:"profile_mode"`
+	DataSizeTier       string              `json:"data_size_tier"`
+	ImportRowLimit     int                 `json:"import_row_limit,omitempty"`
+	ImportTruncated    bool                `json:"import_truncated,omitempty"`
 	SnapshotSizeBytes  int64               `json:"snapshot_size_bytes,omitempty"`
 	SemanticCandidates []SemanticCandidate `json:"semantic_candidates"`
 	JoinCandidates     []JoinCandidate     `json:"join_candidates"`
@@ -449,11 +488,14 @@ type Ambiguity struct {
 	Candidates  []string `json:"candidates"`
 }
 
-func (s *SourceService) BuildProfileFacts(schema *data.SchemaInfo, semanticProfile *data.SemanticProfile, activeTables []string, profileMode string, snapshotSizeBytes int64) ProfiledFacts {
+func (s *SourceService) BuildProfileFacts(schema *data.SchemaInfo, semanticProfile *data.SemanticProfile, activeTables []string, profileMode string, snapshotSizeBytes int64, importRowLimit int, importTruncated bool) ProfiledFacts {
 	isEstimated := profileMode != string(domain.ProfileModeExact)
 	facts := ProfiledFacts{
 		Schema:            schema,
 		ProfileMode:       profileMode,
+		DataSizeTier:      DataSizeTierForRows(schema.RowCount),
+		ImportRowLimit:    importRowLimit,
+		ImportTruncated:   importTruncated,
 		SnapshotSizeBytes: snapshotSizeBytes,
 	}
 
@@ -555,6 +597,9 @@ func (s *SourceService) BuildProfileFacts(schema *data.SchemaInfo, semanticProfi
 	}
 	if string(profileMode) != string(domain.ProfileModeExact) {
 		facts.Warnings = append(facts.Warnings, "profile is based on sampled data; statistics are estimated, not exact")
+	}
+	if importTruncated {
+		facts.Warnings = append(facts.Warnings, fmt.Sprintf("snapshot import was capped at %d rows; analysis is based on the imported subset, not the full upstream object", importRowLimit))
 	}
 
 	return facts
@@ -1026,8 +1071,11 @@ type SessionSourceSummary struct {
 	ColCount               int       `json:"column_count"`
 	LastImportedAt         time.Time `json:"last_imported_at"`
 	LargeDataset           bool      `json:"large_dataset"`
+	DataSizeTier           string    `json:"data_size_tier"`
 	RowsImported           int       `json:"rows_imported"`
 	RowsSkipped            int       `json:"rows_skipped"`
+	ImportRowLimit         int       `json:"import_row_limit,omitempty"`
+	ImportTruncated        bool      `json:"import_truncated,omitempty"`
 	ImportDurationMs       int       `json:"import_duration_ms"`
 	ProfileDurationMs      int       `json:"profile_duration_ms"`
 	SnapshotSizeBytes      int64     `json:"snapshot_size_bytes"`

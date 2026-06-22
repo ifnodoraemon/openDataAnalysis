@@ -161,6 +161,48 @@ func TestSourceObjectKeyUsesObjectLevelIdentity(t *testing.T) {
 	}
 }
 
+func TestDataSizeTierAndProfileModeForRows(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		rows        int
+		wantTier    string
+		wantProfile domain.ProfileMode
+	}{
+		{rows: 9999, wantTier: DataSizeTierSmall, wantProfile: domain.ProfileModeExact},
+		{rows: 10000, wantTier: DataSizeTierMedium, wantProfile: domain.ProfileModeMixed},
+		{rows: 99999, wantTier: DataSizeTierMedium, wantProfile: domain.ProfileModeMixed},
+		{rows: 100000, wantTier: DataSizeTierLarge, wantProfile: domain.ProfileModeSampled},
+		{rows: 999999, wantTier: DataSizeTierLarge, wantProfile: domain.ProfileModeSampled},
+		{rows: 1000000, wantTier: DataSizeTierXLarge, wantProfile: domain.ProfileModeSampled},
+	}
+
+	for _, tc := range cases {
+		if got := DataSizeTierForRows(tc.rows); got != tc.wantTier {
+			t.Fatalf("rows=%d tier=%q, want %q", tc.rows, got, tc.wantTier)
+		}
+		if got := ProfileModeForRows(tc.rows); got != tc.wantProfile {
+			t.Fatalf("rows=%d profile=%q, want %q", tc.rows, got, tc.wantProfile)
+		}
+	}
+}
+
+func TestQuotePGIdentifierEscapesQuotes(t *testing.T) {
+	t.Parallel()
+
+	got, err := quotePGIdentifier(`Sales "Archive"`)
+	if err != nil {
+		t.Fatalf("quotePGIdentifier returned error: %v", err)
+	}
+	if got != `"Sales ""Archive"""` {
+		t.Fatalf("unexpected quoted identifier: %s", got)
+	}
+
+	if _, err := quotePGIdentifier(""); err == nil {
+		t.Fatalf("expected empty identifier error")
+	}
+}
+
 type fakeSemanticProfileRepo struct {
 	profile *domain.SemanticProfile
 }
