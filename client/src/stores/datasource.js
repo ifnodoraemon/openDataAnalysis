@@ -68,7 +68,14 @@ export const useDataSourceStore = defineStore("dataSource", () => {
       headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({ scope, overrides }),
     });
-    return res.ok;
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      return {
+        ok: false,
+        error: errBody || `confirm failed (HTTP ${res.status})`,
+      };
+    }
+    return { ok: true, data: await res.json() };
   }
 
   async function createPostgresSource(name, config) {
@@ -154,11 +161,17 @@ export const useDataSourceStore = defineStore("dataSource", () => {
     }
   }
 
-  async function removeSessionSource(sessionId, sourceId) {
-    const res = await fetch(`/api/sessions/${sessionId}/sources/${sourceId}`, {
-      method: "DELETE",
-      headers: getAuthHeaders(),
+  async function removeSessionSource(sessionId, sourceId, sourceObjectKey) {
+    const params = new URLSearchParams({
+      source_object_key: sourceObjectKey || "",
     });
+    const res = await fetch(
+      `/api/sessions/${sessionId}/sources/${sourceId}?${params.toString()}`,
+      {
+        method: "DELETE",
+        headers: getAuthHeaders(),
+      },
+    );
     if (!res.ok) {
       const errBody = await res.text().catch(() => "");
       return {

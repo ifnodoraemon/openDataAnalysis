@@ -109,7 +109,7 @@ type ConfirmSourceProfileTool struct {
 
 func (t *ConfirmSourceProfileTool) Name() string { return "state_source_confirm_profile" }
 func (t *ConfirmSourceProfileTool) Description() string {
-	return "Resolve semantic ambiguities detected during data profiling. Accepts a profile_id and a JSON object of overrides specifying which interpretations to confirm (e.g. primary time column, percentage unit columns, metric definitions). Writes confirmation overrides for the requested scope and returns the confirmed profile_id and scope. This tool does not create or modify data sources."
+	return "Resolve semantic ambiguities detected during data profiling. Accepts a profile_id and a JSON object of overrides specifying which interpretations to confirm (e.g. primary time column, percentage unit columns, metric definitions, confirmed join candidates). Writes confirmation overrides for the requested scope and returns the confirmed profile_id and scope. This tool does not create or modify data sources."
 }
 func (t *ConfirmSourceProfileTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
@@ -117,7 +117,7 @@ func (t *ConfirmSourceProfileTool) Parameters() json.RawMessage {
 		"properties": {
 			"profile_id": {"type": "string", "description": "The semantic profile ID to confirm"},
 			"scope": {"type": "string", "enum": ["session", "workspace"], "description": "Scope of the confirmation. Use 'session' for session-level overrides."},
-			"overrides_json": {"type": "string", "description": "JSON object specifying overrides. For multiple_time_columns: {\"primary_time_column\":\"column_name\"}. For ambiguous_units: {\"percentage_columns\":[\"col1\",\"col2\"]}. For ambiguous_metrics: {\"metric_definitions\":{\"col1\":\"definition\",...}}."}
+			"overrides_json": {"type": "string", "description": "JSON object specifying overrides. For multiple_time_columns: {\"primary_time_column\":\"column_name\"}. For ambiguous_units: {\"percentage_columns\":[\"col1\",\"col2\"]}. For ambiguous_metrics: {\"metric_definitions\":{\"col1\":\"definition\",...}}. For ambiguous_join: {\"confirmed_join_candidates\":[\"candidate\"]}."}
 		},
 		"required": ["profile_id", "scope", "overrides_json"]
 	}`)

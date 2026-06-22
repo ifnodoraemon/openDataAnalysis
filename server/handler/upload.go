@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -106,6 +107,7 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 		resp["row_count"] = ingestResult.RowCount
 		resp["column_count"] = ingestResult.ColCount
 		resp["rows_imported"] = ingestResult.RowsImported
+		resp["rows_skipped"] = ingestResult.RowsSkipped
 		resp["import_duration_ms"] = ingestResult.ImportDurationMs
 		resp["profile_duration_ms"] = ingestResult.ProfileDurationMs
 		resp["snapshot_size_bytes"] = ingestResult.SnapshotSizeBytes
@@ -130,6 +132,7 @@ type ingestResult struct {
 	RowCount          int
 	ColCount          int
 	RowsImported      int
+	RowsSkipped       int
 	ImportDurationMs  int
 	ProfileDurationMs int
 	SnapshotSizeBytes int64
@@ -145,7 +148,7 @@ func materializeAndProfile(ctx context.Context, sess *session.Session, source *d
 	defer os.Remove(tempPath)
 
 	importStart := time.Now()
-	tableName, rowCount, colCount, err := sess.Ingester.ImportFileRaw(tempPath)
+	tableName, rowCount, colCount, err := sess.Ingester.ImportFileRawAs(tempPath, sourceScopedFileTableName(file.DisplayName, source.ID))
 	importDuration := time.Since(importStart)
 	if err != nil {
 		return nil, fmt.Errorf("import failed: %w", err)
@@ -186,7 +189,7 @@ func materializeAndProfile(ctx context.Context, sess *session.Session, source *d
 		ctx, sess.ID, source.ID,
 		"file_upload", "", file.DisplayName,
 		tableName, rowCount, colCount, schemaSig,
-		rowCount, int(importDuration.Milliseconds()), int(profileDuration.Milliseconds()), snapshotSizeBytes, profileMode,
+		rowCount, 0, int(importDuration.Milliseconds()), int(profileDuration.Milliseconds()), snapshotSizeBytes, profileMode,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create snapshot: %w", err)
@@ -216,10 +219,37 @@ func materializeAndProfile(ctx context.Context, sess *session.Session, source *d
 		RowCount:          rowCount,
 		ColCount:          colCount,
 		RowsImported:      rowCount,
+		RowsSkipped:       0,
 		ImportDurationMs:  int(importDuration.Milliseconds()),
 		ProfileDurationMs: int(profileDuration.Milliseconds()),
 		SnapshotSizeBytes: snapshotSizeBytes,
 		ProfileMode:       string(profileMode),
 		ProfErr:           profErr,
 	}, nil
+}
+
+func sourceScopedFileTableName(displayName, sourceID string) string {
+	ext := filepath.Ext(displayName)
+	base := strings.TrimSuffix(filepath.Base(displayName), ext)
+	if strings.TrimSpace(base) == "" {
+		base = "table"
+	}
+	suffix := sourceTableSuffix(sourceID)
+	if suffix == "" {
+		return base
+	}
+	return base + "__" + suffix
+}
+
+func sourceTableSuffix(sourceID string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return -1
+	}, strings.TrimSpace(sourceID))
+	if len(cleaned) > 8 {
+		return cleaned[len(cleaned)-8:]
+	}
+	return cleaned
 }

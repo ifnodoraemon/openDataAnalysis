@@ -3,7 +3,7 @@
     <div class="upload-area" v-if="dataSourceStore.sessionSources.length > 0">
       <span
         v-for="src in dataSourceStore.sessionSources"
-        :key="src.source_id"
+        :key="src.source_object_key || src.active_snapshot_id"
         class="source-tag"
       >
         🔗 {{ src.analysis_table_name || src.source_name }}

@@ -186,6 +186,12 @@ Authenticated endpoints currently include:
 - `GET /api/runs/{runID}`
 - `GET /api/runs/{runID}/report`
 - `POST /api/upload?session_id=...`
+- `GET /api/sessions/{sessionID}/sources`
+- `POST /api/data-sources`
+- `GET /api/data-sources`
+- `POST /api/data-sources/{sourceID}/test`
+- `GET /api/data-sources/{sourceID}/catalog`
+- `POST /api/data-sources/{sourceID}/import`
 - `GET /ws?token=...&session_id=...`
 
 ## UI Behavior
@@ -203,8 +209,8 @@ Current known limits and design constraints:
 |---|---|
 | **CSV** | Recommended for large files; streaming batch insert, no row limit |
 | **Excel** | Hard cap at 100,000 rows per sheet; returns explicit error if exceeded |
-| **Database sources** | Not yet available; see `docs/database-source-mvp.md` for planned design |
-| **Semantic profile** | Requires LLM configuration (`LLM_API_KEY`). Without it, schema metadata (columns, types, stats) is still fully available; semantic aliases and join hints will be absent |
+| **Database sources** | PostgreSQL workspace sources are available as snapshot imports into session SQLite; live upstream querying is not enabled |
+| **Semantic profile** | Schema-derived profile facts are always available. LLM semantic enrichment is opportunistic where configured; unresolved metric/time/unit/join ambiguities remain structured facts until confirmed |
 | **Python analysis** | Available only when `python-executor` service is running. Intended for advanced analysis that SQL alone cannot express; not a default analysis path |
 | **Storage** | Local filesystem only. S3-compatible backend is abstracted but not yet implemented |
 | **Metadata DB** | SQLite in production. PostgreSQL migration path is prepared but not enabled |

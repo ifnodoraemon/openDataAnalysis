@@ -33,6 +33,7 @@ type SourceSnapshot struct {
 	SchemaSignature   string
 	ImportedAt        time.Time
 	RowsImported      int
+	RowsSkipped       int
 	ImportDurationMs  int
 	ProfileDurationMs int
 	SnapshotSizeBytes int64

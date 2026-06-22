@@ -43,6 +43,7 @@ create table source_snapshots (
   schema_signature varchar(64) not null default '',
   imported_at timestamptz not null default now(),
   rows_imported integer not null default 0,
+  rows_skipped integer not null default 0,
   import_duration_ms integer not null default 0,
   profile_duration_ms integer not null default 0,
   snapshot_size_bytes bigint not null default 0,
@@ -55,10 +56,11 @@ create index idx_source_snapshots_source on source_snapshots(source_id);
 create table session_source_bindings (
   session_id varchar(64) not null references sessions(id) on delete cascade,
   source_id varchar(64) not null references data_sources(id) on delete cascade,
+  source_object_key varchar(255) not null,
   active_snapshot_id varchar(64) not null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  primary key (session_id, source_id)
+  primary key (session_id, source_id, source_object_key)
 );
 
 create table semantic_profiles (

@@ -16,6 +16,7 @@ var (
 	sectionChapterPrefixPattern = regexp.MustCompile(`^(第[一二三四五六七八九十百千0-9]+(?:章|节|部分|篇)\s*)`)
 	sectionOrdinalPrefixPattern = regexp.MustCompile(`^([一二三四五六七八九十百千0-9]+[.、)）]\s*)`)
 	sectionWhitespacePattern    = regexp.MustCompile(`\s+`)
+	reportNumberPattern         = regexp.MustCompile(`\d`)
 )
 
 func (s *ReportEditState) RefreshFromReportState(state *ReportState) {
@@ -423,7 +424,119 @@ func reportFinalizeIssues(state *ReportState) []string {
 		issues = append(issues, "duplicate_chart:"+item)
 	}
 
+	issues = append(issues, reportEvidenceFinalizeIssues(state)...)
+
 	return issues
+}
+
+func reportEvidenceFinalizeIssues(state *ReportState) []string {
+	if state == nil {
+		return nil
+	}
+	chartByID := make(map[string]ChartData, len(state.Charts))
+	for _, chart := range state.Charts {
+		if id := strings.TrimSpace(chart.ID); id != "" {
+			chartByID[id] = chart
+		}
+	}
+
+	seen := map[string]struct{}{}
+	var issues []string
+	addIssue := func(issue string) {
+		if _, ok := seen[issue]; ok {
+			return
+		}
+		seen[issue] = struct{}{}
+		issues = append(issues, issue)
+	}
+
+	for _, block := range state.Blocks {
+		if !blockNeedsEvidence(block) {
+			continue
+		}
+		chartRefs := chartIDsForBlock(block)
+		hasEvidence := len(block.Sources) > 0
+		for _, chartID := range chartRefs {
+			if chart, ok := chartByID[chartID]; ok && len(chart.Sources) > 0 {
+				hasEvidence = true
+				break
+			}
+		}
+		if hasEvidence {
+			continue
+		}
+		blockID := strings.TrimSpace(block.ID)
+		if blockID == "" {
+			blockID = "unknown_block"
+		}
+		addIssue("missing_evidence:" + blockID)
+		for _, chartID := range chartRefs {
+			addIssue("missing_chart_evidence:" + chartID)
+		}
+	}
+	return issues
+}
+
+func blockNeedsEvidence(block ReportBlock) bool {
+	kind := strings.ToLower(strings.TrimSpace(block.Kind))
+	if kind == "chart" && strings.TrimSpace(block.ChartID) != "" {
+		return true
+	}
+	if len(chartIDsForBlock(block)) > 0 {
+		return true
+	}
+	text := strings.ToLower(strings.Join([]string{block.Title, block.Content}, "\n"))
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	keywords := []string{
+		"revenue", "sales", "cost", "profit", "margin", "rate", "ratio", "trend", "growth", "decline",
+		"rows", "total", "average", "median", "percent", "share", "同比", "环比", "趋势", "增长", "下降",
+		"占比", "收入", "销售", "成本", "利润", "总计", "平均", "中位数", "数据", "表", "图",
+	}
+	for _, keyword := range keywords {
+		if strings.Contains(text, keyword) && reportNumberPattern.MatchString(text) {
+			return true
+		}
+	}
+	return false
+}
+
+func chartIDsForBlock(block ReportBlock) []string {
+	ids := map[string]struct{}{}
+	if chartID := strings.TrimSpace(block.ChartID); chartID != "" {
+		ids[chartID] = struct{}{}
+	}
+	for chartID := range referencedChartsOutsideChartBlocks([]ReportBlock{block}) {
+		ids[chartID] = struct{}{}
+	}
+	out := make([]string, 0, len(ids))
+	for id := range ids {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func chartEvidenceRefsForBlock(state *ReportState, block ReportBlock) []EvidenceRef {
+	if state == nil {
+		return nil
+	}
+	chartRefs := chartIDsForBlock(block)
+	if len(chartRefs) == 0 {
+		return nil
+	}
+	refSet := make(map[string]struct{}, len(chartRefs))
+	for _, chartID := range chartRefs {
+		refSet[chartID] = struct{}{}
+	}
+	var refs []EvidenceRef
+	for _, chart := range state.Charts {
+		if _, ok := refSet[strings.TrimSpace(chart.ID)]; ok {
+			refs = append(refs, chart.Sources...)
+		}
+	}
+	return refs
 }
 
 func reportSemanticFinalizeIssues(state *ReportState, sources []service.SessionSourceSummary, profileDetail ProfileDetailProvider) []string {
@@ -434,10 +547,6 @@ func reportSemanticFinalizeIssues(state *ReportState, sources []service.SessionS
 	var unresolved []service.SessionSourceSummary
 	for _, source := range sources {
 		if source.AmbiguityCount <= 0 {
-			continue
-		}
-		status := strings.ToLower(strings.TrimSpace(source.SemanticStatus))
-		if status == "confirmed" || source.ConfirmedOverrideCount >= source.AmbiguityCount {
 			continue
 		}
 		unresolved = append(unresolved, source)
@@ -459,41 +568,18 @@ func reportSemanticFinalizeIssues(state *ReportState, sources []service.SessionS
 			ref = "unknown_source"
 		}
 
+		detailText, candidateRefs := unresolvedSemanticDetail(source, profileDetail)
+		if !reportExplicitlyUsesUnresolvedSource(state, source, candidateRefs) {
+			continue
+		}
+
 		var detail strings.Builder
 		detail.WriteString(source.DisplayName)
 		detail.WriteString(fmt.Sprintf(" (profile=%s", source.ProfileID))
-
-		if profileDetail != nil && source.ProfileID != "" {
-			profileJSON, _, err := profileDetail(source.ProfileID)
-			if err == nil && profileJSON != "" {
-				var profile map[string]interface{}
-				if json.Unmarshal([]byte(profileJSON), &profile) == nil {
-					if amb, ok := profile["ambiguities"].([]interface{}); ok && len(amb) > 0 {
-						detail.WriteString(", ambiguities=[")
-						for i, a := range amb {
-							if am, ok := a.(map[string]interface{}); ok {
-								if i > 0 {
-									detail.WriteString("; ")
-								}
-								if kind, _ := am["kind"].(string); kind != "" {
-									detail.WriteString(kind)
-									detail.WriteString(": ")
-								}
-								if cands, ok := am["candidates"].([]interface{}); ok {
-									names := make([]string, 0, len(cands))
-									for _, c := range cands {
-										if s, ok := c.(string); ok {
-											names = append(names, s)
-										}
-									}
-									detail.WriteString(strings.Join(names, ", "))
-								}
-							}
-						}
-						detail.WriteString("]")
-					}
-				}
-			}
+		if detailText != "" {
+			detail.WriteString(", ambiguities=[")
+			detail.WriteString(detailText)
+			detail.WriteString("]")
 		}
 		detail.WriteString(")")
 		detail.WriteString(fmt.Sprintf(", unresolved_ambiguities=%d", source.AmbiguityCount))
@@ -502,6 +588,103 @@ func reportSemanticFinalizeIssues(state *ReportState, sources []service.SessionS
 	}
 
 	return issues
+}
+
+func unresolvedSemanticDetail(source service.SessionSourceSummary, profileDetail ProfileDetailProvider) (string, []string) {
+	if profileDetail == nil || strings.TrimSpace(source.ProfileID) == "" {
+		return "", nil
+	}
+	profileJSON, _, err := profileDetail(source.ProfileID)
+	if err != nil || strings.TrimSpace(profileJSON) == "" {
+		return "", nil
+	}
+	var profile map[string]interface{}
+	if json.Unmarshal([]byte(profileJSON), &profile) != nil {
+		return "", nil
+	}
+	amb, ok := profile["ambiguities"].([]interface{})
+	if !ok || len(amb) == 0 {
+		return "", nil
+	}
+	var detail strings.Builder
+	var candidates []string
+	for i, a := range amb {
+		am, ok := a.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if i > 0 {
+			detail.WriteString("; ")
+		}
+		if kind, _ := am["kind"].(string); kind != "" {
+			detail.WriteString(kind)
+			detail.WriteString(": ")
+		}
+		if cands, ok := am["candidates"].([]interface{}); ok {
+			names := make([]string, 0, len(cands))
+			for _, c := range cands {
+				if s, ok := c.(string); ok && strings.TrimSpace(s) != "" {
+					names = append(names, s)
+					candidates = append(candidates, s)
+				}
+			}
+			detail.WriteString(strings.Join(names, ", "))
+		}
+	}
+	return detail.String(), candidates
+}
+
+func reportExplicitlyUsesUnresolvedSource(state *ReportState, source service.SessionSourceSummary, candidateRefs []string) bool {
+	if state == nil {
+		return false
+	}
+	table := strings.TrimSpace(source.AnalysisTableName)
+	displayName := strings.TrimSpace(source.DisplayName)
+	sourceID := strings.TrimSpace(source.SourceID)
+	for _, block := range state.Blocks {
+		if evidenceRefsUseSource(block.Sources, table, displayName, sourceID) {
+			return true
+		}
+		content := strings.Join([]string{block.ID, block.Title, block.Content, block.ChartID}, "\n")
+		if containsMeaningfulToken(content, table) || containsMeaningfulToken(content, displayName) || containsMeaningfulToken(content, sourceID) {
+			return true
+		}
+		if evidenceRefsUseSource(chartEvidenceRefsForBlock(state, block), table, displayName, sourceID) {
+			return true
+		}
+		for _, candidate := range candidateRefs {
+			if isSpecificSemanticCandidate(candidate) && containsMeaningfulToken(content, candidate) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func evidenceRefsUseSource(refs []EvidenceRef, table, displayName, sourceID string) bool {
+	for _, ref := range refs {
+		text := strings.Join([]string{ref.TableName, ref.SQL, ref.Summary, ref.ToolName, ref.ChartID}, "\n")
+		if containsMeaningfulToken(text, table) || containsMeaningfulToken(text, displayName) || containsMeaningfulToken(text, sourceID) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsMeaningfulToken(text, token string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" || len([]rune(token)) < 3 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(text), strings.ToLower(token))
+}
+
+func isSpecificSemanticCandidate(candidate string) bool {
+	candidate = strings.TrimSpace(candidate)
+	if len([]rune(candidate)) < 5 {
+		return false
+	}
+	return strings.Contains(candidate, "_") || strings.Contains(candidate, ".")
 }
 
 func hasDuplicateLeadingHeading(block ReportBlock) bool {

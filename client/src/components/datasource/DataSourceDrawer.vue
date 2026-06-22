@@ -17,7 +17,7 @@
         </div>
         <div
           v-for="source in sessionSources"
-          :key="source.source_id"
+          :key="source.source_object_key || source.active_snapshot_id"
           class="source-card"
         >
           <div class="source-title-row">
@@ -25,7 +25,7 @@
             <button
               class="btn-xs danger"
               @click="handleRemoveSessionSource(source)"
-              :disabled="removingSourceId === source.source_id"
+              :disabled="removingSourceKey === source.source_object_key"
             >
               删除
             </button>
@@ -37,8 +37,15 @@
             <span v-if="source.analysis_table_name" class="table-name">{{
               source.analysis_table_name
             }}</span>
+            <span v-if="source.upstream_object" class="table-name">
+              {{ source.upstream_schema ? `${source.upstream_schema}.` : ""
+              }}{{ source.upstream_object }}
+            </span>
             <span v-if="source.row_count"
               >{{ source.row_count.toLocaleString() }} rows</span
+            >
+            <span v-if="source.rows_skipped" class="badge warning"
+              >{{ source.rows_skipped.toLocaleString() }} skipped</span
             >
             <span v-if="source.large_dataset" class="badge large"
               >large dataset</span
@@ -361,7 +368,7 @@
         </div>
         <div
           v-for="p in pendingProfiles"
-          :key="p.source_id"
+          :key="p.profile_id || p.active_snapshot_id"
           class="source-card"
         >
           <div class="source-name">
@@ -466,16 +473,109 @@
                   </div>
                 </div>
               </div>
+              <div
+                v-if="profileDetail.profile_json?.ambiguities?.length"
+                class="confirm-form"
+              >
+                <label
+                  v-if="hasAmbiguity(profileDetail, 'multiple_time_columns')"
+                  class="field-row"
+                >
+                  <span>主时间列</span>
+                  <select
+                    v-model="confirmDraft.primary_time_column"
+                    class="input-sm"
+                  >
+                    <option value="">选择</option>
+                    <option
+                      v-for="tc in profileDetail.profile_json.time_candidates ||
+                      []"
+                      :key="tc.column_name"
+                      :value="tc.column_name"
+                    >
+                      {{ tc.column_name }}
+                    </option>
+                  </select>
+                </label>
+                <div
+                  v-if="hasAmbiguity(profileDetail, 'ambiguous_metrics')"
+                  class="field-group"
+                >
+                  <span>指标定义</span>
+                  <label
+                    v-for="name in ambiguityCandidates(
+                      profileDetail,
+                      'ambiguous_metrics',
+                    )"
+                    :key="name"
+                    class="field-row"
+                  >
+                    <span>{{ name }}</span>
+                    <input
+                      v-model="confirmDraft.metric_definitions[name]"
+                      class="input-sm"
+                      placeholder="业务口径"
+                    />
+                  </label>
+                </div>
+                <div
+                  v-if="hasAmbiguity(profileDetail, 'ambiguous_units')"
+                  class="field-group"
+                >
+                  <span>百分比列</span>
+                  <label
+                    v-for="name in ambiguityCandidates(
+                      profileDetail,
+                      'ambiguous_units',
+                    )"
+                    :key="name"
+                    class="check-row"
+                  >
+                    <input
+                      type="checkbox"
+                      :value="normalizeUnitCandidate(name)"
+                      v-model="confirmDraft.percentage_columns"
+                    />
+                    <span>{{ name }}</span>
+                  </label>
+                </div>
+                <div
+                  v-if="hasAmbiguity(profileDetail, 'ambiguous_join')"
+                  class="field-group"
+                >
+                  <span>确认 Join 候选</span>
+                  <label
+                    v-for="name in ambiguityCandidates(
+                      profileDetail,
+                      'ambiguous_join',
+                    )"
+                    :key="name"
+                    class="check-row"
+                  >
+                    <input
+                      type="checkbox"
+                      :value="name"
+                      v-model="confirmDraft.confirmed_join_candidates"
+                    />
+                    <span>{{ name }}</span>
+                  </label>
+                </div>
+              </div>
+              <div v-if="confirmError" class="error-msg">
+                {{ confirmError }}
+              </div>
               <div class="confirm-actions">
                 <button
                   class="btn-sm primary"
                   @click="handleConfirm(p.profile_id, 'session')"
+                  :disabled="confirmingProfileId === p.profile_id"
                 >
                   确认 (Session)
                 </button>
                 <button
                   class="btn-sm"
                   @click="handleConfirm(p.profile_id, 'workspace')"
+                  :disabled="confirmingProfileId === p.profile_id"
                 >
                   确认 (Workspace)
                 </button>
@@ -519,13 +619,21 @@ const selectedProfileId = ref(null);
 const importPollingTimer = ref(null);
 const isImporting = ref(false);
 const importError = ref("");
-const removingSourceId = ref("");
+const removingSourceKey = ref("");
 const editingSourceId = ref("");
 const savingSource = ref(false);
 const deletingSourceId = ref("");
 const testingSourceId = ref("");
 const sourceMessage = ref("");
 const testResults = ref({});
+const confirmDraft = ref({
+  primary_time_column: "",
+  metric_definitions: {},
+  percentage_columns: [],
+  confirmed_join_candidates: [],
+});
+const confirmError = ref("");
+const confirmingProfileId = ref("");
 const profileDetail = computed(
   () => store.semanticProfileDetails[selectedProfileId.value],
 );
@@ -701,22 +809,28 @@ async function handleImport(sourceId, schema, object) {
 }
 
 async function handleRemoveSessionSource(source) {
-  if (!props.sessionId || !source?.source_id || removingSourceId.value) return;
+  if (!props.sessionId || !source?.source_id || removingSourceKey.value) return;
+  const sourceObjectKey = source.source_object_key || "";
+  if (!sourceObjectKey) {
+    importError.value = "缺少 source_object_key，不能删除会话数据源";
+    return;
+  }
   const ok = window.confirm(
     `从当前会话删除数据源「${source.display_name || source.analysis_table_name || source.source_id}」？`,
   );
   if (!ok) return;
-  removingSourceId.value = source.source_id;
+  removingSourceKey.value = sourceObjectKey;
   try {
     const result = await store.removeSessionSource(
       props.sessionId,
       source.source_id,
+      sourceObjectKey,
     );
     if (result?.ok === false) {
       importError.value = result.error || "删除失败";
     }
   } finally {
-    removingSourceId.value = "";
+    removingSourceKey.value = "";
   }
 }
 
@@ -765,21 +879,134 @@ function stopImportPolling() {
 
 async function loadProfileDetail(profileId) {
   selectedProfileId.value = profileId;
+  confirmError.value = "";
   await store.fetchProfileDetail(profileId);
+  resetConfirmDraft(store.semanticProfileDetails[profileId]);
 }
 
 async function handleConfirm(profileId, scope) {
   const detail = store.semanticProfileDetails[profileId];
   if (!detail) return;
-  const overrides = {};
-  if (detail.profile_json?.time_candidates?.length) {
-    overrides.time_candidates = detail.profile_json.time_candidates;
+  confirmError.value = "";
+  let overrides;
+  try {
+    overrides = buildConfirmOverrides(detail);
+  } catch (e) {
+    confirmError.value = e.message || "请补全确认信息";
+    return;
   }
-  const ok = await store.confirmProfile(profileId, scope, overrides);
-  if (ok) {
+  confirmingProfileId.value = profileId;
+  try {
+    const result = await store.confirmProfile(profileId, scope, overrides);
+    if (result?.ok === false) {
+      confirmError.value = result.error || "确认失败";
+      return;
+    }
     selectedProfileId.value = null;
     await store.fetchSessionSources(props.sessionId);
+  } finally {
+    confirmingProfileId.value = "";
   }
+}
+
+function resetConfirmDraft(detail) {
+  const profile = detail?.profile_json || {};
+  const metricDefinitions = {};
+  for (const name of ambiguityCandidates(detail, "ambiguous_metrics")) {
+    metricDefinitions[name] = "";
+  }
+  confirmDraft.value = {
+    primary_time_column:
+      hasAmbiguity(detail, "multiple_time_columns") &&
+      profile.time_candidates?.length === 1
+        ? profile.time_candidates[0].column_name || ""
+        : "",
+    metric_definitions: metricDefinitions,
+    percentage_columns: [],
+    confirmed_join_candidates: [],
+  };
+}
+
+function hasAmbiguity(detail, kind) {
+  return (detail?.profile_json?.ambiguities || []).some(
+    (amb) => amb?.kind === kind,
+  );
+}
+
+function ambiguityCandidates(detail, kind) {
+  const ambiguities = detail?.profile_json?.ambiguities || [];
+  return [
+    ...new Set(
+      ambiguities
+        .filter((amb) => amb?.kind === kind)
+        .flatMap((amb) => (Array.isArray(amb.candidates) ? amb.candidates : []))
+        .map((name) => `${name || ""}`.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function normalizeUnitCandidate(name) {
+  return `${name || ""}`.split("(")[0].trim();
+}
+
+function buildConfirmOverrides(detail) {
+  const overrides = {};
+  if (hasAmbiguity(detail, "multiple_time_columns")) {
+    const value = confirmDraft.value.primary_time_column?.trim();
+    if (!value) {
+      throw new Error("请选择主时间列");
+    }
+    overrides.primary_time_column = value;
+  }
+
+  const metricCandidates = ambiguityCandidates(detail, "ambiguous_metrics");
+  if (metricCandidates.length > 0) {
+    const definitions = {};
+    const missing = [];
+    for (const name of metricCandidates) {
+      const definition = confirmDraft.value.metric_definitions[name]?.trim();
+      if (!definition) {
+        missing.push(name);
+      } else {
+        definitions[name] = definition;
+      }
+    }
+    if (missing.length > 0) {
+      throw new Error(`请补全指标口径: ${missing.join(", ")}`);
+    }
+    overrides.metric_definitions = definitions;
+  }
+
+  if (hasAmbiguity(detail, "ambiguous_units")) {
+    const percentageColumns = [
+      ...new Set(
+        confirmDraft.value.percentage_columns
+          .map((name) => normalizeUnitCandidate(name))
+          .filter(Boolean),
+      ),
+    ];
+    if (percentageColumns.length === 0) {
+      throw new Error("请选择需要按百分比解释的列");
+    }
+    overrides.percentage_columns = percentageColumns;
+  }
+
+  if (hasAmbiguity(detail, "ambiguous_join")) {
+    const joinCandidates = [
+      ...new Set(
+        confirmDraft.value.confirmed_join_candidates
+          .map((name) => `${name || ""}`.trim())
+          .filter(Boolean),
+      ),
+    ];
+    if (joinCandidates.length === 0) {
+      throw new Error("请选择确认采用的 Join 候选");
+    }
+    overrides.confirmed_join_candidates = joinCandidates;
+  }
+
+  return overrides;
 }
 
 function getAuthHeaders() {
@@ -902,6 +1129,10 @@ function getAuthHeaders() {
   background: #fff3e0;
   color: #e65100;
 }
+.badge.warning {
+  background: #fff8e1;
+  color: #b26a00;
+}
 .table-name {
   font-family: monospace;
 }
@@ -998,6 +1229,42 @@ function getAuthHeaders() {
 .ambiguity-item {
   font-size: 12px;
   margin-bottom: 4px;
+}
+.confirm-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+}
+.field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.field-group > span,
+.field-row > span:first-child {
+  color: #555;
+  font-size: 11px;
+}
+.field-row {
+  display: grid;
+  grid-template-columns: minmax(80px, 1fr) minmax(130px, 1.5fr);
+  gap: 6px;
+  align-items: center;
+}
+.field-row .input-sm {
+  min-width: 0;
+}
+.check-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: #555;
+  font-size: 12px;
 }
 .candidates {
   color: #666;

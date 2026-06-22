@@ -52,10 +52,11 @@ func applyReportChartMutation(state *ReportState, editState *ReportEditState, pa
 	}
 
 	chart := ChartData{
-		ID:     params.ChartID,
-		Option: option,
-		Width:  "100%",
-		Height: "400px",
+		ID:      params.ChartID,
+		Option:  option,
+		Width:   "100%",
+		Height:  "400px",
+		Sources: params.Sources,
 	}
 
 	replaced := false

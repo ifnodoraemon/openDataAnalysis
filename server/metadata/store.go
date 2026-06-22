@@ -206,9 +206,9 @@ func (s *Store) migrate() error {
 		)`,
 
 		`CREATE TABLE IF NOT EXISTS source_snapshots (
-			id TEXT PRIMARY KEY,
-			session_id TEXT NOT NULL,
-			source_id TEXT NOT NULL,
+				id TEXT PRIMARY KEY,
+				session_id TEXT NOT NULL,
+				source_id TEXT NOT NULL,
 			upstream_kind TEXT NOT NULL,
 			upstream_schema TEXT NOT NULL DEFAULT '',
 			upstream_object TEXT NOT NULL DEFAULT '',
@@ -217,11 +217,12 @@ func (s *Store) migrate() error {
 			column_count INTEGER NOT NULL DEFAULT 0,
 			status TEXT NOT NULL DEFAULT 'creating',
 			error_message TEXT,
-			schema_signature TEXT NOT NULL DEFAULT '',
-			imported_at DATETIME NOT NULL,
-			rows_imported INTEGER NOT NULL DEFAULT 0,
-			import_duration_ms INTEGER NOT NULL DEFAULT 0,
-			profile_duration_ms INTEGER NOT NULL DEFAULT 0,
+				schema_signature TEXT NOT NULL DEFAULT '',
+				imported_at DATETIME NOT NULL,
+				rows_imported INTEGER NOT NULL DEFAULT 0,
+				rows_skipped INTEGER NOT NULL DEFAULT 0,
+				import_duration_ms INTEGER NOT NULL DEFAULT 0,
+				profile_duration_ms INTEGER NOT NULL DEFAULT 0,
 			snapshot_size_bytes INTEGER NOT NULL DEFAULT 0,
 			profile_mode TEXT NOT NULL DEFAULT 'sampled',
 			FOREIGN KEY (source_id) REFERENCES data_sources(id) ON DELETE CASCADE
@@ -230,15 +231,16 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_source_snapshots_source ON source_snapshots(source_id)`,
 
 		`CREATE TABLE IF NOT EXISTS session_source_bindings (
-			session_id TEXT NOT NULL,
-			source_id TEXT NOT NULL,
-			active_snapshot_id TEXT NOT NULL,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL,
-			PRIMARY KEY (session_id, source_id),
-			FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-			FOREIGN KEY (source_id) REFERENCES data_sources(id) ON DELETE CASCADE
-		)`,
+				session_id TEXT NOT NULL,
+				source_id TEXT NOT NULL,
+				source_object_key TEXT NOT NULL,
+				active_snapshot_id TEXT NOT NULL,
+				created_at DATETIME NOT NULL,
+				updated_at DATETIME NOT NULL,
+				PRIMARY KEY (session_id, source_id, source_object_key),
+				FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+				FOREIGN KEY (source_id) REFERENCES data_sources(id) ON DELETE CASCADE
+			)`,
 
 		`CREATE TABLE IF NOT EXISTS semantic_profiles (
 			id TEXT PRIMARY KEY,
@@ -299,6 +301,12 @@ func (s *Store) migrate() error {
 	if err := ensureColumn(s.DB, "run_messages", "tool_call_id", "TEXT"); err != nil {
 		return err
 	}
+	if err := ensureColumn(s.DB, "source_snapshots", "rows_skipped", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureSessionSourceBindingsShape(s.DB); err != nil {
+		return err
+	}
 	if _, err := s.DB.Exec(`UPDATE files SET purpose = 'report' WHERE purpose = 'source' AND storage_key LIKE '%/report/%'`); err != nil {
 		return fmt.Errorf("failed to backfill report file usage: %w", err)
 	}
@@ -314,6 +322,122 @@ func (s *Store) migrate() error {
 }
 
 var safeIdentPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+const cleanSessionSourceBindingsDDL = `CREATE TABLE session_source_bindings (
+	session_id TEXT NOT NULL,
+	source_id TEXT NOT NULL,
+	source_object_key TEXT NOT NULL,
+	active_snapshot_id TEXT NOT NULL,
+	created_at DATETIME NOT NULL,
+	updated_at DATETIME NOT NULL,
+	PRIMARY KEY (session_id, source_id, source_object_key),
+	FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+	FOREIGN KEY (source_id) REFERENCES data_sources(id) ON DELETE CASCADE
+)`
+
+func ensureSessionSourceBindingsShape(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(session_source_bindings)`)
+	if err != nil {
+		return fmt.Errorf("failed to inspect session_source_bindings: %w", err)
+	}
+	defer rows.Close()
+
+	type colInfo struct {
+		Name string
+		PK   int
+	}
+	cols := map[string]colInfo{}
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk); err != nil {
+			return fmt.Errorf("failed to read session_source_bindings structure: %w", err)
+		}
+		cols[name] = colInfo{Name: name, PK: pk}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if cols["session_id"].PK == 1 && cols["source_id"].PK == 2 && cols["source_object_key"].PK == 3 {
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`ALTER TABLE session_source_bindings RENAME TO session_source_bindings_legacy`); err != nil {
+		return fmt.Errorf("failed to replace session_source_bindings: %w", err)
+	}
+	if _, err := tx.Exec(cleanSessionSourceBindingsDDL); err != nil {
+		return fmt.Errorf("failed to create session_source_bindings: %w", err)
+	}
+
+	hasObjectKey := false
+	if _, ok := cols["source_object_key"]; ok {
+		hasObjectKey = true
+	}
+	selectSQL := `SELECT b.session_id, b.source_id, b.active_snapshot_id, b.created_at, b.updated_at, COALESCE(ss.upstream_kind, ''), COALESCE(ss.upstream_schema, ''), COALESCE(ss.upstream_object, '')`
+	if hasObjectKey {
+		selectSQL += `, COALESCE(b.source_object_key, '')`
+	}
+	selectSQL += ` FROM session_source_bindings_legacy b LEFT JOIN source_snapshots ss ON ss.id = b.active_snapshot_id`
+	legacyRows, err := tx.Query(selectSQL)
+	if err != nil {
+		return fmt.Errorf("failed to read old session_source_bindings: %w", err)
+	}
+	for legacyRows.Next() {
+		var sessionID, sourceID, snapshotID, createdAt, updatedAt, kind, schema, object string
+		objectKey := ""
+		scanArgs := []interface{}{&sessionID, &sourceID, &snapshotID, &createdAt, &updatedAt, &kind, &schema, &object}
+		if hasObjectKey {
+			scanArgs = append(scanArgs, &objectKey)
+		}
+		if err := legacyRows.Scan(scanArgs...); err != nil {
+			return fmt.Errorf("failed to scan old session_source_bindings: %w", err)
+		}
+		if strings.TrimSpace(objectKey) == "" {
+			objectKey = metadataSourceObjectKey(sourceID, kind, schema, object)
+		}
+		if _, err := tx.Exec(
+			`INSERT OR REPLACE INTO session_source_bindings (session_id, source_id, source_object_key, active_snapshot_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			sessionID, sourceID, objectKey, snapshotID, createdAt, updatedAt,
+		); err != nil {
+			return fmt.Errorf("failed to write session_source_bindings row: %w", err)
+		}
+	}
+	if err := legacyRows.Err(); err != nil {
+		_ = legacyRows.Close()
+		return err
+	}
+	if err := legacyRows.Close(); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DROP TABLE session_source_bindings_legacy`); err != nil {
+		return fmt.Errorf("failed to drop old session_source_bindings: %w", err)
+	}
+	return tx.Commit()
+}
+
+func metadataSourceObjectKey(sourceID, upstreamKind, upstreamSchema, upstreamObject string) string {
+	kind := strings.TrimSpace(upstreamKind)
+	if kind == "" {
+		kind = "source"
+	}
+	if kind == "file_upload" {
+		return "file_upload:" + strings.TrimSpace(sourceID)
+	}
+	schema := strings.TrimSpace(upstreamSchema)
+	object := strings.TrimSpace(upstreamObject)
+	if schema != "" || object != "" {
+		return kind + ":" + schema + "." + object
+	}
+	return kind + ":" + strings.TrimSpace(sourceID)
+}
 
 func (s *Store) backfillFileDataSources() error {
 	rows, err := s.DB.Query(`SELECT f.id, f.workspace_id, f.display_name, f.uploaded_by, f.created_at, f.updated_at FROM files f WHERE f.purpose = 'source' AND NOT EXISTS (SELECT 1 FROM data_sources ds WHERE ds.file_id = f.id)`)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -56,7 +57,23 @@ type SourceRuntimeTable struct {
 	TableName string
 }
 
-func (s *SourceService) cleanupOldSnapshots(ctx context.Context, sessionID, sourceID string) {
+func SourceObjectKey(sourceID, upstreamKind, upstreamSchema, upstreamObject string) string {
+	kind := strings.TrimSpace(upstreamKind)
+	if kind == "" {
+		kind = "source"
+	}
+	if kind == "file_upload" {
+		return "file_upload:" + strings.TrimSpace(sourceID)
+	}
+	schema := strings.TrimSpace(upstreamSchema)
+	object := strings.TrimSpace(upstreamObject)
+	if schema != "" || object != "" {
+		return kind + ":" + schema + "." + object
+	}
+	return kind + ":" + strings.TrimSpace(sourceID)
+}
+
+func (s *SourceService) cleanupOldSnapshots(ctx context.Context, sessionID, sourceID, sourceObjectKey string) {
 	oldSnapshots, err := s.SnapshotRepo.ListBySource(ctx, sourceID)
 	if err != nil {
 		log.Printf("cleanupOldSnapshots: ListBySource failed source_id=%s err=%v", sourceID, err)
@@ -64,6 +81,9 @@ func (s *SourceService) cleanupOldSnapshots(ctx context.Context, sessionID, sour
 	}
 	for _, snap := range oldSnapshots {
 		if snap.SessionID != sessionID {
+			continue
+		}
+		if SourceObjectKey(sourceID, snap.UpstreamKind, snap.UpstreamSchema, snap.UpstreamObject) != sourceObjectKey {
 			continue
 		}
 		profiles, profErr := s.SemanticProfileRepo.ListBySource(ctx, sourceID)
@@ -111,8 +131,9 @@ func (s *SourceService) EnsureFileSource(ctx context.Context, workspaceID, fileI
 	return ds, nil
 }
 
-func (s *SourceService) CreateSnapshot(ctx context.Context, sessionID, sourceID, upstreamKind, upstreamSchema, upstreamObject, analysisTableName string, rowCount, colCount int, schemaSignature string, rowsImported, importDurationMs, profileDurationMs int, snapshotSizeBytes int64, profileMode domain.ProfileMode) (*domain.SourceSnapshot, error) {
-	s.cleanupOldSnapshots(ctx, sessionID, sourceID)
+func (s *SourceService) CreateSnapshot(ctx context.Context, sessionID, sourceID, upstreamKind, upstreamSchema, upstreamObject, analysisTableName string, rowCount, colCount int, schemaSignature string, rowsImported, rowsSkipped, importDurationMs, profileDurationMs int, snapshotSizeBytes int64, profileMode domain.ProfileMode) (*domain.SourceSnapshot, error) {
+	sourceObjectKey := SourceObjectKey(sourceID, upstreamKind, upstreamSchema, upstreamObject)
+	s.cleanupOldSnapshots(ctx, sessionID, sourceID, sourceObjectKey)
 
 	snapshot := &domain.SourceSnapshot{
 		ID:                "snap_" + uuid.New().String()[:12],
@@ -128,6 +149,7 @@ func (s *SourceService) CreateSnapshot(ctx context.Context, sessionID, sourceID,
 		SchemaSignature:   schemaSignature,
 		ImportedAt:        time.Now(),
 		RowsImported:      rowsImported,
+		RowsSkipped:       rowsSkipped,
 		ImportDurationMs:  importDurationMs,
 		ProfileDurationMs: profileDurationMs,
 		SnapshotSizeBytes: snapshotSizeBytes,
@@ -139,6 +161,7 @@ func (s *SourceService) CreateSnapshot(ctx context.Context, sessionID, sourceID,
 	binding := &domain.SessionSourceBinding{
 		SessionID:        sessionID,
 		SourceID:         sourceID,
+		SourceObjectKey:  sourceObjectKey,
 		ActiveSnapshotID: snapshot.ID,
 		CreatedAt:        time.Now(),
 		UpdatedAt:        time.Now(),
@@ -157,7 +180,7 @@ func (s *SourceService) GetActiveSnapshotForFile(ctx context.Context, sessionID,
 	if ds == nil {
 		return nil, nil
 	}
-	binding, err := s.SessionSourceBindingRepo.GetBySessionAndSource(ctx, sessionID, ds.ID)
+	binding, err := s.SessionSourceBindingRepo.GetBySessionSourceObject(ctx, sessionID, ds.ID, SourceObjectKey(ds.ID, "file_upload", "", ""))
 	if err != nil {
 		return nil, err
 	}
@@ -195,14 +218,14 @@ func (s *SourceService) GetSessionSources(ctx context.Context, sessionID string)
 		var profileID string
 		var ambiguityCount int
 		var confirmedOverrideCount int
-		if len(profiles) > 0 {
-			semanticStatus = string(profiles[0].ProfileStatus)
-			profileID = profiles[0].ID
+		if profile := selectProfileForSnapshot(profiles, sessionID, snapshot.ID); profile != nil {
+			semanticStatus = string(profile.ProfileStatus)
+			profileID = profile.ID
 			var facts ProfiledFacts
-			if err := json.Unmarshal([]byte(profiles[0].ProfileJSON), &facts); err == nil {
+			if err := json.Unmarshal([]byte(profile.ProfileJSON), &facts); err == nil {
 				ambiguityCount = len(facts.Ambiguities)
 			}
-			confs, confErr := s.SemanticConfirmationRepo.ListByProfile(ctx, profiles[0].ID)
+			confs, confErr := s.SemanticConfirmationRepo.ListByProfile(ctx, profile.ID)
 			if confErr == nil {
 				confirmedOverrideCount = len(confs)
 			}
@@ -211,9 +234,13 @@ func (s *SourceService) GetSessionSources(ctx context.Context, sessionID string)
 		}
 		summaries = append(summaries, SessionSourceSummary{
 			SourceID:               ds.ID,
+			SourceObjectKey:        b.SourceObjectKey,
 			DisplayName:            ds.Name,
 			SourceType:             string(ds.SourceType),
 			ActiveSnapshotID:       b.ActiveSnapshotID,
+			UpstreamKind:           snapshot.UpstreamKind,
+			UpstreamSchema:         snapshot.UpstreamSchema,
+			UpstreamObject:         snapshot.UpstreamObject,
 			AnalysisTableName:      snapshot.AnalysisTableName,
 			SnapshotStatus:         string(snapshot.Status),
 			SemanticStatus:         semanticStatus,
@@ -225,6 +252,7 @@ func (s *SourceService) GetSessionSources(ctx context.Context, sessionID string)
 			LastImportedAt:         snapshot.ImportedAt,
 			LargeDataset:           snapshot.RowCount >= 1000000,
 			RowsImported:           snapshot.RowsImported,
+			RowsSkipped:            snapshot.RowsSkipped,
 			ImportDurationMs:       snapshot.ImportDurationMs,
 			ProfileDurationMs:      snapshot.ProfileDurationMs,
 			SnapshotSizeBytes:      snapshot.SnapshotSizeBytes,
@@ -243,23 +271,35 @@ func (s *SourceService) GetSessionSources(ctx context.Context, sessionID string)
 	return summaries, nil
 }
 
+func selectProfileForSnapshot(profiles []domain.SemanticProfile, sessionID, snapshotID string) *domain.SemanticProfile {
+	for i := range profiles {
+		if profiles[i].SessionID == sessionID && profiles[i].SnapshotID == snapshotID {
+			return &profiles[i]
+		}
+	}
+	return nil
+}
+
 func (s *SourceService) RecordSnapshotError(ctx context.Context, snapshotID, errMsg string) error {
 	return s.SnapshotRepo.UpdateStatus(ctx, snapshotID, domain.SnapshotStatusFailed, &errMsg)
 }
 
-func (s *SourceService) RemoveSessionSource(ctx context.Context, sessionID, sourceID string) (string, error) {
-	binding, err := s.SessionSourceBindingRepo.GetBySessionAndSource(ctx, sessionID, sourceID)
+func (s *SourceService) RemoveSessionSource(ctx context.Context, sessionID, sourceID, sourceObjectKey string) ([]string, error) {
+	if strings.TrimSpace(sourceObjectKey) == "" {
+		return nil, fmt.Errorf("source_object_key is required")
+	}
+	binding, err := s.SessionSourceBindingRepo.GetBySessionSourceObject(ctx, sessionID, sourceID, sourceObjectKey)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if binding == nil {
-		return "", nil
+		return nil, nil
 	}
 
-	tableName := ""
+	tableNames := []string{}
 	snapshot, snapErr := s.SnapshotRepo.GetByID(ctx, binding.ActiveSnapshotID)
 	if snapErr == nil && snapshot != nil {
-		tableName = snapshot.AnalysisTableName
+		tableNames = append(tableNames, snapshot.AnalysisTableName)
 	}
 
 	profiles, profErr := s.SemanticProfileRepo.ListBySource(ctx, sourceID)
@@ -267,7 +307,7 @@ func (s *SourceService) RemoveSessionSource(ctx context.Context, sessionID, sour
 		log.Printf("RemoveSessionSource: list profiles failed source_id=%s err=%v", sourceID, profErr)
 	}
 	for _, profile := range profiles {
-		if profile.SessionID != sessionID {
+		if profile.SessionID != sessionID || profile.SnapshotID != binding.ActiveSnapshotID {
 			continue
 		}
 		if err := s.SemanticConfirmationRepo.DeleteByProfile(ctx, profile.ID); err != nil {
@@ -278,22 +318,16 @@ func (s *SourceService) RemoveSessionSource(ctx context.Context, sessionID, sour
 		}
 	}
 
-	snapshots, listErr := s.SnapshotRepo.ListBySource(ctx, sourceID)
-	if listErr != nil {
-		log.Printf("RemoveSessionSource: list snapshots failed source_id=%s err=%v", sourceID, listErr)
-	}
-	for _, snap := range snapshots {
-		if snap.SessionID == sessionID {
-			if err := s.SnapshotRepo.Delete(ctx, snap.ID); err != nil {
-				log.Printf("RemoveSessionSource: delete snapshot failed snapshot_id=%s err=%v", snap.ID, err)
-			}
+	if snapshot != nil {
+		if err := s.SnapshotRepo.Delete(ctx, snapshot.ID); err != nil {
+			log.Printf("RemoveSessionSource: delete snapshot failed snapshot_id=%s err=%v", snapshot.ID, err)
 		}
 	}
 
-	if err := s.SessionSourceBindingRepo.Delete(ctx, sessionID, sourceID); err != nil {
-		return tableName, err
+	if err := s.SessionSourceBindingRepo.Delete(ctx, sessionID, sourceID, sourceObjectKey); err != nil {
+		return tableNames, err
 	}
-	return tableName, nil
+	return tableNames, nil
 }
 
 func (s *SourceService) DeleteWorkspaceSource(ctx context.Context, sourceID string) ([]SourceRuntimeTable, error) {
@@ -553,15 +587,18 @@ func (s *SourceService) CreateSemanticProfile(ctx context.Context, sessionID, wo
 		log.Printf("CreateSemanticProfile: FindWorkspaceConfirmation failed workspace_id=%s signature=%s err=%v", workspaceID, schemaSignature, wsErr)
 	}
 	if wsConfirmation != nil {
-		merged := s.applyConfirmations(ctx, string(profileJSON), workspaceID, schemaSignature, "")
+		confirmations := []domain.SemanticConfirmation{*wsConfirmation}
+		merged := applyConfirmationsToProfile(string(profileJSON), confirmations)
+		merged = removeResolvedAmbiguities(merged, confirmationOverrideJSONs(confirmations))
 		if err := s.SemanticProfileRepo.UpdateProfileJSON(ctx, profile.ID, merged); err != nil {
 			log.Printf("CreateSemanticProfile: merge workspace overrides failed profile_id=%s err=%v", profile.ID, err)
 		} else {
 			profileJSON = []byte(merged)
 			profile.ProfileJSON = merged
 		}
-		_ = s.SemanticProfileRepo.UpdateStatus(ctx, profile.ID, domain.ProfileStatusConfirmed)
-		profile.ProfileStatus = domain.ProfileStatusConfirmed
+		status := profileStatusForJSON(merged)
+		_ = s.SemanticProfileRepo.UpdateStatus(ctx, profile.ID, status)
+		profile.ProfileStatus = status
 		log.Printf("workspace confirmation auto-applied for profile %s (signature=%s)", profile.ID, schemaSignature)
 	}
 
@@ -584,17 +621,22 @@ func (s *SourceService) ConfirmProfile(ctx context.Context, profileID, workspace
 	if err := json.Unmarshal([]byte(profile.ProfileJSON), &facts); err != nil {
 		return nil, fmt.Errorf("failed to parse profile json: %w", err)
 	}
-	if len(facts.Ambiguities) > 0 {
-		trimmed := strings.TrimSpace(overridesJSON)
-		if trimmed == "" || trimmed == "{}" || trimmed == "null" {
-			return nil, fmt.Errorf("profile has %d unresolved ambiguities; empty overrides cannot confirm them", len(facts.Ambiguities))
-		}
-		var overrides map[string]interface{}
+	var overrides map[string]interface{}
+	trimmedOverrides := strings.TrimSpace(overridesJSON)
+	if trimmedOverrides != "" && trimmedOverrides != "null" {
 		if err := json.Unmarshal([]byte(overridesJSON), &overrides); err != nil {
 			return nil, fmt.Errorf("invalid overrides_json: %w", err)
 		}
+	}
+	if len(facts.Ambiguities) > 0 {
+		if trimmedOverrides == "" || trimmedOverrides == "{}" || trimmedOverrides == "null" {
+			return nil, fmt.Errorf("profile has %d unresolved ambiguities; empty overrides cannot confirm them", len(facts.Ambiguities))
+		}
 		if len(overrides) == 0 {
 			return nil, fmt.Errorf("profile has %d unresolved ambiguities; empty overrides cannot confirm them", len(facts.Ambiguities))
+		}
+		if !overridesResolveAnyAmbiguity(facts.Ambiguities, []string{overridesJSON}) {
+			return nil, fmt.Errorf("overrides_json does not resolve any current profile ambiguity")
 		}
 	}
 
@@ -605,54 +647,66 @@ func (s *SourceService) ConfirmProfile(ctx context.Context, profileID, workspace
 		SessionID:     sessionID,
 		ConfirmedBy:   confirmedBy,
 		Scope:         domain.ConfirmationScope(scope),
-		OverridesJSON: overridesJSON,
+		OverridesJSON: normalizedOverridesJSON(overridesJSON),
 		CreatedAt:     time.Now(),
 	}
 	if err := s.SemanticConfirmationRepo.Create(ctx, confirmation); err != nil {
 		return nil, fmt.Errorf("failed to create semantic confirmation: %w", err)
 	}
 
-	merged := s.applyConfirmations(ctx, profile.ProfileJSON, workspaceID, profile.SchemaSignature, sessionID)
-	merged = removeResolvedAmbiguities(merged)
+	confirmations := s.applicableConfirmations(ctx, workspaceID, profile.SchemaSignature, profileID)
+	merged := applyConfirmationsToProfile(profile.ProfileJSON, confirmations)
+	merged = removeResolvedAmbiguities(merged, confirmationOverrideJSONs(confirmations))
 	if err := s.SemanticProfileRepo.UpdateProfileJSON(ctx, profileID, merged); err != nil {
 		log.Printf("ConfirmProfile: UpdateProfileJSON failed profile_id=%s err=%v", profileID, err)
 	}
-	if err := s.SemanticProfileRepo.UpdateStatus(ctx, profileID, domain.ProfileStatusConfirmed); err != nil {
+	status := profileStatusForJSON(merged)
+	if err := s.SemanticProfileRepo.UpdateStatus(ctx, profileID, status); err != nil {
 		log.Printf("ConfirmProfile: UpdateStatus failed profile_id=%s err=%v", profileID, err)
 	}
 	profile.ProfileJSON = merged
-	profile.ProfileStatus = domain.ProfileStatusConfirmed
+	profile.ProfileStatus = status
 
 	return profile, nil
 }
 
-func (s *SourceService) applyConfirmations(ctx context.Context, profileJSON, workspaceID, schemaSignature, sessionID string) string {
+func (s *SourceService) applicableConfirmations(ctx context.Context, workspaceID, schemaSignature, profileID string) []domain.SemanticConfirmation {
+	var confirmations []domain.SemanticConfirmation
+	if workspaceID != "" && schemaSignature != "" {
+		wsConf, wsErr := s.SemanticProfileRepo.FindWorkspaceConfirmation(ctx, workspaceID, schemaSignature)
+		if wsErr != nil {
+			log.Printf("applicableConfirmations: FindWorkspaceConfirmation failed workspace_id=%s signature=%s err=%v", workspaceID, schemaSignature, wsErr)
+		}
+		if wsConf != nil {
+			confirmations = append(confirmations, *wsConf)
+		}
+	}
+	if profileID != "" {
+		profileConfs, confErr := s.SemanticConfirmationRepo.ListByProfile(ctx, profileID)
+		if confErr != nil {
+			log.Printf("applicableConfirmations: ListByProfile failed profile_id=%s err=%v", profileID, confErr)
+		} else {
+			sort.SliceStable(profileConfs, func(i, j int) bool {
+				return profileConfs[i].CreatedAt.Before(profileConfs[j].CreatedAt)
+			})
+			for i := range profileConfs {
+				if profileConfs[i].Scope == domain.ConfirmationScopeSession {
+					confirmations = append(confirmations, profileConfs[i])
+				}
+			}
+		}
+	}
+	return confirmations
+}
+
+func applyConfirmationsToProfile(profileJSON string, confirmations []domain.SemanticConfirmation) string {
 	var profile map[string]interface{}
 	if err := json.Unmarshal([]byte(profileJSON), &profile); err != nil {
 		return profileJSON
 	}
 
-	if workspaceID != "" && schemaSignature != "" {
-		wsConf, wsErr := s.SemanticProfileRepo.FindWorkspaceConfirmation(ctx, workspaceID, schemaSignature)
-		if wsErr != nil {
-			log.Printf("applyConfirmations: FindWorkspaceConfirmation failed workspace_id=%s signature=%s err=%v", workspaceID, schemaSignature, wsErr)
-		}
-		if wsConf != nil {
-			profile = deepMergeOverrideIntoProfile(profile, wsConf.OverridesJSON)
-		}
-	}
-
-	if sessionID != "" {
-		sessionConfs, sessErr := s.SemanticConfirmationRepo.ListBySession(ctx, sessionID)
-		if sessErr != nil {
-			log.Printf("applyConfirmations: ListBySession failed session_id=%s err=%v", sessionID, sessErr)
-		}
-		for i := range sessionConfs {
-			sc := &sessionConfs[i]
-			if sc.Scope == domain.ConfirmationScopeSession {
-				profile = deepMergeOverrideIntoProfile(profile, sc.OverridesJSON)
-			}
-		}
+	for i := range confirmations {
+		profile = deepMergeOverrideIntoProfile(profile, confirmations[i].OverridesJSON)
 	}
 
 	return marshalProfile(profile)
@@ -697,7 +751,7 @@ func marshalProfile(profile map[string]interface{}) string {
 	return string(result)
 }
 
-func removeResolvedAmbiguities(profileJSON string) string {
+func removeResolvedAmbiguities(profileJSON string, overridesJSONs []string) string {
 	var profile map[string]interface{}
 	if err := json.Unmarshal([]byte(profileJSON), &profile); err != nil {
 		return profileJSON
@@ -711,11 +765,6 @@ func removeResolvedAmbiguities(profileJSON string) string {
 		return profileJSON
 	}
 
-	hasTimeOverride := hasKeyInProfile(profile, "time_candidates")
-	hasMetricOverride := hasKeyInProfile(profile, "metric_candidates")
-	hasJoinOverride := hasKeyInProfile(profile, "join_candidates")
-	hasUnitOverride := hasKeyInProfile(profile, "unit_candidates")
-
 	var remaining []interface{}
 	for _, ambRaw := range ambiguities {
 		amb, ok := ambRaw.(map[string]interface{})
@@ -724,16 +773,7 @@ func removeResolvedAmbiguities(profileJSON string) string {
 			continue
 		}
 		kind, _ := amb["kind"].(string)
-		if hasTimeOverride && kind == "multiple_time_columns" {
-			continue
-		}
-		if hasMetricOverride && kind == "ambiguous_metrics" {
-			continue
-		}
-		if hasJoinOverride && kind == "ambiguous_join" {
-			continue
-		}
-		if hasUnitOverride && kind == "ambiguous_units" {
+		if ambiguityResolvedByOverrides(kind, ambiguityCandidates(amb), overridesJSONs) {
 			continue
 		}
 		remaining = append(remaining, ambRaw)
@@ -749,18 +789,143 @@ func removeResolvedAmbiguities(profileJSON string) string {
 	return profileJSON
 }
 
-func hasKeyInProfile(profile map[string]interface{}, key string) bool {
-	val, exists := profile[key]
-	if !exists {
+func confirmationOverrideJSONs(confirmations []domain.SemanticConfirmation) []string {
+	out := make([]string, 0, len(confirmations))
+	for i := range confirmations {
+		out = append(out, confirmations[i].OverridesJSON)
+	}
+	return out
+}
+
+func profileStatusForJSON(profileJSON string) domain.ProfileStatus {
+	var facts ProfiledFacts
+	if err := json.Unmarshal([]byte(profileJSON), &facts); err != nil {
+		return domain.ProfileStatusProfiled
+	}
+	if len(facts.Ambiguities) == 0 {
+		return domain.ProfileStatusConfirmed
+	}
+	return domain.ProfileStatusProfiled
+}
+
+func overridesResolveAnyAmbiguity(ambiguities []Ambiguity, overridesJSONs []string) bool {
+	for _, ambiguity := range ambiguities {
+		if ambiguityResolvedByOverrides(ambiguity.Kind, ambiguity.Candidates, overridesJSONs) {
+			return true
+		}
+	}
+	return false
+}
+
+func ambiguityCandidates(ambiguity map[string]interface{}) []string {
+	raw, ok := ambiguity["candidates"].([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if value, ok := item.(string); ok {
+			out = append(out, strings.TrimSpace(value))
+		}
+	}
+	return out
+}
+
+func ambiguityResolvedByOverrides(kind string, candidates []string, overridesJSONs []string) bool {
+	for _, raw := range overridesJSONs {
+		var overrides map[string]interface{}
+		if err := json.Unmarshal([]byte(raw), &overrides); err != nil {
+			continue
+		}
+		if ambiguityResolvedByOverrideMap(kind, candidates, overrides) {
+			return true
+		}
+	}
+	return false
+}
+
+func ambiguityResolvedByOverrideMap(kind string, candidates []string, overrides map[string]interface{}) bool {
+	switch kind {
+	case "multiple_time_columns":
+		return overrideStringMatchesCandidates(overrides, "primary_time_column", candidates) ||
+			overrideStringMatchesCandidates(overrides, "confirmed_time_column", candidates)
+	case "ambiguous_metrics":
+		return overrideMapTouchesCandidates(overrides, "metric_definitions", candidates) ||
+			overrideMapTouchesCandidates(overrides, "confirmed_metric_mappings", candidates)
+	case "ambiguous_join":
+		return overrideStringMatchesCandidates(overrides, "join_key", candidates) ||
+			overrideListTouchesCandidates(overrides, "join_keys", candidates) ||
+			overrideListTouchesCandidates(overrides, "confirmed_join_candidates", candidates)
+	case "ambiguous_units":
+		return overrideListTouchesCandidates(overrides, "percentage_columns", candidates) ||
+			overrideMapTouchesCandidates(overrides, "unit_annotations", candidates)
+	default:
 		return false
 	}
-	switch v := val.(type) {
-	case []interface{}:
-		return len(v) > 0
-	case map[string]interface{}:
-		return len(v) > 0
+}
+
+func normalizedOverridesJSON(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "null" {
+		return "{}"
 	}
-	return val != nil
+	return trimmed
+}
+
+func overrideStringMatchesCandidates(overrides map[string]interface{}, key string, candidates []string) bool {
+	value, _ := overrides[key].(string)
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	return candidateListContains(candidates, value)
+}
+
+func overrideListTouchesCandidates(overrides map[string]interface{}, key string, candidates []string) bool {
+	raw, ok := overrides[key].([]interface{})
+	if !ok || len(raw) == 0 {
+		return false
+	}
+	for _, item := range raw {
+		if value, ok := item.(string); ok && candidateListContains(candidates, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func overrideMapTouchesCandidates(overrides map[string]interface{}, key string, candidates []string) bool {
+	raw, ok := overrides[key].(map[string]interface{})
+	if !ok || len(raw) == 0 {
+		return false
+	}
+	for name := range raw {
+		if candidateListContains(candidates, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func candidateListContains(candidates []string, value string) bool {
+	value = normalizeAmbiguityCandidate(value)
+	if value == "" {
+		return false
+	}
+	for _, candidate := range candidates {
+		if normalizeAmbiguityCandidate(candidate) == value {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeAmbiguityCandidate(value string) string {
+	value = strings.TrimSpace(value)
+	if before, _, ok := strings.Cut(value, "("); ok {
+		value = strings.TrimSpace(before)
+	}
+	return strings.ToLower(value)
 }
 
 func (s *SourceService) CreatePostgresSource(ctx context.Context, workspaceID, name, createdBy string, conn *domain.DatabaseConnection) (*domain.DataSource, error) {
@@ -844,9 +1009,13 @@ func inferUnitCandidates(columns []data.ColumnInfo, isEstimated bool) []UnitCand
 
 type SessionSourceSummary struct {
 	SourceID               string    `json:"source_id"`
+	SourceObjectKey        string    `json:"source_object_key"`
 	DisplayName            string    `json:"display_name"`
 	SourceType             string    `json:"source_type"`
 	ActiveSnapshotID       string    `json:"active_snapshot_id"`
+	UpstreamKind           string    `json:"upstream_kind"`
+	UpstreamSchema         string    `json:"upstream_schema"`
+	UpstreamObject         string    `json:"upstream_object"`
 	AnalysisTableName      string    `json:"analysis_table_name"`
 	SnapshotStatus         string    `json:"snapshot_status"`
 	SemanticStatus         string    `json:"semantic_status"`
@@ -858,6 +1027,7 @@ type SessionSourceSummary struct {
 	LastImportedAt         time.Time `json:"last_imported_at"`
 	LargeDataset           bool      `json:"large_dataset"`
 	RowsImported           int       `json:"rows_imported"`
+	RowsSkipped            int       `json:"rows_skipped"`
 	ImportDurationMs       int       `json:"import_duration_ms"`
 	ProfileDurationMs      int       `json:"profile_duration_ms"`
 	SnapshotSizeBytes      int64     `json:"snapshot_size_bytes"`

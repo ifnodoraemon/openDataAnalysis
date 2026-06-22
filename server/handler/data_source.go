@@ -53,6 +53,11 @@ func DeleteSessionSourceHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionID := chi.URLParam(r, "sessionID")
 	sourceID := chi.URLParam(r, "sourceID")
+	sourceObjectKey := strings.TrimSpace(r.URL.Query().Get("source_object_key"))
+	if sourceObjectKey == "" {
+		http.Error(w, "source_object_key is required", http.StatusBadRequest)
+		return
+	}
 
 	sess, err := sessionRepo.GetByID(r.Context(), sessionID)
 	if writeRepoLookupError(w, err, "session does not exist") {
@@ -72,15 +77,20 @@ func DeleteSessionSourceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tableName, err := sourceService.RemoveSessionSource(r.Context(), sessionID, sourceID)
+	tableNames, err := sourceService.RemoveSessionSource(r.Context(), sessionID, sourceID, sourceObjectKey)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to remove source: %v", err), http.StatusInternalServerError)
 		return
 	}
-	if tableName != "" {
+	if len(tableNames) > 0 {
 		if runtimeSession, _, runtimeErr := sessionManager.GetOrCreate(r.Context(), sessionID, sess.WorkspaceID, identity.UserID); runtimeErr == nil {
-			if dropErr := runtimeSession.Ingester.DropTable(tableName); dropErr != nil {
-				log.Printf("DeleteSessionSourceHandler: drop runtime table failed table=%s err=%v", tableName, dropErr)
+			for _, tableName := range tableNames {
+				if strings.TrimSpace(tableName) == "" {
+					continue
+				}
+				if dropErr := runtimeSession.Ingester.DropTable(tableName); dropErr != nil {
+					log.Printf("DeleteSessionSourceHandler: drop runtime table failed table=%s err=%v", tableName, dropErr)
+				}
 			}
 		}
 	}
@@ -604,6 +614,7 @@ func ImportDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		"row_count":           result.RowCount,
 		"column_count":        result.ColCount,
 		"rows_imported":       result.RowsImported,
+		"rows_skipped":        result.RowsSkipped,
 		"import_duration_ms":  result.ImportDurationMs,
 		"profile_duration_ms": result.ProfileDurationMs,
 		"snapshot_size_bytes": result.SnapshotSizeBytes,

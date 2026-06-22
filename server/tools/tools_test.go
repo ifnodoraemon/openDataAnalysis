@@ -335,7 +335,13 @@ func TestManageReportBlocksAndFinalizeReturnStructuredPayloads(t *testing.T) {
 	blockTool := &ManageReportBlocksTool{ReportState: state}
 	finalizeTool := &FinalizeReportTool{ReportState: state}
 
-	blockResult, err := blockTool.Execute(json.RawMessage(`{"block_id":"summary","block_kind":"markdown","title":"执行摘要","content":"收入增长 20%"}`))
+	blockResult, err := blockTool.Execute(json.RawMessage(`{
+		"block_id":"summary",
+		"block_kind":"markdown",
+		"title":"执行摘要",
+		"content":"收入增长 20%",
+		"sources":[{"kind":"sql","sql":"SELECT revenue_growth FROM sales_metrics","summary":"收入增长率"}]
+	}`))
 	if err != nil {
 		t.Fatalf("block execute: %v", err)
 	}
@@ -469,7 +475,12 @@ func TestFinalizeReportRejectsUnresolvedSemanticAmbiguity(t *testing.T) {
 	tool := &FinalizeReportTool{
 		ReportState: &ReportState{
 			Blocks: []ReportBlock{
-				{ID: "analysis", Kind: "markdown", Content: "收入增长 20%，净收入增长 12%。"},
+				{
+					ID:      "analysis",
+					Kind:    "markdown",
+					Content: "收入增长 20%，净收入增长 12%。",
+					Sources: []EvidenceRef{{Kind: "sql", SQL: "SELECT net_revenue FROM revenue_metrics"}},
+				},
 			},
 		},
 		SessionSourcesProvider: func() ([]service.SessionSourceSummary, error) {
@@ -477,10 +488,14 @@ func TestFinalizeReportRejectsUnresolvedSemanticAmbiguity(t *testing.T) {
 				{
 					SourceID:          "src_1",
 					AnalysisTableName: "revenue_metrics",
+					ProfileID:         "sp_1",
 					SemanticStatus:    "profiled",
 					AmbiguityCount:    1,
 				},
 			}, nil
+		},
+		ProfileDetailProvider: func(profileID string) (string, string, error) {
+			return `{"ambiguities":[{"kind":"ambiguous_metrics","candidates":["gross_revenue","net_revenue"]}]}`, "[]", nil
 		},
 	}
 
@@ -507,7 +522,12 @@ func TestFinalizeReportRejectsSemanticAmbiguityWithOnlyDefinitionMarker(t *testi
 	tool := &FinalizeReportTool{
 		ReportState: &ReportState{
 			Blocks: []ReportBlock{
-				{ID: "analysis", Kind: "markdown", Content: "收入 definition：按业务字段展示。口径说明：收入增长 12%。"},
+				{
+					ID:      "analysis",
+					Kind:    "markdown",
+					Content: "收入 definition：按业务字段展示。口径说明：收入增长 12%。",
+					Sources: []EvidenceRef{{Kind: "table", TableName: "revenue_metrics"}},
+				},
 			},
 		},
 		SessionSourcesProvider: func() ([]service.SessionSourceSummary, error) {
@@ -515,10 +535,14 @@ func TestFinalizeReportRejectsSemanticAmbiguityWithOnlyDefinitionMarker(t *testi
 				{
 					SourceID:          "src_1",
 					AnalysisTableName: "revenue_metrics",
+					ProfileID:         "sp_1",
 					SemanticStatus:    "profiled",
 					AmbiguityCount:    1,
 				},
 			}, nil
+		},
+		ProfileDetailProvider: func(profileID string) (string, string, error) {
+			return `{"ambiguities":[{"kind":"ambiguous_metrics","candidates":["gross_revenue","net_revenue"]}]}`, "[]", nil
 		},
 	}
 
@@ -544,7 +568,12 @@ func TestFinalizeReportRejectsDocumentedSemanticAssumptionWithoutConfirmation(t 
 
 	state := &ReportState{
 		Blocks: []ReportBlock{
-			{ID: "analysis", Kind: "markdown", Content: "口径假设：收入采用 net_revenue。收入增长 12%。"},
+			{
+				ID:      "analysis",
+				Kind:    "markdown",
+				Content: "口径假设：收入采用 net_revenue。收入增长 12%。",
+				Sources: []EvidenceRef{{Kind: "sql", SQL: "SELECT net_revenue FROM revenue_metrics"}},
+			},
 		},
 	}
 	tool := &FinalizeReportTool{
@@ -554,10 +583,14 @@ func TestFinalizeReportRejectsDocumentedSemanticAssumptionWithoutConfirmation(t 
 				{
 					SourceID:          "src_1",
 					AnalysisTableName: "revenue_metrics",
+					ProfileID:         "sp_1",
 					SemanticStatus:    "profiled",
 					AmbiguityCount:    1,
 				},
 			}, nil
+		},
+		ProfileDetailProvider: func(profileID string) (string, string, error) {
+			return `{"ambiguities":[{"kind":"ambiguous_metrics","candidates":["gross_revenue","net_revenue"]}]}`, "[]", nil
 		},
 	}
 
@@ -575,6 +608,41 @@ func TestFinalizeReportRejectsDocumentedSemanticAssumptionWithoutConfirmation(t 
 	issues, ok := payload["finalize_issues"].([]interface{})
 	if !ok || len(issues) != 1 || !strings.Contains(issues[0].(string), "unresolved_semantic_ambiguity:revenue_metrics") {
 		t.Fatalf("expected unresolved semantic ambiguity issue, got %#v", payload["finalize_issues"])
+	}
+}
+
+func TestFinalizeReportAllowsUnusedSemanticAmbiguity(t *testing.T) {
+	t.Parallel()
+
+	tool := &FinalizeReportTool{
+		ReportState: &ReportState{
+			Blocks: []ReportBlock{
+				{ID: "analysis", Kind: "markdown", Content: "库存周转率稳定，未使用收入表。"},
+			},
+		},
+		SessionSourcesProvider: func() ([]service.SessionSourceSummary, error) {
+			return []service.SessionSourceSummary{
+				{
+					SourceID:          "src_1",
+					DisplayName:       "Revenue Metrics",
+					AnalysisTableName: "revenue_metrics",
+					SemanticStatus:    "profiled",
+					AmbiguityCount:    1,
+				},
+			}, nil
+		},
+	}
+
+	result, err := tool.Execute(json.RawMessage(`{"report_title":"库存分析"}`))
+	if err != nil {
+		t.Fatalf("finalize execute: %v", err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(result), &payload); err != nil {
+		t.Fatalf("expected finalize json payload: %v", err)
+	}
+	if payload["ok"] != true || payload["delivery_state"] != "finalized" {
+		t.Fatalf("expected unused ambiguity not to block finalize, got %#v", payload)
 	}
 }
 
@@ -617,7 +685,7 @@ func TestFinalizeReportAllowsDuplicateBlockHeadingAndMissingChartCaption(t *test
 				{ID: "sales_chart", Kind: "chart", Title: "销售趋势", ChartID: "chart_sales"},
 			},
 			Charts: []ChartData{
-				{ID: "chart_sales"},
+				{ID: "chart_sales", Sources: []EvidenceRef{{Kind: "sql", SQL: "SELECT month, sales FROM sales_metrics"}}},
 			},
 		},
 	}
@@ -632,6 +700,34 @@ func TestFinalizeReportAllowsDuplicateBlockHeadingAndMissingChartCaption(t *test
 	}
 	if payload["ok"] != true {
 		t.Fatalf("expected finalize to succeed, got %#v", payload)
+	}
+}
+
+func TestFinalizeReportRejectsAnalyticalBlockWithoutEvidence(t *testing.T) {
+	t.Parallel()
+
+	tool := &FinalizeReportTool{
+		ReportState: &ReportState{
+			Blocks: []ReportBlock{
+				{ID: "analysis", Kind: "markdown", Content: "收入增长 20%。"},
+			},
+		},
+	}
+
+	result, err := tool.Execute(json.RawMessage(`{"report_title":"销售分析"}`))
+	if err != nil {
+		t.Fatalf("expected structured tool failure instead of error, got %v", err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(result), &payload); err != nil {
+		t.Fatalf("expected finalize failure json payload: %v", err)
+	}
+	if payload["ok"] != false || payload["error_code"] != "report_state_invalid" {
+		t.Fatalf("unexpected finalize failure payload: %#v", payload)
+	}
+	issues, ok := payload["finalize_issues"].([]interface{})
+	if !ok || len(issues) != 1 || issues[0] != "missing_evidence:analysis" {
+		t.Fatalf("expected missing_evidence issue, got %#v", payload["finalize_issues"])
 	}
 }
 

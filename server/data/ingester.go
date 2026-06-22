@@ -133,8 +133,12 @@ func removeSQLiteSidecars(dbPath string) error {
 func (ing *Ingester) ImportFileRaw(filePath string) (tableName string, rowCount int, colCount int, err error) {
 	ext := strings.ToLower(filepath.Ext(filePath))
 	baseName := strings.TrimSuffix(filepath.Base(filePath), ext)
-	tableName = sanitizeTableName(baseName)
+	return ing.ImportFileRawAs(filePath, baseName)
+}
 
+func (ing *Ingester) ImportFileRawAs(filePath, requestedTableName string) (tableName string, rowCount int, colCount int, err error) {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	tableName = sanitizeTableName(requestedTableName)
 	switch ext {
 	case ".csv":
 		rowCount, colCount, err = ing.importCSV(filePath, tableName)

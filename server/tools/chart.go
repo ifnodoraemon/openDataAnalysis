@@ -9,10 +9,11 @@ import (
 
 // ChartData 图表数据结构
 type ChartData struct {
-	ID     string          `json:"id"`
-	Option json.RawMessage `json:"option"` // ECharts option JSON
-	Width  string          `json:"width,omitempty"`
-	Height string          `json:"height,omitempty"`
+	ID      string          `json:"id"`
+	Option  json.RawMessage `json:"option"` // ECharts option JSON
+	Width   string          `json:"width,omitempty"`
+	Height  string          `json:"height,omitempty"`
+	Sources []EvidenceRef   `json:"sources,omitempty"`
 }
 
 func init() {
@@ -33,6 +34,7 @@ type createChartParams struct {
 	XAxisName  string             `json:"x_axis_name"`
 	YAxisName  string             `json:"y_axis_name"`
 	Y2AxisName string             `json:"y2_axis_name"`
+	Sources    []EvidenceRef      `json:"sources"`
 }
 
 type chartSeriesInput struct {
@@ -62,7 +64,7 @@ func (t *CreateChartTool) Name() string { return "report_create_chart" }
 func (t *CreateChartTool) Strict() bool { return true }
 
 func (t *CreateChartTool) Description() string {
-	return "Create or update an ECharts chart. Supports simplified DSL or native option; returns chart_id, chart_ref, and delivery_state facts. Modifies report chart state but does not auto-create or update content blocks. To embed a chart inline, use `{{chart:chart_id}}` placeholder in markdown/html block content. When a partial edit scope is active, only the authorized chart_id can be modified."
+	return "Create or update an ECharts chart. Supports simplified DSL or native option; accepts source citations for the chart data and returns chart_id, chart_ref, and delivery_state facts. Modifies report chart state but does not auto-create or update content blocks. To embed a chart inline, use `{{chart:chart_id}}` placeholder in markdown/html block content. When a partial edit scope is active, only the authorized chart_id can be modified."
 }
 
 func (t *CreateChartTool) Parameters() json.RawMessage {
@@ -107,17 +109,34 @@ func (t *CreateChartTool) Parameters() json.RawMessage {
 					"required": ["name", "value"]
 				}
 			},
-			"legend": {"type": "array", "items": {"type": "string"}},
-			"x_axis_name": {"type": "string"},
-			"y_axis_name": {"type": "string"},
-			"y2_axis_name": {"type": "string"}
-		},
-		"required": ["chart_id", "title"]
-	}`)
+				"legend": {"type": "array", "items": {"type": "string"}},
+				"x_axis_name": {"type": "string"},
+				"y_axis_name": {"type": "string"},
+				"y2_axis_name": {"type": "string"},
+				"sources": {
+					"type": "array",
+					"description": "Source citations for the chart data, recording which query/table/tool result produced the series or values.",
+					"items": {
+						"type": "object",
+						"additionalProperties": false,
+						"properties": {
+							"kind":       {"type": "string", "enum": ["sql", "chart", "table", "python", "tool_result"]},
+							"tool_name":  {"type": "string"},
+							"sql":        {"type": "string"},
+							"table_name": {"type": "string"},
+							"chart_id":   {"type": "string"},
+							"summary":    {"type": "string"}
+						},
+						"required": ["kind"]
+					}
+				}
+			},
+			"required": ["chart_id", "title"]
+		}`)
 }
 
 func (t *CreateChartTool) Execute(args json.RawMessage) (string, error) {
-	normalizedArgs, err := normalizeStringifiedJSONFields(args, "option", "categories", "series", "values", "legend")
+	normalizedArgs, err := normalizeStringifiedJSONFields(args, "option", "categories", "series", "values", "legend", "sources")
 	if err != nil {
 		return "", fmt.Errorf("failed to parse parameters: %w", err)
 	}

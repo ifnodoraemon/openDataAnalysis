@@ -11,16 +11,19 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/ifnodoraemon/openDataAnalysis/data"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 type PGImportResult struct {
@@ -30,6 +33,7 @@ type PGImportResult struct {
 	RowCount          int
 	ColCount          int
 	RowsImported      int
+	RowsSkipped       int
 	ImportDurationMs  int
 	ProfileDurationMs int
 	SnapshotSizeBytes int64
@@ -102,14 +106,25 @@ func OpenPostgresConnection(ctx context.Context, conn *domain.DatabaseConnection
 		sslMode = "disable"
 	}
 
-	dsn := fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",
-		url.QueryEscape(conn.Host), conn.Port, url.QueryEscape(conn.DatabaseName),
-		url.QueryEscape(conn.Username), url.QueryEscape(password), url.QueryEscape(sslMode))
-
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open PostgreSQL connection: %w", err)
+	connURL := url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(conn.Username, password),
+		Host:   net.JoinHostPort(conn.Host, strconv.Itoa(conn.Port)),
+		Path:   conn.DatabaseName,
 	}
+	q := connURL.Query()
+	q.Set("sslmode", sslMode)
+	connURL.RawQuery = q.Encode()
+	pgConfig, err := pgx.ParseConfig(connURL.String())
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse PostgreSQL connection config: %w", err)
+	}
+	if pgConfig.RuntimeParams == nil {
+		pgConfig.RuntimeParams = map[string]string{}
+	}
+	pgConfig.RuntimeParams["default_transaction_read_only"] = "on"
+
+	db := stdlib.OpenDB(*pgConfig)
 
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(1)
@@ -118,8 +133,6 @@ func OpenPostgresConnection(ctx context.Context, conn *domain.DatabaseConnection
 		_ = db.Close()
 		return nil, fmt.Errorf("connection test failed: %w", err)
 	}
-
-	_, _ = db.ExecContext(ctx, "SET default_transaction_read_only = on")
 
 	return db, nil
 }
@@ -160,8 +173,8 @@ func (s *SourceService) TestPostgresConnection(ctx context.Context, sourceID, au
 	}
 
 	return map[string]interface{}{
-		"success":  true,
-		"message":  "connection successful",
+		"success":   true,
+		"message":   "connection successful",
 		"allowlist": validated,
 	}
 }
@@ -193,7 +206,8 @@ func (s *SourceService) ImportPostgresSnapshot(ctx context.Context, sourceID, se
 
 	schema := resolvedSchema
 
-	tableName := sanitizePGTableName(objectName)
+	tableName := sourceScopedPGTableName(schema, objectName, sourceID)
+	sourceObjectKey := SourceObjectKey(sourceID, "postgres_connection", schema, objectName)
 
 	preSnapshot := &domain.SourceSnapshot{
 		ID:                "snap_" + uuid.New().String()[:12],
@@ -212,6 +226,7 @@ func (s *SourceService) ImportPostgresSnapshot(ctx context.Context, sourceID, se
 	binding := &domain.SessionSourceBinding{
 		SessionID:        sessionID,
 		SourceID:         sourceID,
+		SourceObjectKey:  sourceObjectKey,
 		ActiveSnapshotID: preSnapshot.ID,
 		CreatedAt:        time.Now(),
 		UpdatedAt:        time.Now(),
@@ -224,7 +239,7 @@ func (s *SourceService) ImportPostgresSnapshot(ctx context.Context, sourceID, se
 
 	importStart := time.Now()
 
-	rowCount, colCount, err := s.streamImportToSQLite(ctx, pgDB, schema, objectName, sessIngester, tableName)
+	rowCount, colCount, rowsSkipped, err := s.streamImportToSQLite(ctx, pgDB, schema, objectName, sessIngester, tableName)
 	importDuration := time.Since(importStart)
 
 	if err != nil {
@@ -276,13 +291,16 @@ func (s *SourceService) ImportPostgresSnapshot(ctx context.Context, sourceID, se
 	}
 
 	facts := s.BuildProfileFacts(schemaInfo, semanticProfile, nil, string(profileMode), snapshotSizeBytes)
+	if rowsSkipped > 0 {
+		facts.Warnings = append(facts.Warnings, fmt.Sprintf("%d upstream rows were skipped during import because they could not be scanned", rowsSkipped))
+	}
 	profileDuration := time.Since(profileStart)
 
 	if err := s.SnapshotRepo.UpdateStatus(ctx, preSnapshot.ID, domain.SnapshotStatusReady, nil); err != nil {
 		log.Printf("pg import: failed to update snapshot status to ready snapshot_id=%s err=%v", preSnapshot.ID, err)
 	}
 	if err := s.SnapshotRepo.UpdateSnapshotCompletion(ctx, preSnapshot.ID, rowCount, colCount, schemaSig,
-		rowCount, int(importDuration.Milliseconds()), int(profileDuration.Milliseconds()), snapshotSizeBytes, profileMode); err != nil {
+		rowCount, rowsSkipped, int(importDuration.Milliseconds()), int(profileDuration.Milliseconds()), snapshotSizeBytes, profileMode); err != nil {
 		log.Printf("pg import: failed to update snapshot completion facts snapshot_id=%s err=%v", preSnapshot.ID, err)
 	}
 
@@ -314,6 +332,7 @@ func (s *SourceService) ImportPostgresSnapshot(ctx context.Context, sourceID, se
 		RowCount:          rowCount,
 		ColCount:          colCount,
 		RowsImported:      rowCount,
+		RowsSkipped:       rowsSkipped,
 		ImportDurationMs:  int(importDuration.Milliseconds()),
 		ProfileDurationMs: int(profileDuration.Milliseconds()),
 		SnapshotSizeBytes: snapshotSizeBytes,
@@ -332,24 +351,24 @@ func sanitizePGIdentifier(name string) string {
 	return clean
 }
 
-func (s *SourceService) streamImportToSQLite(ctx context.Context, pgDB *sql.DB, schema, object string, ingester *data.Ingester, tableName string) (int, int, error) {
+func (s *SourceService) streamImportToSQLite(ctx context.Context, pgDB *sql.DB, schema, object string, ingester *data.Ingester, tableName string) (int, int, int, error) {
 	schema = sanitizePGIdentifier(schema)
 	object = sanitizePGIdentifier(object)
 	if err := data.ValidateSQLIdent(tableName); err != nil {
-		return 0, 0, fmt.Errorf("invalid SQLite table name after sanitization: %w", err)
+		return 0, 0, 0, fmt.Errorf("invalid SQLite table name after sanitization: %w", err)
 	}
 	qualifiedName := fmt.Sprintf("\"%s\".\"%s\"", schema, object)
 
 	query := fmt.Sprintf("SELECT * FROM %s", qualifiedName)
 	rows, err := pgDB.QueryContext(ctx, query)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to query upstream data: %w", err)
+		return 0, 0, 0, fmt.Errorf("failed to query upstream data: %w", err)
 	}
 	defer rows.Close()
 
 	colTypes, err := rows.ColumnTypes()
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to read column types: %w", err)
+		return 0, 0, 0, fmt.Errorf("failed to read column types: %w", err)
 	}
 	colCount := len(colTypes)
 	colNames := make([]string, colCount)
@@ -371,12 +390,13 @@ func (s *SourceService) streamImportToSQLite(ctx context.Context, pgDB *sql.DB, 
 	}
 
 	if err := ingester.CreateTypedTable(tableName, colNames, sqliteColTypes); err != nil {
-		return 0, 0, fmt.Errorf("failed to create SQLite table: %w", err)
+		return 0, 0, 0, fmt.Errorf("failed to create SQLite table: %w", err)
 	}
 
 	batchSize := 5000
 	batch := make([][]string, 0, batchSize)
 	rowCount := 0
+	rowsSkipped := 0
 
 	vals := make([]interface{}, colCount)
 	valPtrs := make([]interface{}, colCount)
@@ -387,6 +407,7 @@ func (s *SourceService) streamImportToSQLite(ctx context.Context, pgDB *sql.DB, 
 	for rows.Next() {
 		if err := rows.Scan(valPtrs...); err != nil {
 			log.Printf("pg import: scan error on row %d table=%s err=%v", rowCount, tableName, err)
+			rowsSkipped++
 			continue
 		}
 		row := make([]string, colCount)
@@ -400,7 +421,7 @@ func (s *SourceService) streamImportToSQLite(ctx context.Context, pgDB *sql.DB, 
 		batch = append(batch, row)
 		if len(batch) >= batchSize {
 			if err := ingester.InsertBatchTyped(tableName, colNames, sqliteColTypes, batch); err != nil {
-				return rowCount, colCount, err
+				return rowCount, colCount, rowsSkipped, err
 			}
 			rowCount += len(batch)
 			batch = batch[:0]
@@ -408,12 +429,18 @@ func (s *SourceService) streamImportToSQLite(ctx context.Context, pgDB *sql.DB, 
 	}
 	if len(batch) > 0 {
 		if err := ingester.InsertBatchTyped(tableName, colNames, sqliteColTypes, batch); err != nil {
-			return rowCount, colCount, err
+			return rowCount, colCount, rowsSkipped, err
 		}
 		rowCount += len(batch)
 	}
+	if err := rows.Err(); err != nil {
+		return rowCount, colCount, rowsSkipped, fmt.Errorf("failed while reading upstream data: %w", err)
+	}
+	if rowCount == 0 && rowsSkipped > 0 {
+		return rowCount, colCount, rowsSkipped, fmt.Errorf("all %d upstream rows failed to import", rowsSkipped)
+	}
 
-	return rowCount, colCount, nil
+	return rowCount, colCount, rowsSkipped, nil
 }
 
 func (s *SourceService) findDBConnection(ctx context.Context, sourceID string) (*domain.DatabaseConnection, error) {
@@ -446,6 +473,32 @@ func sanitizePGTableName(name string) string {
 		return "_table_invalid"
 	}
 	return name
+}
+
+func sourceScopedPGTableName(schemaName, objectName, sourceID string) string {
+	rawName := strings.TrimSpace(objectName)
+	if strings.TrimSpace(schemaName) != "" {
+		rawName = strings.TrimSpace(schemaName) + "_" + rawName
+	}
+	base := sanitizePGTableName(rawName)
+	suffix := sourceTableSuffix(sourceID)
+	if suffix == "" {
+		return base
+	}
+	return sanitizePGTableName(base + "__" + suffix)
+}
+
+func sourceTableSuffix(sourceID string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return -1
+	}, strings.TrimSpace(sourceID))
+	if len(cleaned) > 8 {
+		return cleaned[len(cleaned)-8:]
+	}
+	return cleaned
 }
 
 func sanitizePGColumnName(name string) string {
