@@ -54,7 +54,9 @@ import asyncio
 
 _concurrency_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXECUTIONS)
 
-WORK_DIR = Path(os.environ.get("WORK_DIR", "/app/workspace"))
+WORK_DIR = Path(
+    os.environ.get("WORK_DIR") or (Path(__file__).resolve().parent / "workspace")
+).resolve()
 MAX_TIMEOUT = int(os.environ.get("MAX_TIMEOUT", "120"))
 MAX_CODE_SIZE = int(os.environ.get("MAX_CODE_SIZE", "65536"))
 MEMORY_LIMIT_MB = int(os.environ.get("MEMORY_LIMIT_MB", "512"))

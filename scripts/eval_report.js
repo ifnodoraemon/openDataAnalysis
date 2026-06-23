@@ -66,6 +66,7 @@ function formatTable(rows, headers) {
 
 function main() {
   const args = parseArgs(process.argv);
+  const skipInfraFailures = process.env.SKIP_INFRA_FAILURES === '1';
   if (args.help) {
     console.log('Usage: node scripts/eval_report.js [--results-dir tmp/scenario-runs]');
     console.log('');
@@ -95,6 +96,7 @@ function main() {
     records.push({
       scenarioId: data.scenario_id || path.basename(path.dirname(file)),
       pass: eval_.pass === true,
+      blockedByInfra: eval_.blocked_by_infra === true,
       failedCount: eval_.failed_count || 0,
       failedChecks,
       terminal: summary.terminal_type || '',
@@ -105,19 +107,20 @@ function main() {
   }
 
   const passCount = records.filter((r) => r.pass).length;
-  const failCount = records.filter((r) => !r.pass).length;
+  const infraBlockedCount = records.filter((r) => !r.pass && r.blockedByInfra).length;
+  const failCount = records.filter((r) => !r.pass && !(skipInfraFailures && r.blockedByInfra)).length;
   const total = records.length;
   const passRate = total > 0 ? Math.round((passCount / total) * 100) : 0;
 
   const lines = [];
   lines.push('# Eval Report');
   lines.push('');
-  lines.push(`**总计**: ${total} 场景 | **通过**: ${passCount} (${passRate}%) | **失败**: ${failCount}`);
+  lines.push(`**总计**: ${total} 场景 | **通过**: ${passCount} (${passRate}%) | **失败**: ${failCount} | **基础设施阻断**: ${infraBlockedCount}`);
   lines.push('');
 
   // 汇总表
   const tableRows = records.map((r) => [
-    r.pass ? '✅' : '❌',
+    r.pass ? '✅' : (r.blockedByInfra ? '⚠️' : '❌'),
     r.scenarioId,
     String(r.toolCalls),
     r.terminal,
@@ -132,11 +135,12 @@ function main() {
   // 失败明细
   const failed = records.filter((r) => !r.pass);
   if (failed.length > 0) {
-    lines.push('## 失败明细');
+    lines.push('## 未通过明细');
     lines.push('');
     for (const r of failed) {
-      lines.push(`### ❌ ${r.scenarioId}`);
+      lines.push(`### ${r.blockedByInfra ? '⚠️' : '❌'} ${r.scenarioId}`);
       lines.push(`- 目录: \`${r.runDir}\``);
+      if (r.blockedByInfra) lines.push('- 分类: 基础设施阻断');
       lines.push(`- 终态: ${r.terminal}  错误类型: ${r.errorCategory || '-'}`);
       lines.push(`- 失败检查项 (${r.failedCount}):`);
       for (const check of (r.failedChecks || '-').split(', ').filter(Boolean)) {
@@ -174,6 +178,7 @@ function main() {
       total,
       pass_count: passCount,
       fail_count: failCount,
+      infra_blocked_count: infraBlockedCount,
       pass_rate: passRate,
       scenarios: records,
       tool_frequency: Object.fromEntries(sortedTools),

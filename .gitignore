@@ -23,6 +23,7 @@ server/.env
 # Python
 python-executor/.venv/
 python-executor/__pycache__/
+python-executor/workspace/
 __pycache__/
 .ruff_cache/
 

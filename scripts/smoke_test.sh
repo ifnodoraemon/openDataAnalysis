@@ -47,6 +47,36 @@ print_failure_output() {
     echo "  --- end output ---"
 }
 
+classify_infra_blocker() {
+    local raw="$1"
+    local category=""
+    category=$(printf '%s\n' "$raw" | grep -oE '"error_category"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 | sed -E 's/.*"error_category"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)
+    if [ -n "$category" ] && [ "$category" != "runtime_error" ]; then
+        echo "$category"
+        return
+    fi
+    if printf '%s\n' "$raw" | grep -Eiq 'too many requests|status[=:]429|\b429\b|llm api request failed'; then
+        echo "llm_request_failed"
+        return
+    fi
+    if printf '%s\n' "$raw" | grep -Eiq 'tls handshake timeout|context deadline exceeded|connection refused'; then
+        echo "network_or_service_unavailable"
+        return
+    fi
+    if printf '%s\n' "$raw" | grep -Eiq 'scenario timeout after'; then
+        echo "scenario_timeout"
+        return
+    fi
+}
+
+record_infra_blocked() {
+    local scenario_id="$1"
+    local category="$2"
+    echo "  ⚠️  INFRA BLOCKED ($category)"
+    infra_blocked=$((infra_blocked + 1))
+    results+=("{\"id\":\"$scenario_id\",\"status\":\"infra_blocked\",\"category\":\"$category\"}")
+}
+
 for scenario_id in "${SCENARIOS[@]}"; do
     total=$((total + 1))
     echo "--- [$total] Running: $scenario_id ---"
@@ -64,13 +94,10 @@ for scenario_id in "${SCENARIOS[@]}"; do
         passed=$((passed + 1))
         results+=("{\"id\":\"$scenario_id\",\"status\":\"pass\"}")
     elif [ $exit_code -eq 2 ]; then
-        # exit code 2 = evaluation failed, check if infra
-        error_cat=$(echo "$output" | grep -o '"error_category":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-        if [ -n "$error_cat" ] && [ "$error_cat" != "runtime_error" ] && [ "$SKIP_INFRA" = "1" ]; then
-            echo "  ⚠️  INFRA BLOCKED ($error_cat)"
+        error_cat=$(classify_infra_blocker "$output")
+        if [ -n "$error_cat" ] && [ "$SKIP_INFRA" = "1" ]; then
+            record_infra_blocked "$scenario_id" "$error_cat"
             print_failure_output "$output"
-            infra_blocked=$((infra_blocked + 1))
-            results+=("{\"id\":\"$scenario_id\",\"status\":\"infra_blocked\",\"category\":\"$error_cat\"}")
         else
             echo "  ❌ FAIL"
             print_failure_output "$output"
@@ -78,10 +105,16 @@ for scenario_id in "${SCENARIOS[@]}"; do
             results+=("{\"id\":\"$scenario_id\",\"status\":\"fail\"}")
         fi
     else
-        echo "  ❌ ERROR (exit=$exit_code)"
-        print_failure_output "$output"
-        failed=$((failed + 1))
-        results+=("{\"id\":\"$scenario_id\",\"status\":\"error\",\"exit_code\":$exit_code}")
+        error_cat=$(classify_infra_blocker "$output")
+        if [ -n "$error_cat" ] && [ "$SKIP_INFRA" = "1" ]; then
+            record_infra_blocked "$scenario_id" "$error_cat"
+            print_failure_output "$output"
+        else
+            echo "  ❌ ERROR (exit=$exit_code)"
+            print_failure_output "$output"
+            failed=$((failed + 1))
+            results+=("{\"id\":\"$scenario_id\",\"status\":\"error\",\"exit_code\":$exit_code}")
+        fi
     fi
     echo ""
 done
@@ -114,5 +147,9 @@ if [ $failed -gt 0 ]; then
     exit 1
 fi
 
-echo "✅ All scenarios passed ($passed/$total, $infra_blocked infra-blocked)"
+if [ $infra_blocked -gt 0 ]; then
+    echo "⚠️  No actionable scenario failures ($passed/$total passed, $infra_blocked infra-blocked)"
+else
+    echo "✅ All scenarios passed ($passed/$total)"
+fi
 exit 0

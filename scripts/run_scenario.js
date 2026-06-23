@@ -185,6 +185,10 @@ function classifyErrorMessage(message) {
   return 'runtime_error';
 }
 
+function isInfraErrorCategory(category) {
+  return Boolean(category) && category !== 'runtime_error';
+}
+
 function normalizeText(input) {
   return String(input || '')
     .toLowerCase()
@@ -653,7 +657,7 @@ function evaluateScenario(scenario, events, runData, reportHtml, summary) {
   return {
     pass: failed.length === 0,
     failed_count: failed.length,
-    blocked_by_infra: summary.terminal_type === 'error' && summary.error_category !== '',
+    blocked_by_infra: summary.terminal_type === 'error' && isInfraErrorCategory(summary.error_category),
     checks,
     failed_checks: failed,
   };

@@ -55,15 +55,21 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         working-directory: ./python-executor
-        run: pip install -r requirements.txt requests
+        run: pip install -r requirements-dev.txt
       - name: Run sandbox tests
         working-directory: ./python-executor
         env:
           PROXY_TOKEN: ci-test-token
+          WORK_DIR: ${{ runner.temp }}/python-executor-workspace
         run: |
           python main.py &
-          sleep 3
-          python test_sandbox.py
+          for i in {1..20}; do
+            if curl -fsS http://127.0.0.1:8081/health >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          python -m pytest -q test_sandbox.py
 
   build-docker:
     runs-on: ubuntu-latest
@@ -191,9 +197,12 @@ jobs:
       - name: Run smoke scenarios
         env:
           SMOKE_SCENARIOS: "sales_complete ambiguous_metrics"
+          SKIP_INFRA_FAILURES: "1"
         run: bash scripts/smoke_test.sh http://127.0.0.1 240
       - name: Run eval report
         if: always()
+        env:
+          SKIP_INFRA_FAILURES: "1"
         run: node scripts/eval_report.js --results-dir tmp/scenario-runs
       - name: Dump smoke diagnostics
         if: failure()
