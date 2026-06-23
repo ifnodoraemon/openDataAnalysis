@@ -131,6 +131,24 @@ jobs:
             exit 1
           fi
           mkdir -p tmp
+          record_infra_blocked() {
+            local category="$1"
+            local message="$2"
+            echo "::warning::scenario-smoke infra blocked: ${category}: ${message}"
+            touch tmp/scenario-smoke.skip
+            cat > tmp/smoke-test-summary.json <<CIEOF
+          {
+            "total": 1,
+            "passed": 0,
+            "failed": 0,
+            "infra_blocked": 1,
+            "pass_rate": "0%",
+            "scenarios": [
+              {"id": "nvidia_preflight", "status": "infra_blocked", "category": "${category}", "message": "${message}"}
+            ]
+          }
+          CIEOF
+          }
           cat > tmp/nvidia-smoke-preflight.json <<CIEOF
           {
             "model": "${NVIDIA_SMOKE_MODEL}",
@@ -153,9 +171,16 @@ jobs:
           if [ "$curl_code" -ne 0 ]; then
             echo "NVIDIA preflight failed curl_exit=${curl_code}"
             cat tmp/nvidia-smoke-preflight.stderr
+            if grep -Eiq '429|too many requests' tmp/nvidia-smoke-preflight.stderr tmp/nvidia-smoke-preflight-response.json 2>/dev/null; then
+              record_infra_blocked "llm_rate_limited" "NVIDIA preflight returned 429"
+              exit 0
+            fi
             exit "$curl_code"
           fi
-          python3 -c "import json, sys; p=json.load(open('tmp/nvidia-smoke-preflight-response.json')); n=len(p.get('choices', [])); print('NVIDIA preflight model=%s choices=%s' % (p.get('model', '${NVIDIA_SMOKE_MODEL}'), n)); sys.exit(0 if n else 1)" | tee tmp/nvidia-smoke-preflight-summary.txt
+          if ! python3 -c "import json, sys; p=json.load(open('tmp/nvidia-smoke-preflight-response.json')); n=len(p.get('choices', [])); print('NVIDIA preflight model=%s choices=%s' % (p.get('model', '${NVIDIA_SMOKE_MODEL}'), n)); sys.exit(0 if n else 1)" | tee tmp/nvidia-smoke-preflight-summary.txt; then
+            record_infra_blocked "llm_preflight_invalid_response" "NVIDIA preflight returned no choices"
+            exit 0
+          fi
           cat > server/.env <<CIEOF
           LLM_PROVIDER=openai
           LLM_BASE_URL=https://integrate.api.nvidia.com
@@ -198,7 +223,12 @@ jobs:
         env:
           SMOKE_SCENARIOS: "sales_complete ambiguous_metrics"
           SKIP_INFRA_FAILURES: "1"
-        run: bash scripts/smoke_test.sh http://127.0.0.1 240
+        run: |
+          if [ -f tmp/scenario-smoke.skip ]; then
+            echo "Skipping live smoke scenarios because preflight was infra-blocked"
+            exit 0
+          fi
+          bash scripts/smoke_test.sh http://127.0.0.1 240
       - name: Run eval report
         if: always()
         env:
