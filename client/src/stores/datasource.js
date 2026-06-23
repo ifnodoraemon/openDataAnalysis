@@ -4,6 +4,7 @@ import { ref } from "vue";
 export const useDataSourceStore = defineStore("dataSource", () => {
   const sessionSources = ref([]);
   const workspaceDataSources = ref([]);
+  const sourceTypes = ref([]);
   const semanticProfileSummaries = ref([]);
   const semanticProfileDetails = ref({});
   const loading = ref(false);
@@ -43,6 +44,18 @@ export const useDataSourceStore = defineStore("dataSource", () => {
     });
   }
 
+  async function fetchSourceTypes() {
+    return withLoading(async () => {
+      const result = await requestJSON("/api/data-source-types", {
+        fallback: "failed to fetch data source types",
+      });
+      if (!result.ok) return result;
+
+      sourceTypes.value = result.data?.source_types || [];
+      return result;
+    });
+  }
+
   async function fetchProfileDetail(profileId) {
     if (!profileId) return { ok: false, error: "profile_id is required" };
     return withLoading(async () => {
@@ -66,10 +79,6 @@ export const useDataSourceStore = defineStore("dataSource", () => {
     });
   }
 
-  async function createPostgresSource(name, config) {
-    return createSQLSource(name, "postgres_connection", config);
-  }
-
   async function createSQLSource(name, sourceType, config) {
     const { publicConfig, credential } = splitSQLConfig(config);
     const result = await requestJSON("/api/data-sources", {
@@ -87,10 +96,6 @@ export const useDataSourceStore = defineStore("dataSource", () => {
       await fetchWorkspaceDataSources();
     }
     return result;
-  }
-
-  async function updatePostgresSource(sourceId, name, config) {
-    return updateSQLSource(sourceId, name, config);
   }
 
   async function updateSQLSource(sourceId, name, config) {
@@ -231,17 +236,17 @@ export const useDataSourceStore = defineStore("dataSource", () => {
   return {
     sessionSources,
     workspaceDataSources,
+    sourceTypes,
     semanticProfileSummaries,
     semanticProfileDetails,
     loading,
     lastError,
     fetchSessionSources,
     fetchWorkspaceDataSources,
+    fetchSourceTypes,
     fetchProfileDetail,
     confirmProfile,
-    createPostgresSource,
     createSQLSource,
-    updatePostgresSource,
     updateSQLSource,
     deleteWorkspaceSource,
     testConnection,

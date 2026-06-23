@@ -94,8 +94,13 @@
             class="input-sm"
             @change="applySourceTypeDefaults(newSource)"
           >
-            <option value="postgres_connection">PostgreSQL</option>
-            <option value="mysql_connection">MySQL</option>
+            <option
+              v-for="type in configurableSQLSourceTypes"
+              :key="type.source_type"
+              :value="type.source_type"
+            >
+              {{ type.label }}
+            </option>
           </select>
           <input v-model="newSource.host" placeholder="Host" class="input-sm" />
           <input
@@ -114,10 +119,18 @@
             placeholder="Schema"
             class="input-sm"
           />
-          <select v-model="newSource.ssl_mode" class="input-sm">
-            <option value="disable">disable</option>
-            <option value="require">require</option>
-            <option value="verify-full">verify-full</option>
+          <select
+            v-if="sslModeOptionsForSourceType(newSource.source_type).length"
+            v-model="newSource.ssl_mode"
+            class="input-sm"
+          >
+            <option
+              v-for="mode in sslModeOptionsForSourceType(newSource.source_type)"
+              :key="mode"
+              :value="mode"
+            >
+              {{ mode }}
+            </option>
           </select>
           <input
             v-model="newSource.username"
@@ -158,7 +171,10 @@
               class="btn-xs"
               @click="
                 newSource.allowlist.push({
-                  schema: newSource.default_schema || 'public',
+                  schema:
+                    newSource.default_schema ||
+                    newSource.database_name ||
+                    'public',
                   name: '',
                   kind: 'table',
                 })
@@ -171,7 +187,7 @@
             <button
               class="btn-sm primary"
               @click="handleCreateSource"
-              :disabled="creating"
+              :disabled="creating || configurableSQLSourceTypes.length === 0"
             >
               创建
             </button>
@@ -203,7 +219,9 @@
             </button>
           </div>
           <div class="source-meta">
-            <span class="badge postgres">{{ ds.source_type }}</span>
+            <span class="badge" :class="ds.source_type">{{
+              labelForSourceType(ds.source_type)
+            }}</span>
             <span :class="['status', ds.status]">{{ ds.status }}</span>
             <span v-if="ds.config?.host" class="table-name"
               >{{ ds.config.host }}:{{ ds.config.port }}/{{
@@ -248,8 +266,13 @@
               class="input-sm"
             />
             <select v-model="editSource.source_type" class="input-sm" disabled>
-              <option value="postgres_connection">PostgreSQL</option>
-              <option value="mysql_connection">MySQL</option>
+              <option
+                v-for="type in configurableSQLSourceTypes"
+                :key="type.source_type"
+                :value="type.source_type"
+              >
+                {{ type.label }}
+              </option>
             </select>
             <input
               v-model="editSource.host"
@@ -272,10 +295,20 @@
               placeholder="Schema"
               class="input-sm"
             />
-            <select v-model="editSource.ssl_mode" class="input-sm">
-              <option value="disable">disable</option>
-              <option value="require">require</option>
-              <option value="verify-full">verify-full</option>
+            <select
+              v-if="sslModeOptionsForSourceType(editSource.source_type).length"
+              v-model="editSource.ssl_mode"
+              class="input-sm"
+            >
+              <option
+                v-for="mode in sslModeOptionsForSourceType(
+                  editSource.source_type,
+                )"
+                :key="mode"
+                :value="mode"
+              >
+                {{ mode }}
+              </option>
             </select>
             <input
               v-model="editSource.username"
@@ -322,7 +355,10 @@
                 class="btn-xs"
                 @click="
                   editSource.allowlist.push({
-                    schema: editSource.default_schema || 'public',
+                    schema:
+                      editSource.default_schema ||
+                      editSource.database_name ||
+                      'public',
                     name: '',
                     kind: 'table',
                   })
@@ -653,29 +689,83 @@ const confirmingProfileId = ref("");
 const profileDetail = computed(
   () => store.semanticProfileDetails[selectedProfileId.value],
 );
+const configurableSQLSourceTypes = computed(() =>
+  store.sourceTypes.filter(
+    (type) => type.category === "sql" && type.configurable,
+  ),
+);
+const sourceTypeSpecs = computed(() =>
+  Object.fromEntries(
+    configurableSQLSourceTypes.value.map((type) => [type.source_type, type]),
+  ),
+);
+const sqlSourceTypeSet = computed(
+  () =>
+    new Set(configurableSQLSourceTypes.value.map((type) => type.source_type)),
+);
 const sqlWorkspaceDataSources = computed(() =>
-  props.workspaceDataSources.filter(
-    (ds) =>
-      ds.source_type === "postgres_connection" ||
-      ds.source_type === "mysql_connection",
+  props.workspaceDataSources.filter((ds) =>
+    sqlSourceTypeSet.value.has(ds.source_type),
   ),
 );
 
-const defaultPostgresSourceForm = () => ({
-  name: "",
-  source_type: "postgres_connection",
-  host: "",
-  port: 5432,
-  database_name: "",
-  default_schema: "public",
-  ssl_mode: "require",
-  username: "",
-  password: "",
-  allowlist: [{ schema: "public", name: "", kind: "table" }],
-});
+function sourceTypeSpec(sourceType) {
+  return sourceTypeSpecs.value[sourceType] || null;
+}
 
-const newSource = ref(defaultPostgresSourceForm());
-const editSource = ref(defaultPostgresSourceForm());
+function labelForSourceType(sourceType) {
+  return sourceTypeSpec(sourceType)?.label || sourceType;
+}
+
+function sslModeOptionsForSourceType(sourceType) {
+  return sourceTypeSpec(sourceType)?.ssl_mode_options || [];
+}
+
+function defaultSchemaForSourceType(sourceType, databaseName = "") {
+  return sourceTypeSpec(sourceType)?.default_schema || databaseName || "";
+}
+
+const defaultSQLSourceForm = (sourceType = "") => {
+  const resolvedType =
+    sourceType || configurableSQLSourceTypes.value[0]?.source_type || "";
+  const defaultSchema = defaultSchemaForSourceType(resolvedType);
+  return {
+    name: "",
+    source_type: resolvedType,
+    host: "",
+    port: defaultPortForSourceType(resolvedType),
+    database_name: "",
+    default_schema: defaultSchema,
+    ssl_mode: sslModeOptionsForSourceType(resolvedType)[0] || "",
+    username: "",
+    password: "",
+    allowlist: [{ schema: defaultSchema, name: "", kind: "table" }],
+  };
+};
+
+const newSource = ref(defaultSQLSourceForm());
+const editSource = ref(defaultSQLSourceForm());
+
+watch(
+  () => props.open,
+  async (open) => {
+    if (open && store.sourceTypes.length === 0) {
+      await store.fetchSourceTypes();
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  configurableSQLSourceTypes,
+  (types) => {
+    if (!types.length) return;
+    if (!sqlSourceTypeSet.value.has(newSource.value.source_type)) {
+      newSource.value = defaultSQLSourceForm(types[0].source_type);
+    }
+  },
+  { immediate: true },
+);
 
 async function handleCreateSource() {
   creating.value = true;
@@ -693,7 +783,7 @@ async function handleCreateSource() {
       return;
     }
     showCreateForm.value = false;
-    newSource.value = defaultPostgresSourceForm();
+    newSource.value = defaultSQLSourceForm();
   } finally {
     creating.value = false;
   }
@@ -712,27 +802,33 @@ async function openImportFor(ds) {
 }
 
 function startEditSource(ds) {
-  const pg = ds.config || {};
+  const cfg = ds.config || {};
+  const defaultSchema = defaultSchemaForSourceType(
+    ds.source_type,
+    cfg.database_name,
+  );
   editingSourceId.value = ds.id;
   sourceMessage.value = "";
   editSource.value = {
     name: ds.name || "",
-    source_type: ds.source_type || "postgres_connection",
-    host: pg.host || "",
-    port: pg.port || defaultPortForSourceType(ds.source_type),
-    database_name: pg.database_name || "",
-    default_schema: pg.default_schema || "public",
-    ssl_mode: pg.ssl_mode || "require",
-    username: pg.username || "",
+    source_type:
+      ds.source_type || configurableSQLSourceTypes.value[0]?.source_type || "",
+    host: cfg.host || "",
+    port: cfg.port || defaultPortForSourceType(ds.source_type),
+    database_name: cfg.database_name || "",
+    default_schema: cfg.default_schema || defaultSchema,
+    ssl_mode:
+      cfg.ssl_mode || sslModeOptionsForSourceType(ds.source_type)[0] || "",
+    username: cfg.username || "",
     password: "",
     allowlist:
-      Array.isArray(pg.allowlist) && pg.allowlist.length
-        ? pg.allowlist.map((entry) => ({
-            schema: entry.schema || "public",
+      Array.isArray(cfg.allowlist) && cfg.allowlist.length
+        ? cfg.allowlist.map((entry) => ({
+            schema: entry.schema || defaultSchema,
             name: entry.name || "",
             kind: entry.kind || "table",
           }))
-        : [{ schema: pg.default_schema || "public", name: "", kind: "table" }],
+        : [{ schema: defaultSchema, name: "", kind: "table" }],
   };
 }
 
@@ -761,16 +857,26 @@ async function handleUpdateSource(ds) {
 
 function applySourceTypeDefaults(form) {
   if (!form) return;
-  if (!form.port || form.port === 5432 || form.port === 3306) {
+  const knownDefaultPorts = configurableSQLSourceTypes.value
+    .map((type) => type.default_port)
+    .filter(Boolean);
+  if (!form.port || knownDefaultPorts.includes(form.port)) {
     form.port = defaultPortForSourceType(form.source_type);
   }
-  if (!form.default_schema) {
-    form.default_schema = "public";
+  if (!form.default_schema || form.default_schema === "public") {
+    form.default_schema = defaultSchemaForSourceType(
+      form.source_type,
+      form.database_name,
+    );
+  }
+  const sslOptions = sslModeOptionsForSourceType(form.source_type);
+  if (!sslOptions.includes(form.ssl_mode)) {
+    form.ssl_mode = sslOptions[0] || "";
   }
 }
 
 function defaultPortForSourceType(sourceType) {
-  return sourceType === "mysql_connection" ? 3306 : 5432;
+  return sourceTypeSpec(sourceType)?.default_port || null;
 }
 
 async function handleDeleteWorkspaceSource(ds) {

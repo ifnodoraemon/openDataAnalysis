@@ -122,7 +122,39 @@ describe("data source store", () => {
     expect(JSON.stringify(body.config)).not.toContain("secret");
   });
 
-  it("omits credential when updating postgres source without a new password", async () => {
+  it("fetches connector source type specs", async () => {
+    const store = useDataSourceStore();
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          source_types: [
+            {
+              source_type: "mysql_connection",
+              label: "MySQL",
+              category: "sql",
+              configurable: true,
+              default_port: 3306,
+            },
+          ],
+        }),
+    });
+
+    const result = await store.fetchSourceTypes();
+
+    expect(result.ok).toBe(true);
+    expect(store.sourceTypes).toEqual([
+      {
+        source_type: "mysql_connection",
+        label: "MySQL",
+        category: "sql",
+        configurable: true,
+        default_port: 3306,
+      },
+    ]);
+  });
+
+  it("omits credential when updating SQL source without a new password", async () => {
     const store = useDataSourceStore();
     const fetchMock = vi
       .fn()

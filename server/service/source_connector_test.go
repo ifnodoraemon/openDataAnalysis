@@ -29,6 +29,29 @@ func TestSourceConnectorRegistryReturnsRegisteredConnector(t *testing.T) {
 	}
 }
 
+func TestSourceConnectorRegistryReturnsSpecs(t *testing.T) {
+	t.Parallel()
+
+	registry := NewSourceConnectorRegistry()
+	registry.Register(fakeSourceConnector{
+		sourceType: domain.SourceTypePostgresConnection,
+		spec: SourceConnectorSpec{
+			SourceType:   domain.SourceTypePostgresConnection,
+			Label:        "PostgreSQL",
+			Category:     "sql",
+			Configurable: true,
+		},
+	})
+
+	specs := registry.Specs()
+	if len(specs) != 1 {
+		t.Fatalf("expected one spec, got %d", len(specs))
+	}
+	if specs[0].SourceType != domain.SourceTypePostgresConnection || !specs[0].Configurable {
+		t.Fatalf("unexpected spec: %#v", specs[0])
+	}
+}
+
 func TestSourceScopedFileTableNameAvoidsCrossSourceCollision(t *testing.T) {
 	t.Parallel()
 
@@ -44,9 +67,17 @@ func TestSourceScopedFileTableNameAvoidsCrossSourceCollision(t *testing.T) {
 
 type fakeSourceConnector struct {
 	sourceType domain.SourceType
+	spec       SourceConnectorSpec
 }
 
 func (c fakeSourceConnector) Type() domain.SourceType { return c.sourceType }
+
+func (c fakeSourceConnector) Spec() SourceConnectorSpec {
+	if c.spec.SourceType == "" {
+		return SourceConnectorSpec{SourceType: c.sourceType}
+	}
+	return c.spec
+}
 
 func (c fakeSourceConnector) NormalizeConfig(ctx context.Context, req SourceConfigRequest) (*domain.SourceConfig, error) {
 	return nil, nil

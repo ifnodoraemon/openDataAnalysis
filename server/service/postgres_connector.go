@@ -20,6 +20,21 @@ func NewPostgresConnector(sources *SourceService) *PostgresConnector {
 
 func (c *PostgresConnector) Type() domain.SourceType { return domain.SourceTypePostgresConnection }
 
+func (c *PostgresConnector) Spec() SourceConnectorSpec {
+	return SourceConnectorSpec{
+		SourceType:        domain.SourceTypePostgresConnection,
+		Label:             "PostgreSQL",
+		Category:          "sql",
+		Configurable:      true,
+		DefaultPort:       5432,
+		DefaultSchema:     "public",
+		SSLModeOptions:    []string{"disable", "allow", "prefer", "require", "verify-ca", "verify-full"},
+		SupportsAllowlist: true,
+		SupportsCatalog:   true,
+		SupportsImport:    true,
+	}
+}
+
 func (c *PostgresConnector) NormalizeConfig(ctx context.Context, req SourceConfigRequest) (*domain.SourceConfig, error) {
 	if strings.TrimSpace(req.AuthSecret) == "" || len(req.AuthSecret) < 32 {
 		return nil, fmt.Errorf("AUTH_SECRET too short, cannot store source credentials")

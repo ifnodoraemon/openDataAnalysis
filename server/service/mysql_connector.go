@@ -20,6 +20,19 @@ func NewMySQLConnector(sources *SourceService) *MySQLConnector {
 
 func (c *MySQLConnector) Type() domain.SourceType { return domain.SourceTypeMySQLConnection }
 
+func (c *MySQLConnector) Spec() SourceConnectorSpec {
+	return SourceConnectorSpec{
+		SourceType:        domain.SourceTypeMySQLConnection,
+		Label:             "MySQL",
+		Category:          "sql",
+		Configurable:      true,
+		DefaultPort:       3306,
+		SupportsAllowlist: true,
+		SupportsCatalog:   true,
+		SupportsImport:    true,
+	}
+}
+
 func (c *MySQLConnector) NormalizeConfig(ctx context.Context, req SourceConfigRequest) (*domain.SourceConfig, error) {
 	if strings.TrimSpace(req.AuthSecret) == "" || len(req.AuthSecret) < 32 {
 		return nil, fmt.Errorf("AUTH_SECRET too short, cannot store source credentials")

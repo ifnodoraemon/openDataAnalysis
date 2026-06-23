@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,11 +17,25 @@ import (
 
 type SourceConnector interface {
 	Type() domain.SourceType
+	Spec() SourceConnectorSpec
 	NormalizeConfig(ctx context.Context, req SourceConfigRequest) (*domain.SourceConfig, error)
 	PublicConfig(ctx context.Context, sourceID string) (map[string]interface{}, error)
 	Test(ctx context.Context, req SourceTestRequest) (map[string]interface{}, error)
 	Catalog(ctx context.Context, sourceID string) ([]SourceCatalogObject, error)
 	Import(ctx context.Context, req SourceImportRequest) (*SnapshotImportResult, error)
+}
+
+type SourceConnectorSpec struct {
+	SourceType        domain.SourceType `json:"source_type"`
+	Label             string            `json:"label"`
+	Category          string            `json:"category"`
+	Configurable      bool              `json:"configurable"`
+	DefaultPort       int               `json:"default_port,omitempty"`
+	DefaultSchema     string            `json:"default_schema,omitempty"`
+	SSLModeOptions    []string          `json:"ssl_mode_options,omitempty"`
+	SupportsAllowlist bool              `json:"supports_allowlist"`
+	SupportsCatalog   bool              `json:"supports_catalog"`
+	SupportsImport    bool              `json:"supports_import"`
 }
 
 type SourceConnectorRegistry struct {
@@ -47,6 +62,23 @@ func (r *SourceConnectorRegistry) Get(sourceType domain.SourceType) (SourceConne
 		return nil, fmt.Errorf("unsupported data source type: %s", sourceType)
 	}
 	return connector, nil
+}
+
+func (r *SourceConnectorRegistry) Specs() []SourceConnectorSpec {
+	if r == nil {
+		return nil
+	}
+	specs := make([]SourceConnectorSpec, 0, len(r.connectors))
+	for _, connector := range r.connectors {
+		specs = append(specs, connector.Spec())
+	}
+	sort.Slice(specs, func(i, j int) bool {
+		if specs[i].Category != specs[j].Category {
+			return specs[i].Category < specs[j].Category
+		}
+		return specs[i].Label < specs[j].Label
+	})
+	return specs
 }
 
 type SourceTestRequest struct {
@@ -298,6 +330,17 @@ func NewFileUploadConnector(sources *SourceService, files *FileService) *FileUpl
 }
 
 func (c *FileUploadConnector) Type() domain.SourceType { return domain.SourceTypeFileUpload }
+
+func (c *FileUploadConnector) Spec() SourceConnectorSpec {
+	return SourceConnectorSpec{
+		SourceType:      domain.SourceTypeFileUpload,
+		Label:           "Uploaded file",
+		Category:        "file",
+		Configurable:    false,
+		SupportsCatalog: true,
+		SupportsImport:  true,
+	}
+}
 
 func (c *FileUploadConnector) NormalizeConfig(ctx context.Context, req SourceConfigRequest) (*domain.SourceConfig, error) {
 	return nil, nil

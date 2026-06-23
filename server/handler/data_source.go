@@ -226,6 +226,23 @@ func ListDataSourcesHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func ListDataSourceTypesHandler(w http.ResponseWriter, r *http.Request) {
+	identity, ok := auth.FromContext(r.Context())
+	if !ok || identity.UserID == "" {
+		http.Error(w, "not authenticated", http.StatusUnauthorized)
+		return
+	}
+	if sourceConnectors == nil {
+		http.Error(w, "source connector registry is not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"source_types": sourceConnectors.Specs(),
+	})
+}
+
 func serializeWorkspaceDataSource(ctx context.Context, ds domain.DataSource) map[string]interface{} {
 	item := map[string]interface{}{
 		"id":          ds.ID,
