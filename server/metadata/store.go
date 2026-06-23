@@ -188,20 +188,16 @@ func (s *Store) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_data_sources_workspace ON data_sources(workspace_id)`,
 
-		`CREATE TABLE IF NOT EXISTS database_connections (
+		`CREATE TABLE IF NOT EXISTS source_configs (
 			source_id TEXT PRIMARY KEY,
-			driver TEXT NOT NULL,
-			host TEXT NOT NULL,
-			port INTEGER NOT NULL,
-			database_name TEXT NOT NULL,
-			default_schema TEXT NOT NULL DEFAULT '',
-			ssl_mode TEXT NOT NULL DEFAULT 'disable',
-			username TEXT NOT NULL,
-			secret_ciphertext BLOB NOT NULL,
-			allowlist_json TEXT NOT NULL DEFAULT '[]',
+			connector_type TEXT NOT NULL,
+			config_json TEXT NOT NULL DEFAULT '{}',
+			credential_ciphertext BLOB NOT NULL DEFAULT X'',
 			last_tested_at DATETIME,
 			last_test_status TEXT NOT NULL DEFAULT '',
 			last_error_message TEXT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
 			FOREIGN KEY (source_id) REFERENCES data_sources(id) ON DELETE CASCADE
 		)`,
 

@@ -12,20 +12,16 @@ create table data_sources (
 
 create index idx_data_sources_workspace on data_sources(workspace_id);
 
-create table database_connections (
+create table source_configs (
   source_id varchar(64) primary key references data_sources(id) on delete cascade,
-  driver varchar(32) not null,
-  host varchar(255) not null,
-  port integer not null,
-  database_name varchar(255) not null,
-  default_schema varchar(255) not null default '',
-  ssl_mode varchar(32) not null default 'disable',
-  username varchar(255) not null,
-  secret_ciphertext bytea not null,
-  allowlist_json jsonb not null default '[]',
+  connector_type varchar(64) not null,
+  config_json jsonb not null default '{}',
+  credential_ciphertext bytea not null default decode('', 'hex'),
   last_tested_at timestamptz,
   last_test_status varchar(32) not null default '',
-  last_error_message text
+  last_error_message text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
 );
 
 create table source_snapshots (

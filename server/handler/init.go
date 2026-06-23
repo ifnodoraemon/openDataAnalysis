@@ -22,6 +22,7 @@ var (
 	defaultIdentity            auth.Identity
 	fileService                *service.FileService
 	sourceService              *service.SourceService
+	sourceConnectors           *service.SourceConnectorRegistry
 	metadataStore              *metadata.Store
 	tokenManager               *auth.TokenManager
 	userRepo                   repository.UserRepository
@@ -31,7 +32,7 @@ var (
 	reportRepo                 repository.ReportRepository
 	messageRepo                repository.MessageRepository
 	dataSourceRepo             repository.DataSourceRepository
-	dbConnectionRepo           repository.DatabaseConnectionRepository
+	sourceConfigRepo           repository.SourceConfigRepository
 	snapshotRepo               repository.SourceSnapshotRepository
 	sessionSourceBindingRepo   repository.SessionSourceBindingRepository
 	semanticProfileRepo        repository.SemanticProfileRepository
@@ -72,7 +73,7 @@ func Initialize() {
 	runRepo = sqliterepo.NewRunRepository(store.DB)
 	messageRepo = sqliterepo.NewMessageRepository(store.DB)
 	dataSourceRepo = sqliterepo.NewDataSourceRepository(store.DB)
-	dbConnectionRepo = sqliterepo.NewDatabaseConnectionRepository(store.DB)
+	sourceConfigRepo = sqliterepo.NewSourceConfigRepository(store.DB)
 	snapshotRepo = sqliterepo.NewSourceSnapshotRepository(store.DB)
 	sessionSourceBindingRepo = sqliterepo.NewSessionSourceBindingRepository(store.DB)
 	semanticProfileRepo = sqliterepo.NewSemanticProfileRepository(store.DB)
@@ -118,12 +119,15 @@ func Initialize() {
 
 	sourceService = service.NewSourceService(
 		dataSourceRepo,
-		dbConnectionRepo,
+		sourceConfigRepo,
 		snapshotRepo,
 		sessionSourceBindingRepo,
 		semanticProfileRepo,
 		semanticConfirmationRepo,
 	)
+	sourceConnectors = service.NewSourceConnectorRegistry()
+	sourceConnectors.Register(service.NewPostgresConnector(sourceService))
+	sourceConnectors.Register(service.NewFileUploadConnector(sourceService, fileService))
 
 	sessionManager = session.NewManager(config.Cfg.CacheRoot, fileService, sourceService)
 	sessionManager.SetSessionRepository(sessionRepo)

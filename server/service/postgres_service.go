@@ -13,38 +13,35 @@ import (
 	"log"
 	"net"
 	"net/url"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/ifnodoraemon/openDataAnalysis/data"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
-type PGImportResult struct {
-	SnapshotID        string
-	ProfileID         string
-	TableName         string
-	RowCount          int
-	ColCount          int
-	RowsImported      int
-	RowsSkipped       int
-	ImportRowLimit    int
-	ImportTruncated   bool
-	ImportDurationMs  int
-	ProfileDurationMs int
-	SnapshotSizeBytes int64
-	ProfileMode       domain.ProfileMode
-	DataSizeTier      string
-	ProfErr           error
+type PGImportResult = SnapshotImportResult
+
+type PostgresSourceConfig struct {
+	Driver        string           `json:"driver"`
+	Host          string           `json:"host"`
+	Port          int              `json:"port"`
+	DatabaseName  string           `json:"database_name"`
+	DefaultSchema string           `json:"default_schema"`
+	SSLMode       string           `json:"ssl_mode"`
+	Username      string           `json:"username"`
+	Allowlist     []AllowlistEntry `json:"allowlist"`
 }
 
-func EncryptPassword(password, authSecret string) ([]byte, error) {
+type PostgresCredential struct {
+	Password string `json:"password"`
+}
+
+func EncryptCredential(payload interface{}, authSecret string) ([]byte, error) {
 	key := sha256.Sum256([]byte(authSecret))
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
@@ -61,59 +58,77 @@ func EncryptPassword(password, authSecret string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to generate nonce: %w", err)
 	}
 
-	payload := map[string]string{"password": password}
 	payloadJSON, _ := json.Marshal(payload)
 
 	ciphertext := aesGCM.Seal(nonce, nonce, payloadJSON, nil)
 	return ciphertext, nil
 }
 
-func DecryptPassword(ciphertext []byte, authSecret string) (string, error) {
+func DecryptCredential(ciphertext []byte, authSecret string, out interface{}) error {
 	key := sha256.Sum256([]byte(authSecret))
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
-		return "", fmt.Errorf("failed to create AES cipher: %w", err)
+		return fmt.Errorf("failed to create AES cipher: %w", err)
 	}
 
 	aesGCM, err := cipher.NewGCM(block)
 	if err != nil {
-		return "", fmt.Errorf("failed to create GCM: %w", err)
+		return fmt.Errorf("failed to create GCM: %w", err)
 	}
 
 	nonceSize := aesGCM.NonceSize()
 	if len(ciphertext) < nonceSize {
-		return "", fmt.Errorf("ciphertext too short")
+		return fmt.Errorf("ciphertext too short")
 	}
 
 	nonce, ciphertextBody := ciphertext[:nonceSize], ciphertext[nonceSize:]
 	plaintext, err := aesGCM.Open(nil, nonce, ciphertextBody, nil)
 	if err != nil {
-		return "", fmt.Errorf("decryption failed: %w", err)
+		return fmt.Errorf("decryption failed: %w", err)
 	}
-
-	var payload map[string]string
-	if err := json.Unmarshal(plaintext, &payload); err != nil {
-		return "", fmt.Errorf("failed to parse password payload: %w", err)
+	if err := json.Unmarshal(plaintext, out); err != nil {
+		return fmt.Errorf("failed to parse credential payload: %w", err)
 	}
-	return payload["password"], nil
+	return nil
 }
 
-func OpenPostgresConnection(ctx context.Context, conn *domain.DatabaseConnection, authSecret string) (*sql.DB, error) {
-	password, err := DecryptPassword(conn.SecretCiphertext, authSecret)
+func ParsePostgresSourceConfig(sourceConfig *domain.SourceConfig) (PostgresSourceConfig, error) {
+	if sourceConfig == nil {
+		return PostgresSourceConfig{}, fmt.Errorf("source config does not exist")
+	}
+	var cfg PostgresSourceConfig
+	if err := json.Unmarshal([]byte(sourceConfig.ConfigJSON), &cfg); err != nil {
+		return PostgresSourceConfig{}, fmt.Errorf("failed to parse postgres source config: %w", err)
+	}
+	if cfg.Driver == "" {
+		cfg.Driver = "postgres"
+	}
+	return cfg, nil
+}
+
+func OpenPostgresConnection(ctx context.Context, sourceConfig *domain.SourceConfig, authSecret string) (*sql.DB, error) {
+	cfg, err := ParsePostgresSourceConfig(sourceConfig)
 	if err != nil {
+		return nil, err
+	}
+	var credential PostgresCredential
+	if err := DecryptCredential(sourceConfig.CredentialCiphertext, authSecret, &credential); err != nil {
 		return nil, fmt.Errorf("credential decryption failed: %w", err)
 	}
+	if strings.TrimSpace(credential.Password) == "" {
+		return nil, fmt.Errorf("postgres credential password is empty")
+	}
 
-	sslMode := conn.SSLMode
+	sslMode := cfg.SSLMode
 	if sslMode == "" {
 		sslMode = "disable"
 	}
 
 	connURL := url.URL{
 		Scheme: "postgres",
-		User:   url.UserPassword(conn.Username, password),
-		Host:   net.JoinHostPort(conn.Host, strconv.Itoa(conn.Port)),
-		Path:   conn.DatabaseName,
+		User:   url.UserPassword(cfg.Username, credential.Password),
+		Host:   net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
+		Path:   cfg.DatabaseName,
 	}
 	q := connURL.Query()
 	q.Set("sslmode", sslMode)
@@ -155,20 +170,23 @@ func ParseAllowlist(allowlistJSON string) ([]AllowlistEntry, error) {
 }
 
 func (s *SourceService) TestPostgresConnection(ctx context.Context, sourceID, authSecret string) map[string]interface{} {
-	conn, err := s.findDBConnection(ctx, sourceID)
+	sourceConfig, err := s.findSourceConfig(ctx, sourceID)
 	if err != nil {
 		return map[string]interface{}{"success": false, "message": err.Error()}
 	}
 
-	pgDB, err := OpenPostgresConnection(ctx, conn, authSecret)
+	pgDB, err := OpenPostgresConnection(ctx, sourceConfig, authSecret)
 	if err != nil {
 		return map[string]interface{}{"success": false, "message": err.Error()}
 	}
 	defer pgDB.Close()
 
-	allowlist, _ := ParseAllowlist(conn.AllowlistJSON)
+	cfg, err := ParsePostgresSourceConfig(sourceConfig)
+	if err != nil {
+		return map[string]interface{}{"success": false, "message": err.Error()}
+	}
 	var validated []map[string]interface{}
-	for _, entry := range allowlist {
+	for _, entry := range cfg.Allowlist {
 		exists := s.checkObjectExists(ctx, pgDB, entry)
 		validated = append(validated, map[string]interface{}{
 			"schema": entry.Schema, "name": entry.Name, "kind": entry.Kind, "exists": exists,
@@ -183,166 +201,14 @@ func (s *SourceService) TestPostgresConnection(ctx context.Context, sourceID, au
 }
 
 func (s *SourceService) ImportPostgresSnapshot(ctx context.Context, sourceID, sessionID, schemaName, objectName string, sessIngester *data.Ingester, authSecret string, importRowLimit int) (*PGImportResult, error) {
-	conn, err := s.findDBConnection(ctx, sourceID)
-	if err != nil {
-		return nil, err
-	}
-	if importRowLimit < 0 {
-		importRowLimit = 0
-	}
-
-	resolvedSchema := schemaName
-	if resolvedSchema == "" {
-		resolvedSchema = conn.DefaultSchema
-	}
-	if strings.TrimSpace(resolvedSchema) == "" {
-		return nil, fmt.Errorf("schema_name or connection default_schema is required")
-	}
-
-	allowlist, allowErr := ParseAllowlist(conn.AllowlistJSON)
-	if allowErr != nil {
-		return nil, fmt.Errorf("failed to parse allowlist: %w", allowErr)
-	}
-	if !isInAllowlist(allowlist, resolvedSchema, objectName) {
-		return nil, fmt.Errorf("object %s.%s is not in the data source allowlist", resolvedSchema, objectName)
-	}
-
-	pgDB, err := OpenPostgresConnection(ctx, conn, authSecret)
-	if err != nil {
-		return nil, err
-	}
-	defer pgDB.Close()
-
-	schema := resolvedSchema
-
-	tableName := sourceScopedPGTableName(schema, objectName, sourceID)
-	sourceObjectKey := SourceObjectKey(sourceID, "postgres_connection", schema, objectName)
-
-	preSnapshot := &domain.SourceSnapshot{
-		ID:                "snap_" + uuid.New().String()[:12],
-		SessionID:         sessionID,
-		SourceID:          sourceID,
-		UpstreamKind:      "postgres_connection",
-		UpstreamSchema:    schema,
-		UpstreamObject:    objectName,
-		AnalysisTableName: tableName,
-		Status:            domain.SnapshotStatusCreating,
-		ImportedAt:        time.Now(),
-	}
-	if err := s.SnapshotRepo.Create(ctx, preSnapshot); err != nil {
-		return nil, fmt.Errorf("failed to create pre-import snapshot: %w", err)
-	}
-	binding := &domain.SessionSourceBinding{
-		SessionID:        sessionID,
-		SourceID:         sourceID,
-		SourceObjectKey:  sourceObjectKey,
-		ActiveSnapshotID: preSnapshot.ID,
-		CreatedAt:        time.Now(),
-		UpdatedAt:        time.Now(),
-	}
-	if err := s.SessionSourceBindingRepo.Upsert(ctx, binding); err != nil {
-		bindErr := "failed to create session source binding"
-		_ = s.SnapshotRepo.UpdateStatus(ctx, preSnapshot.ID, domain.SnapshotStatusFailed, &bindErr)
-		return nil, fmt.Errorf("failed to upsert session source binding: %w", err)
-	}
-
-	importStart := time.Now()
-
-	rowCount, colCount, rowsSkipped, importTruncated, err := s.streamImportToSQLite(ctx, pgDB, schema, objectName, sessIngester, tableName, importRowLimit)
-	importDuration := time.Since(importStart)
-
-	if err != nil {
-		importErrMsg := err.Error()
-		_ = s.SnapshotRepo.UpdateStatus(ctx, preSnapshot.ID, domain.SnapshotStatusFailed, &importErrMsg)
-		return nil, fmt.Errorf("import failed: %w", err)
-	}
-
-	profileMode := ProfileModeForRows(rowCount)
-
-	var schemaInfo *data.SchemaInfo
-	var schemaErr error
-	if profileMode == domain.ProfileModeExact {
-		schemaInfo, schemaErr = data.ExtractSchema(sessIngester.GetDB(), tableName)
-	} else {
-		schemaInfo, schemaErr = data.ExtractSchemaSampled(sessIngester.GetDB(), tableName)
-	}
-	if schemaErr != nil {
-		return nil, fmt.Errorf("schema extraction failed: %w", schemaErr)
-	}
-	schemaSig := ComputeSchemaSignature(schemaInfo)
-
-	profileStart := time.Now()
-	var semanticProfile *data.SemanticProfile
-	if sessIngester.SemanticEnricher != nil {
-		activeTables := sessIngester.GetActiveTables()
-		semCtx, semCancel := context.WithTimeout(ctx, 30*time.Second)
-		sp, semErr := data.AnalyzeTableSemantics(semCtx, sessIngester.SemanticEnricher, schemaInfo, activeTables)
-		semCancel()
-		if semErr != nil {
-			log.Printf("pg import: LLM semantic analysis skipped table=%s err=%v", tableName, semErr)
-		} else {
-			semanticProfile = sp
-		}
-	}
-	snapshotSizeBytes := int64(0)
-	if dbPath := sessIngester.DBPath(); dbPath != "" {
-		if fi, fiErr := os.Stat(dbPath); fiErr == nil {
-			snapshotSizeBytes = fi.Size()
-		}
-	}
-
-	facts := s.BuildProfileFacts(schemaInfo, semanticProfile, nil, string(profileMode), snapshotSizeBytes, importRowLimit, importTruncated)
-	if rowsSkipped > 0 {
-		facts.Warnings = append(facts.Warnings, fmt.Sprintf("%d upstream rows were skipped during import because they could not be scanned", rowsSkipped))
-	}
-	profileDuration := time.Since(profileStart)
-
-	if err := s.SnapshotRepo.UpdateStatus(ctx, preSnapshot.ID, domain.SnapshotStatusReady, nil); err != nil {
-		log.Printf("pg import: failed to update snapshot status to ready snapshot_id=%s err=%v", preSnapshot.ID, err)
-	}
-	if err := s.SnapshotRepo.UpdateSnapshotCompletion(ctx, preSnapshot.ID, rowCount, colCount, schemaSig,
-		rowCount, rowsSkipped, importRowLimit, importTruncated, int(importDuration.Milliseconds()), int(profileDuration.Milliseconds()), snapshotSizeBytes, profileMode); err != nil {
-		log.Printf("pg import: failed to update snapshot completion facts snapshot_id=%s err=%v", preSnapshot.ID, err)
-	}
-
-	ds, err := s.DataSourceRepo.GetByID(ctx, sourceID)
-	if err != nil {
-		return nil, err
-	}
-
-	profile, profErr := s.CreateSemanticProfile(
-		ctx, sessionID, ds.WorkspaceID, sourceID, preSnapshot.ID,
-		tableName, schemaSig, facts,
-	)
-	profileID := ""
-	if profile != nil {
-		profileID = profile.ID
-	}
-	if profErr != nil {
-		log.Printf("pg import: create semantic profile failed source_id=%s err=%v", sourceID, profErr)
-		errMsg := profErr.Error()
-		if updateErr := s.SnapshotRepo.UpdateStatus(ctx, preSnapshot.ID, domain.SnapshotStatusFailed, &errMsg); updateErr != nil {
-			log.Printf("pg import: failed to write profile error to snapshot snapshot_id=%s err=%v", preSnapshot.ID, updateErr)
-		}
-	}
-
-	return &PGImportResult{
-		SnapshotID:        preSnapshot.ID,
-		ProfileID:         profileID,
-		TableName:         tableName,
-		RowCount:          rowCount,
-		ColCount:          colCount,
-		RowsImported:      rowCount,
-		RowsSkipped:       rowsSkipped,
-		ImportRowLimit:    importRowLimit,
-		ImportTruncated:   importTruncated,
-		ImportDurationMs:  int(importDuration.Milliseconds()),
-		ProfileDurationMs: int(profileDuration.Milliseconds()),
-		SnapshotSizeBytes: snapshotSizeBytes,
-		ProfileMode:       profileMode,
-		DataSizeTier:      DataSizeTierForRows(rowCount),
-		ProfErr:           profErr,
-	}, nil
+	return NewPostgresConnector(s).Import(ctx, SourceImportRequest{
+		SourceID:       sourceID,
+		SessionID:      sessionID,
+		Object:         SourceObjectRef{Schema: schemaName, Name: objectName},
+		Ingester:       sessIngester,
+		AuthSecret:     authSecret,
+		ImportRowLimit: importRowLimit,
+	})
 }
 
 var pgIdentifierPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
@@ -471,8 +337,8 @@ func (s *SourceService) streamImportToSQLite(ctx context.Context, pgDB *sql.DB, 
 	return rowCount, colCount, rowsSkipped, importTruncated, nil
 }
 
-func (s *SourceService) findDBConnection(ctx context.Context, sourceID string) (*domain.DatabaseConnection, error) {
-	return s.DBConnectionRepo.GetBySourceID(ctx, sourceID)
+func (s *SourceService) findSourceConfig(ctx context.Context, sourceID string) (*domain.SourceConfig, error) {
+	return s.SourceConfigRepo.GetBySourceID(ctx, sourceID)
 }
 
 func (s *SourceService) checkObjectExists(ctx context.Context, pgDB *sql.DB, entry AllowlistEntry) bool {

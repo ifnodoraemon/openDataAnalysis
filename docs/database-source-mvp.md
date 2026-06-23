@@ -8,6 +8,13 @@
 
 已支持 PostgreSQL workspace data source，并以 snapshot import 方式导入到当前 session 的 SQLite 分析库。
 
+后端已引入 `SourceConnector` 抽象：
+
+- `file_upload` 和 `postgres_connection` 都通过 connector 执行 catalog/test/import 等运行时能力。
+- connector 负责 config 规范化、credential 加密、公开配置序列化和运行时导入。
+- 导入后的 schema 提取、snapshot completion、semantic profile 创建、截断/估计 warning 写入走统一收尾管线。
+- PostgreSQL 配置已从专用 `database_connections` 升级为通用 `source_configs`，后续新增商业数据源不再需要新增专用配置表。
+
 当前不支持：
 
 - live upstream query
@@ -32,7 +39,7 @@
 | 实体 | 作用 |
 |---|---|
 | `DataSource` | 工作区级数据源；当前包括 `file_upload` 和 `postgres_connection` |
-| `DatabaseConnection` | PostgreSQL 连接配置、allowlist、测试状态和加密凭证 |
+| `SourceConfig` | connector 类型、公开配置 JSON、加密 credential、测试状态 |
 | `SourceSnapshot` | 某个 source 在某个 session 中导入到 SQLite 的固定快照 |
 | `SessionSourceBinding` | session 当前绑定的 source/object -> active snapshot |
 | `SemanticProfile` | schema、候选语义、候选 join、歧义、warning 等结构化事实 |
@@ -87,16 +94,28 @@ POSTGRES_IMPORT_ROW_LIMIT=1000000
 
 ## API
 
-- `POST /api/data-sources`：创建 PostgreSQL source。
+- `POST /api/data-sources`：创建 connector-backed source，请求体使用 `source_type`、`config`、`credential`。
 - `GET /api/data-sources`：列出工作区 sources。
-- `PUT /api/data-sources/{sourceID}`：更新 source 和连接配置。
-- `DELETE /api/data-sources/{sourceID}`：删除工作区 SQL source，并移除相关 snapshot/profile。
+- `PUT /api/data-sources/{sourceID}`：更新 source 名称、connector config 或 credential。
+- `DELETE /api/data-sources/{sourceID}`：删除 workspace source，并移除相关 snapshot/profile。
 - `POST /api/data-sources/{sourceID}/test`：测试连接和 allowlist。
 - `GET /api/data-sources/{sourceID}/catalog`：返回 allowlist 对象。
 - `POST /api/data-sources/{sourceID}/import`：导入 allowlist 对象到 session snapshot。
 - `GET /api/sessions/{sessionID}/sources`：查看当前 session source/snapshot/profile 摘要。
 - `GET /api/semantic-profiles/{profileID}`：查看 profile 详情。
 - `POST /api/semantic-profiles/{profileID}/confirm`：保存确认或覆盖。
+
+## Source Connector 边界
+
+Connector 负责数据源类型相关的运行时能力：
+
+- `NormalizeConfig`：校验并规范化 connector 配置，必要时加密 credential。
+- `PublicConfig`：返回不含 secret 的配置摘要和最近测试状态。
+- `Test`：验证文件、连接或外部系统对象是否可访问。
+- `Catalog`：返回当前 source 可导入对象，且只暴露允许范围。
+- `Import`：把指定对象物化到 session analysis SQLite。
+
+Connector 不负责 agent 决策、不直接生成报告，也不把上游 live query 暴露给 agent。所有 connector import 成功后都必须产出 `SourceSnapshot` 和尽可能完整的 `SemanticProfile`。
 
 ## Agent 工具面
 

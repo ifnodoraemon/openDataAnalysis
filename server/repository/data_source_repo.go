@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"time"
 
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 )
@@ -16,10 +17,11 @@ type DataSourceRepository interface {
 	Delete(ctx context.Context, id string) error
 }
 
-type DatabaseConnectionRepository interface {
-	Create(ctx context.Context, conn *domain.DatabaseConnection) error
-	GetBySourceID(ctx context.Context, sourceID string) (*domain.DatabaseConnection, error)
-	Update(ctx context.Context, conn *domain.DatabaseConnection) error
+type SourceConfigRepository interface {
+	Create(ctx context.Context, cfg *domain.SourceConfig) error
+	GetBySourceID(ctx context.Context, sourceID string) (*domain.SourceConfig, error)
+	Update(ctx context.Context, cfg *domain.SourceConfig) error
+	UpdateTestResult(ctx context.Context, sourceID string, testedAt *time.Time, status string, errMsg *string) error
 }
 
 type SourceSnapshotRepository interface {

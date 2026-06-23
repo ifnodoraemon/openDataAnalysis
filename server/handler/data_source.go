@@ -235,129 +235,23 @@ func serializeWorkspaceDataSource(ctx context.Context, ds domain.DataSource) map
 		"created_at":  ds.CreatedAt,
 		"updated_at":  ds.UpdatedAt,
 	}
-	if ds.SourceType != domain.SourceTypePostgresConnection {
+	connector, err := sourceConnectors.Get(ds.SourceType)
+	if err != nil {
 		return item
 	}
-
-	conn, err := dbConnectionRepo.GetBySourceID(ctx, ds.ID)
-	if err != nil || conn == nil {
+	publicConfig, err := connector.PublicConfig(ctx, ds.ID)
+	if err != nil {
 		return item
 	}
-	allowlist, _ := service.ParseAllowlist(conn.AllowlistJSON)
-	item["postgres"] = map[string]interface{}{
-		"host":               conn.Host,
-		"port":               conn.Port,
-		"database_name":      conn.DatabaseName,
-		"default_schema":     conn.DefaultSchema,
-		"ssl_mode":           conn.SSLMode,
-		"username":           conn.Username,
-		"allowlist":          allowlist,
-		"last_tested_at":     conn.LastTestedAt,
-		"last_test_status":   conn.LastTestStatus,
-		"last_error_message": conn.LastErrorMessage,
-	}
+	item["config"] = publicConfig
 	return item
 }
 
 type CreateDataSourceRequest struct {
-	Name       string              `json:"name"`
-	SourceType string              `json:"source_type"`
-	Postgres   *PostgresConnection `json:"postgres,omitempty"`
-}
-
-type PostgresConnection struct {
-	Host          string           `json:"host"`
-	Port          int              `json:"port"`
-	DatabaseName  string           `json:"database_name"`
-	DefaultSchema string           `json:"default_schema"`
-	SSLMode       string           `json:"ssl_mode"`
-	Username      string           `json:"username"`
-	Password      string           `json:"password"`
-	Allowlist     []AllowlistEntry `json:"allowlist"`
-}
-
-type AllowlistEntry struct {
-	Schema string `json:"schema"`
-	Name   string `json:"name"`
-	Kind   string `json:"kind"`
-}
-
-func normalizePostgresConnectionInput(pg *PostgresConnection, requirePassword bool) (*domain.DatabaseConnection, error) {
-	if pg == nil {
-		return nil, fmt.Errorf("missing postgres connection config")
-	}
-	host := strings.TrimSpace(pg.Host)
-	databaseName := strings.TrimSpace(pg.DatabaseName)
-	defaultSchema := strings.TrimSpace(pg.DefaultSchema)
-	username := strings.TrimSpace(pg.Username)
-	password := strings.TrimSpace(pg.Password)
-	if host == "" || databaseName == "" || username == "" {
-		return nil, fmt.Errorf("host, database_name and username are required")
-	}
-	if requirePassword && password == "" {
-		return nil, fmt.Errorf("password is required")
-	}
-	if pg.Port <= 0 || pg.Port > 65535 {
-		return nil, fmt.Errorf("port must be between 1 and 65535")
-	}
-	sslMode := strings.TrimSpace(pg.SSLMode)
-	if sslMode == "" {
-		sslMode = "disable"
-	}
-	switch sslMode {
-	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
-	default:
-		return nil, fmt.Errorf("unsupported ssl_mode: %s", sslMode)
-	}
-
-	allowlist, err := normalizeAllowlist(pg.Allowlist, defaultSchema)
-	if err != nil {
-		return nil, err
-	}
-	allowlistJSON, _ := json.Marshal(allowlist)
-
-	return &domain.DatabaseConnection{
-		Driver:        "postgres",
-		Host:          host,
-		Port:          pg.Port,
-		DatabaseName:  databaseName,
-		DefaultSchema: defaultSchema,
-		SSLMode:       sslMode,
-		Username:      username,
-		AllowlistJSON: string(allowlistJSON),
-	}, nil
-}
-
-func normalizeAllowlist(entries []AllowlistEntry, defaultSchema string) ([]AllowlistEntry, error) {
-	if len(entries) == 0 {
-		return nil, fmt.Errorf("allowlist must include at least one table or view")
-	}
-	normalized := make([]AllowlistEntry, 0, len(entries))
-	seen := map[string]struct{}{}
-	for _, entry := range entries {
-		schema := strings.TrimSpace(entry.Schema)
-		if schema == "" {
-			schema = strings.TrimSpace(defaultSchema)
-		}
-		name := strings.TrimSpace(entry.Name)
-		kind := strings.ToLower(strings.TrimSpace(entry.Kind))
-		if kind == "" {
-			kind = "table"
-		}
-		if schema == "" || name == "" {
-			return nil, fmt.Errorf("allowlist entries require schema and name")
-		}
-		if kind != "table" && kind != "view" {
-			return nil, fmt.Errorf("allowlist kind must be table or view")
-		}
-		key := strings.ToLower(schema + "." + name + "." + kind)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		normalized = append(normalized, AllowlistEntry{Schema: schema, Name: name, Kind: kind})
-	}
-	return normalized, nil
+	Name       string          `json:"name"`
+	SourceType string          `json:"source_type"`
+	Config     json.RawMessage `json:"config"`
+	Credential json.RawMessage `json:"credential"`
 }
 
 func CreateDataSourceHandler(w http.ResponseWriter, r *http.Request) {
@@ -373,33 +267,33 @@ func CreateDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.SourceType != "postgres_connection" {
-		http.Error(w, "only postgres_connection type is supported", http.StatusBadRequest)
-		return
-	}
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		http.Error(w, "name cannot be empty", http.StatusBadRequest)
 		return
 	}
-	conn, validationErr := normalizePostgresConnectionInput(req.Postgres, true)
+	sourceType := domain.SourceType(strings.TrimSpace(req.SourceType))
+	if sourceType == domain.SourceTypeFileUpload {
+		http.Error(w, "file_upload sources are created by file upload", http.StatusBadRequest)
+		return
+	}
+	connector, err := sourceConnectors.Get(sourceType)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	sourceConfig, validationErr := connector.NormalizeConfig(r.Context(), service.SourceConfigRequest{
+		RawConfig:         req.Config,
+		RawCredential:     req.Credential,
+		RequireCredential: true,
+		AuthSecret:        config.Cfg.AuthSecret,
+	})
 	if validationErr != nil {
 		http.Error(w, validationErr.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if len(config.Cfg.AuthSecret) < 32 {
-		http.Error(w, "AUTH_SECRET too short, cannot create SQL data source", http.StatusForbidden)
-		return
-	}
-	ciphertext, encErr := service.EncryptPassword(req.Postgres.Password, config.Cfg.AuthSecret)
-	if encErr != nil {
-		http.Error(w, fmt.Sprintf("credential encryption failed: %v", encErr), http.StatusInternalServerError)
-		return
-	}
-	conn.SecretCiphertext = ciphertext
-
-	ds, err := sourceService.CreatePostgresSource(r.Context(), identity.WorkspaceID, name, identity.UserID, conn)
+	ds, err := sourceService.CreateConfiguredSource(r.Context(), identity.WorkspaceID, name, identity.UserID, sourceType, sourceConfig)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to create data source: %v", err), http.StatusInternalServerError)
 		return
@@ -416,8 +310,9 @@ func CreateDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type UpdateDataSourceRequest struct {
-	Name     *string             `json:"name"`
-	Postgres *PostgresConnection `json:"postgres,omitempty"`
+	Name       *string         `json:"name"`
+	Config     json.RawMessage `json:"config"`
+	Credential json.RawMessage `json:"credential"`
 }
 
 func UpdateDataSourceHandler(w http.ResponseWriter, r *http.Request) {
@@ -433,8 +328,9 @@ func UpdateDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "data source does not exist", http.StatusNotFound)
 		return
 	}
-	if ds.SourceType != domain.SourceTypePostgresConnection {
-		http.Error(w, "only postgres_connection sources can be updated here", http.StatusBadRequest)
+	connector, err := sourceConnectors.Get(ds.SourceType)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -452,43 +348,35 @@ func UpdateDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		ds.Name = name
 	}
 
-	if req.Postgres != nil {
-		conn, err := dbConnectionRepo.GetBySourceID(r.Context(), sourceID)
-		if err != nil || conn == nil {
-			http.Error(w, "connection config does not exist", http.StatusNotFound)
+	configProvided := len(req.Config) > 0 && strings.TrimSpace(string(req.Config)) != "" && strings.TrimSpace(string(req.Config)) != "null"
+	credentialProvided := len(req.Credential) > 0 && strings.TrimSpace(string(req.Credential)) != "" && strings.TrimSpace(string(req.Credential)) != "null"
+	if configProvided || credentialProvided {
+		existing, err := sourceConfigRepo.GetBySourceID(r.Context(), sourceID)
+		if err != nil {
+			http.Error(w, "source config does not exist", http.StatusNotFound)
 			return
 		}
-		normalizedConn, validationErr := normalizePostgresConnectionInput(req.Postgres, false)
+		normalizedConfig, validationErr := connector.NormalizeConfig(r.Context(), service.SourceConfigRequest{
+			SourceID:          sourceID,
+			RawConfig:         req.Config,
+			RawCredential:     req.Credential,
+			Existing:          existing,
+			RequireCredential: false,
+			AuthSecret:        config.Cfg.AuthSecret,
+		})
 		if validationErr != nil {
 			http.Error(w, validationErr.Error(), http.StatusBadRequest)
 			return
 		}
-
-		conn.Driver = "postgres"
-		conn.Host = normalizedConn.Host
-		conn.Port = normalizedConn.Port
-		conn.DatabaseName = normalizedConn.DatabaseName
-		conn.DefaultSchema = normalizedConn.DefaultSchema
-		conn.SSLMode = normalizedConn.SSLMode
-		conn.Username = normalizedConn.Username
-		conn.AllowlistJSON = normalizedConn.AllowlistJSON
-		if strings.TrimSpace(req.Postgres.Password) != "" {
-			if len(config.Cfg.AuthSecret) < 32 {
-				http.Error(w, "AUTH_SECRET too short, cannot update SQL data source secret", http.StatusForbidden)
-				return
-			}
-			ciphertext, encErr := service.EncryptPassword(req.Postgres.Password, config.Cfg.AuthSecret)
-			if encErr != nil {
-				http.Error(w, fmt.Sprintf("credential encryption failed: %v", encErr), http.StatusInternalServerError)
-				return
-			}
-			conn.SecretCiphertext = ciphertext
-		}
-		conn.LastTestedAt = nil
-		conn.LastTestStatus = ""
-		conn.LastErrorMessage = nil
-		if err := dbConnectionRepo.Update(r.Context(), conn); err != nil {
-			http.Error(w, fmt.Sprintf("failed to update connection config: %v", err), http.StatusInternalServerError)
+		normalizedConfig.SourceID = sourceID
+		normalizedConfig.ConnectorType = ds.SourceType
+		normalizedConfig.CreatedAt = existing.CreatedAt
+		normalizedConfig.LastTestedAt = nil
+		normalizedConfig.LastTestStatus = ""
+		normalizedConfig.LastErrorMessage = nil
+		normalizedConfig.UpdatedAt = time.Now()
+		if err := sourceConfigRepo.Update(r.Context(), normalizedConfig); err != nil {
+			http.Error(w, fmt.Sprintf("failed to update source config: %v", err), http.StatusInternalServerError)
 			return
 		}
 	}
@@ -521,8 +409,8 @@ func DeleteDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "data source does not exist", http.StatusNotFound)
 		return
 	}
-	if ds.SourceType != domain.SourceTypePostgresConnection {
-		http.Error(w, "only workspace SQL sources can be deleted here", http.StatusBadRequest)
+	if ds.SourceType == domain.SourceTypeFileUpload {
+		http.Error(w, "file upload sources are removed through session source deletion", http.StatusBadRequest)
 		return
 	}
 
@@ -558,23 +446,33 @@ func TestDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := sourceService.TestPostgresConnection(r.Context(), sourceID, config.Cfg.AuthSecret)
+	connector, err := sourceConnectors.Get(ds.SourceType)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	result, err := connector.Test(r.Context(), service.SourceTestRequest{
+		SourceID:   sourceID,
+		AuthSecret: config.Cfg.AuthSecret,
+	})
+	if err != nil {
+		http.Error(w, fmt.Sprintf("connection test failed: %v", err), http.StatusInternalServerError)
+		return
+	}
 
-	conn, _ := dbConnectionRepo.GetBySourceID(r.Context(), sourceID)
-	if conn != nil {
+	if ds.SourceType != domain.SourceTypeFileUpload {
 		now := time.Now()
-		conn.LastTestedAt = &now
 		success, _ := result["success"].(bool)
+		status := "failed"
+		var errMsg *string
 		if success {
-			conn.LastTestStatus = "success"
-			conn.LastErrorMessage = nil
+			status = "success"
 		} else {
-			conn.LastTestStatus = "failed"
 			if msg, ok := result["message"].(string); ok {
-				conn.LastErrorMessage = &msg
+				errMsg = &msg
 			}
 		}
-		if err := dbConnectionRepo.Update(r.Context(), conn); err != nil {
+		if err := sourceConfigRepo.UpdateTestResult(r.Context(), sourceID, &now, status, errMsg); err != nil {
 			log.Printf("TestDataSourceHandler: failed to persist test result source_id=%s err=%v", sourceID, err)
 		}
 	}
@@ -596,25 +494,20 @@ func CatalogDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := dbConnectionRepo.GetBySourceID(r.Context(), sourceID)
+	connector, err := sourceConnectors.Get(ds.SourceType)
 	if err != nil {
-		http.Error(w, "connection config does not exist", http.StatusNotFound)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	allowlist, _ := service.ParseAllowlist(conn.AllowlistJSON)
-	result := make([]map[string]interface{}, len(allowlist))
-	for i, e := range allowlist {
-		result[i] = map[string]interface{}{
-			"schema": e.Schema,
-			"name":   e.Name,
-			"kind":   e.Kind,
-		}
+	objects, err := connector.Catalog(r.Context(), sourceID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to get catalog: %v", err), http.StatusInternalServerError)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"objects": result,
+		"objects": objects,
 	})
 }
 
@@ -643,8 +536,12 @@ func ImportDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.SessionID == "" || req.ObjectName == "" {
-		http.Error(w, "missing session_id or object_name", http.StatusBadRequest)
+	if req.SessionID == "" {
+		http.Error(w, "missing session_id", http.StatusBadRequest)
+		return
+	}
+	if ds.SourceType != domain.SourceTypeFileUpload && strings.TrimSpace(req.ObjectName) == "" {
+		http.Error(w, "missing object_name", http.StatusBadRequest)
 		return
 	}
 
@@ -658,11 +555,22 @@ func ImportDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	connector, err := sourceConnectors.Get(ds.SourceType)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	sess.LockUpload()
-	result, err := sourceService.ImportPostgresSnapshot(
-		r.Context(), sourceID, req.SessionID, req.SchemaName, req.ObjectName,
-		sess.Ingester, config.Cfg.AuthSecret, config.Cfg.PostgresImportRowLimit,
-	)
+	result, err := connector.Import(r.Context(), service.SourceImportRequest{
+		SourceID:       sourceID,
+		WorkspaceID:    identity.WorkspaceID,
+		SessionID:      req.SessionID,
+		Object:         service.SourceObjectRef{Schema: req.SchemaName, Name: req.ObjectName},
+		Ingester:       sess.Ingester,
+		AuthSecret:     config.Cfg.AuthSecret,
+		ImportRowLimit: config.Cfg.PostgresImportRowLimit,
+	})
 	sess.UnlockUpload()
 	if err != nil {
 		http.Error(w, fmt.Sprintf("import failed: %v", err), http.StatusInternalServerError)

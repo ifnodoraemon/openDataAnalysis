@@ -19,7 +19,7 @@ import (
 
 type SourceService struct {
 	DataSourceRepo           repository.DataSourceRepository
-	DBConnectionRepo         repository.DatabaseConnectionRepository
+	SourceConfigRepo         repository.SourceConfigRepository
 	SnapshotRepo             repository.SourceSnapshotRepository
 	SessionSourceBindingRepo repository.SessionSourceBindingRepository
 	SemanticProfileRepo      repository.SemanticProfileRepository
@@ -28,7 +28,7 @@ type SourceService struct {
 
 func NewSourceService(
 	dsRepo repository.DataSourceRepository,
-	dbConnRepo repository.DatabaseConnectionRepository,
+	sourceConfigRepo repository.SourceConfigRepository,
 	snapRepo repository.SourceSnapshotRepository,
 	bindingRepo repository.SessionSourceBindingRepository,
 	profileRepo repository.SemanticProfileRepository,
@@ -36,7 +36,7 @@ func NewSourceService(
 ) *SourceService {
 	return &SourceService{
 		DataSourceRepo:           dsRepo,
-		DBConnectionRepo:         dbConnRepo,
+		SourceConfigRepo:         sourceConfigRepo,
 		SnapshotRepo:             snapRepo,
 		SessionSourceBindingRepo: bindingRepo,
 		SemanticProfileRepo:      profileRepo,
@@ -973,12 +973,15 @@ func normalizeAmbiguityCandidate(value string) string {
 	return strings.ToLower(value)
 }
 
-func (s *SourceService) CreatePostgresSource(ctx context.Context, workspaceID, name, createdBy string, conn *domain.DatabaseConnection) (*domain.DataSource, error) {
+func (s *SourceService) CreateConfiguredSource(ctx context.Context, workspaceID, name, createdBy string, sourceType domain.SourceType, sourceConfig *domain.SourceConfig) (*domain.DataSource, error) {
+	if sourceType != domain.SourceTypeFileUpload && sourceConfig == nil {
+		return nil, fmt.Errorf("source config is required for source type %s", sourceType)
+	}
 	ds := &domain.DataSource{
 		ID:          "ds_" + uuid.New().String()[:12],
 		WorkspaceID: workspaceID,
 		Name:        name,
-		SourceType:  domain.SourceTypePostgresConnection,
+		SourceType:  sourceType,
 		Status:      domain.SourceStatusActive,
 		CreatedBy:   createdBy,
 		CreatedAt:   time.Now(),
@@ -987,11 +990,19 @@ func (s *SourceService) CreatePostgresSource(ctx context.Context, workspaceID, n
 	if err := s.DataSourceRepo.Create(ctx, ds); err != nil {
 		return nil, err
 	}
-	conn.SourceID = ds.ID
-	if err := s.DBConnectionRepo.Create(ctx, conn); err != nil {
-		return nil, fmt.Errorf("failed to persist database connection: %w", err)
+	if sourceConfig != nil {
+		sourceConfig.SourceID = ds.ID
+		sourceConfig.ConnectorType = sourceType
+		now := time.Now()
+		if sourceConfig.CreatedAt.IsZero() {
+			sourceConfig.CreatedAt = now
+		}
+		sourceConfig.UpdatedAt = now
+		if err := s.SourceConfigRepo.Create(ctx, sourceConfig); err != nil {
+			return nil, fmt.Errorf("failed to persist source config: %w", err)
+		}
 	}
-	log.Printf("Created postgres data source id=%s name=%s", ds.ID, name)
+	log.Printf("Created data source id=%s type=%s name=%s", ds.ID, sourceType, name)
 	return ds, nil
 }
 
