@@ -89,6 +89,14 @@
         </div>
         <div v-if="showCreateForm" class="create-form">
           <input v-model="newSource.name" placeholder="名称" class="input-sm" />
+          <select
+            v-model="newSource.source_type"
+            class="input-sm"
+            @change="applySourceTypeDefaults(newSource)"
+          >
+            <option value="postgres_connection">PostgreSQL</option>
+            <option value="mysql_connection">MySQL</option>
+          </select>
           <input v-model="newSource.host" placeholder="Host" class="input-sm" />
           <input
             v-model.number="newSource.port"
@@ -239,6 +247,10 @@
               placeholder="名称"
               class="input-sm"
             />
+            <select v-model="editSource.source_type" class="input-sm" disabled>
+              <option value="postgres_connection">PostgreSQL</option>
+              <option value="mysql_connection">MySQL</option>
+            </select>
             <input
               v-model="editSource.host"
               placeholder="Host"
@@ -643,12 +655,15 @@ const profileDetail = computed(
 );
 const sqlWorkspaceDataSources = computed(() =>
   props.workspaceDataSources.filter(
-    (ds) => ds.source_type === "postgres_connection",
+    (ds) =>
+      ds.source_type === "postgres_connection" ||
+      ds.source_type === "mysql_connection",
   ),
 );
 
 const defaultPostgresSourceForm = () => ({
   name: "",
+  source_type: "postgres_connection",
   host: "",
   port: 5432,
   database_name: "",
@@ -666,9 +681,13 @@ async function handleCreateSource() {
   creating.value = true;
   sourceMessage.value = "";
   try {
-    const result = await store.createPostgresSource(newSource.value.name, {
-      ...newSource.value,
-    });
+    const result = await store.createSQLSource(
+      newSource.value.name,
+      newSource.value.source_type,
+      {
+        ...newSource.value,
+      },
+    );
     if (result?.ok === false) {
       sourceMessage.value = result.error || "创建失败";
       return;
@@ -698,8 +717,9 @@ function startEditSource(ds) {
   sourceMessage.value = "";
   editSource.value = {
     name: ds.name || "",
+    source_type: ds.source_type || "postgres_connection",
     host: pg.host || "",
-    port: pg.port || 5432,
+    port: pg.port || defaultPortForSourceType(ds.source_type),
     database_name: pg.database_name || "",
     default_schema: pg.default_schema || "public",
     ssl_mode: pg.ssl_mode || "require",
@@ -726,11 +746,9 @@ async function handleUpdateSource(ds) {
   savingSource.value = true;
   sourceMessage.value = "";
   try {
-    const result = await store.updatePostgresSource(
-      ds.id,
-      editSource.value.name,
-      { ...editSource.value },
-    );
+    const result = await store.updateSQLSource(ds.id, editSource.value.name, {
+      ...editSource.value,
+    });
     if (result?.ok === false) {
       sourceMessage.value = result.error || "保存失败";
       return;
@@ -739,6 +757,20 @@ async function handleUpdateSource(ds) {
   } finally {
     savingSource.value = false;
   }
+}
+
+function applySourceTypeDefaults(form) {
+  if (!form) return;
+  if (!form.port || form.port === 5432 || form.port === 3306) {
+    form.port = defaultPortForSourceType(form.source_type);
+  }
+  if (!form.default_schema) {
+    form.default_schema = "public";
+  }
+}
+
+function defaultPortForSourceType(sourceType) {
+  return sourceType === "mysql_connection" ? 3306 : 5432;
 }
 
 async function handleDeleteWorkspaceSource(ds) {

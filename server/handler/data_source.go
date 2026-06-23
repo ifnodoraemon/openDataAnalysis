@@ -569,7 +569,7 @@ func ImportDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		Object:         service.SourceObjectRef{Schema: req.SchemaName, Name: req.ObjectName},
 		Ingester:       sess.Ingester,
 		AuthSecret:     config.Cfg.AuthSecret,
-		ImportRowLimit: config.Cfg.PostgresImportRowLimit,
+		ImportRowLimit: config.Cfg.SQLImportRowLimit,
 	})
 	sess.UnlockUpload()
 	if err != nil {

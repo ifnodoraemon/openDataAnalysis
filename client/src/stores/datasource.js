@@ -67,13 +67,17 @@ export const useDataSourceStore = defineStore("dataSource", () => {
   }
 
   async function createPostgresSource(name, config) {
-    const { publicConfig, credential } = splitPostgresConfig(config);
+    return createSQLSource(name, "postgres_connection", config);
+  }
+
+  async function createSQLSource(name, sourceType, config) {
+    const { publicConfig, credential } = splitSQLConfig(config);
     const result = await requestJSON("/api/data-sources", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name,
-        source_type: "postgres_connection",
+        source_type: sourceType,
         config: publicConfig,
         credential,
       }),
@@ -86,7 +90,11 @@ export const useDataSourceStore = defineStore("dataSource", () => {
   }
 
   async function updatePostgresSource(sourceId, name, config) {
-    const { publicConfig, credential } = splitPostgresConfig(config);
+    return updateSQLSource(sourceId, name, config);
+  }
+
+  async function updateSQLSource(sourceId, name, config) {
+    const { publicConfig, credential } = splitSQLConfig(config);
     const payload = { name, config: publicConfig };
     if (credential.password) {
       payload.credential = credential;
@@ -163,8 +171,8 @@ export const useDataSourceStore = defineStore("dataSource", () => {
     return result;
   }
 
-  function splitPostgresConfig(config = {}) {
-    const { password = "", ...publicConfig } = config || {};
+  function splitSQLConfig(config = {}) {
+    const { password = "", source_type = "", ...publicConfig } = config || {};
     return {
       publicConfig,
       credential: { password },
@@ -232,12 +240,14 @@ export const useDataSourceStore = defineStore("dataSource", () => {
     fetchProfileDetail,
     confirmProfile,
     createPostgresSource,
+    createSQLSource,
     updatePostgresSource,
+    updateSQLSource,
     deleteWorkspaceSource,
     testConnection,
     fetchSourceCatalog,
     importFromSource,
     removeSessionSource,
-    splitPostgresConfig,
+    splitSQLConfig,
   };
 });

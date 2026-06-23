@@ -79,7 +79,7 @@ describe("data source store", () => {
     expect(result).toEqual({ success: false, message: "not authorized" });
   });
 
-  it("creates postgres sources with separated public config and credential", async () => {
+  it("creates SQL sources with separated public config and credential", async () => {
     const store = useDataSourceStore();
     const fetchMock = vi
       .fn()
@@ -94,12 +94,12 @@ describe("data source store", () => {
       });
     global.fetch = fetchMock;
 
-    await store.createPostgresSource("Analytics", {
+    await store.createSQLSource("Analytics", "mysql_connection", {
+      source_type: "mysql_connection",
       host: "db.example.com",
-      port: 5432,
+      port: 3306,
       database_name: "analytics",
       default_schema: "public",
-      ssl_mode: "require",
       username: "reader",
       password: "secret",
       allowlist: [{ schema: "public", name: "orders", kind: "table" }],
@@ -108,13 +108,12 @@ describe("data source store", () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body).toEqual({
       name: "Analytics",
-      source_type: "postgres_connection",
+      source_type: "mysql_connection",
       config: {
         host: "db.example.com",
-        port: 5432,
+        port: 3306,
         database_name: "analytics",
         default_schema: "public",
-        ssl_mode: "require",
         username: "reader",
         allowlist: [{ schema: "public", name: "orders", kind: "table" }],
       },
@@ -137,7 +136,7 @@ describe("data source store", () => {
       });
     global.fetch = fetchMock;
 
-    await store.updatePostgresSource("ds_1", "Analytics", {
+    await store.updateSQLSource("ds_1", "Analytics", {
       host: "db.example.com",
       port: 5432,
       database_name: "analytics",

@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-面向表格数据的交互式智能分析工具。用户上传 CSV/Excel 或导入 PostgreSQL snapshot 后，Agent 通过 SQL、Python 和报告工具完成探索、分析、图表和研报生成。
+面向表格数据的交互式智能分析工具。用户上传 CSV/Excel 或导入 SQL source snapshot 后，Agent 通过 SQL、Python 和报告工具完成探索、分析、图表和研报生成。
 
 ![数据分析智能体界面](docs/images/screenshot.png)
 
@@ -10,7 +10,7 @@
 
 - Agent 自主决定工具调用顺序，不使用隐藏 DAG。
 - 支持鉴权、工作区、会话、run、文件归属和报告恢复。
-- 支持 CSV/Excel 上传，以及 PostgreSQL 工作区数据源的 bounded snapshot import。
+- 支持 CSV/Excel 上传，以及 PostgreSQL/MySQL 工作区数据源的 bounded snapshot import。
 - 开发模式下使用 Go 后端、Vue 3 前端、SQLite 元数据库和 session-scoped SQLite 分析工作库。
 - 文件和报告通过存储抽象管理，并对 S3-compatible 迁移设定生产模式守卫。
 
@@ -77,7 +77,7 @@ MaaS 目标架构契约见 [`docs/maas-production-architecture.md`](docs/maas-pr
 |---|---|
 | CSV | 推荐用于大文件；流式批量导入，无行数硬上限 |
 | Excel | 单 sheet 100,000 行硬上限 |
-| PostgreSQL | 工作区级只读连接，导入为 session SQLite snapshot；默认受 `POSTGRES_IMPORT_ROW_LIMIT=1000000` 限制 |
+| PostgreSQL / MySQL | 工作区级只读 SQL 连接，导入为 session SQLite snapshot；默认受 `SQL_IMPORT_ROW_LIMIT=1000000` 限制 |
 | Live upstream query | 暂不支持；后续应作为独立能力设计 |
 
 数据规模分层：
@@ -105,15 +105,15 @@ MaaS 目标架构契约见 [`docs/maas-production-architecture.md`](docs/maas-pr
 - `POST /api/data-sources/{sourceID}/import`
 - `GET /ws?token=...&session_id=...`
 
-创建 connector-backed source 使用公开 `config` 加加密 `credential`：
+创建 connector-backed SQL source 使用公开 `config` 加加密 `credential`：
 
 ```json
 {
-  "name": "Analytics PG",
-  "source_type": "postgres_connection",
+  "name": "Analytics SQL",
+  "source_type": "mysql_connection",
   "config": {
     "host": "db.example.com",
-    "port": 5432,
+    "port": 3306,
     "database_name": "analytics",
     "default_schema": "public",
     "username": "reader",

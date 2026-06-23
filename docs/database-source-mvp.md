@@ -6,14 +6,14 @@
 
 ## 当前状态
 
-已支持 PostgreSQL workspace data source，并以 snapshot import 方式导入到当前 session 的 SQLite 分析库。
+已支持 PostgreSQL 和 MySQL workspace data source，并以 snapshot import 方式导入到当前 session 的 SQLite 分析库。
 
 后端已引入 `SourceConnector` 抽象：
 
-- `file_upload` 和 `postgres_connection` 都通过 connector 执行 catalog/test/import 等运行时能力。
+- `file_upload`、`postgres_connection` 和 `mysql_connection` 都通过 connector 执行 catalog/test/import 等运行时能力。
 - connector 负责 config 规范化、credential 加密、公开配置序列化和运行时导入。
 - 导入后的 schema 提取、snapshot completion、semantic profile 创建、截断/估计 warning 写入走统一收尾管线。
-- PostgreSQL 配置已从专用 `database_connections` 升级为通用 `source_configs`，后续新增商业数据源不再需要新增专用配置表。
+- SQL 配置已从专用 `database_connections` 升级为通用 `source_configs`，后续新增商业数据源不再需要新增专用配置表。
 
 当前不支持：
 
@@ -25,7 +25,7 @@
 
 ## 为什么先做 Snapshot Import
 
-当前分析执行层是 session-scoped SQLite。PostgreSQL 表/视图先导入成固定 snapshot，再由 agent 使用同一套 `data_query_sql`、图表和报告工具分析。
+当前分析执行层是 session-scoped SQLite。SQL 表/视图先导入成固定 snapshot，再由 agent 使用同一套 `data_query_sql`、图表和报告工具分析。
 
 这样做的原因：
 
@@ -38,17 +38,17 @@
 
 | 实体 | 作用 |
 |---|---|
-| `DataSource` | 工作区级数据源；当前包括 `file_upload` 和 `postgres_connection` |
+| `DataSource` | 工作区级数据源；当前包括 `file_upload`、`postgres_connection` 和 `mysql_connection` |
 | `SourceConfig` | connector 类型、公开配置 JSON、加密 credential、测试状态 |
 | `SourceSnapshot` | 某个 source 在某个 session 中导入到 SQLite 的固定快照 |
 | `SessionSourceBinding` | session 当前绑定的 source/object -> active snapshot |
 | `SemanticProfile` | schema、候选语义、候选 join、歧义、warning 等结构化事实 |
 | `SemanticConfirmation` | 用户对口径、时间列、单位或 join 的 session/workspace 级确认 |
 
-## PostgreSQL 连接边界
+## SQL 连接边界
 
-- 使用 `pgx/v5/stdlib`。
-- 上游连接设置 `default_transaction_read_only=on`。
+- PostgreSQL 使用 `pgx/v5/stdlib`，上游连接设置 `default_transaction_read_only=on`。
+- MySQL 使用 `go-sql-driver/mysql`，运行时只生成 allowlist 对象的 `SELECT *` import 查询。
 - 创建 SQL 数据源时要求 `AUTH_SECRET` 长度至少 32，用于 AES-GCM 加密密码。
 - 只允许导入 allowlist 中的 schema/table/view。
 - catalog API 只返回 allowlist 对象，不扫描整库暴露元数据。
@@ -58,7 +58,7 @@
 默认配置：
 
 ```env
-POSTGRES_IMPORT_ROW_LIMIT=1000000
+SQL_IMPORT_ROW_LIMIT=1000000
 ```
 
 行为：
@@ -131,11 +131,11 @@ Connector 不负责 agent 决策、不直接生成报告，也不把上游 live 
 - `data_describe_table`
 - `data_query_sql`
 
-Agent 不直接生成上游 PostgreSQL SQL。
+Agent 不直接生成上游数据库 SQL。
 
 ## 后续方向
 
-后续如果要支持 live query，应作为独立执行层设计，并单独处理：
+后续如果要支持 live query 或更多 SaaS/API connector，应作为独立执行层或 connector 能力设计，并单独处理：
 
 - 上游 SQL 权限和超时。
 - pushdown 与 session snapshot 的一致性。

@@ -127,6 +127,7 @@ func Initialize() {
 	)
 	sourceConnectors = service.NewSourceConnectorRegistry()
 	sourceConnectors.Register(service.NewPostgresConnector(sourceService))
+	sourceConnectors.Register(service.NewMySQLConnector(sourceService))
 	sourceConnectors.Register(service.NewFileUploadConnector(sourceService, fileService))
 
 	sessionManager = session.NewManager(config.Cfg.CacheRoot, fileService, sourceService)

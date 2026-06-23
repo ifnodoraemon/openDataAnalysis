@@ -8,7 +8,7 @@
 
 覆盖这些能力：
 
-- 数据导入：CSV、Excel、PostgreSQL snapshot。
+- 数据导入：CSV、Excel、SQL source snapshot。
 - 数据理解：schema、字段映射、时间粒度、单位、数据质量。
 - 分析执行：只读 SQL、必要时 Python。
 - 多表判断：join key、grain、口径冲突。

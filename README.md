@@ -2,7 +2,7 @@
 
 [中文说明](README.zh-CN.md)
 
-Interactive data analysis for tabular data. Users upload CSV/Excel files or import PostgreSQL snapshots, then an agent inspects data, runs SQL/Python when needed, creates charts, and produces reports.
+Interactive data analysis for tabular data. Users upload CSV/Excel files or import SQL source snapshots, then an agent inspects data, runs SQL/Python when needed, creates charts, and produces reports.
 
 ![Open Data Analysis UI](docs/images/screenshot.png)
 
@@ -10,7 +10,7 @@ Interactive data analysis for tabular data. Users upload CSV/Excel files or impo
 
 - Agent runtime with tool calling and self-directed planning, not a fixed DAG.
 - Auth, workspaces, sessions, runs, file ownership, and resumable reports.
-- CSV/Excel upload plus PostgreSQL workspace sources imported as bounded snapshots.
+- CSV/Excel upload plus PostgreSQL/MySQL workspace sources imported as bounded snapshots.
 - Go backend, Vue 3 frontend, SQLite metadata DB, and per-session SQLite analysis DBs in development mode.
 - Local object storage abstraction with explicit production guardrails for the S3-compatible migration.
 
@@ -77,7 +77,7 @@ Development runtime data lives under `data/`:
 |---|---|
 | CSV | Recommended for large files; streaming batch import, no hard row cap |
 | Excel | Hard cap at 100,000 rows per sheet |
-| PostgreSQL | Read-only workspace source imported into session SQLite; default `POSTGRES_IMPORT_ROW_LIMIT=1000000` |
+| PostgreSQL / MySQL | Read-only workspace SQL source imported into session SQLite; default `SQL_IMPORT_ROW_LIMIT=1000000` |
 | Live upstream query | Not supported; should be designed as a separate capability |
 
 Data size tiers:
@@ -105,15 +105,15 @@ Data size tiers:
 - `POST /api/data-sources/{sourceID}/import`
 - `GET /ws?token=...&session_id=...`
 
-Connector-backed source creation uses public `config` plus encrypted `credential`:
+Connector-backed SQL source creation uses public `config` plus encrypted `credential`:
 
 ```json
 {
-  "name": "Analytics PG",
-  "source_type": "postgres_connection",
+  "name": "Analytics SQL",
+  "source_type": "mysql_connection",
   "config": {
     "host": "db.example.com",
-    "port": 5432,
+    "port": 3306,
     "database_name": "analytics",
     "default_schema": "public",
     "username": "reader",

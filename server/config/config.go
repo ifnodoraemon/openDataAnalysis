@@ -55,7 +55,7 @@ type Config struct {
 	ReportEchartsUrl   string // ECharts 资源路径，默认为前端自托管静态资源
 
 	// 数据源导入
-	PostgresImportRowLimit int // PostgreSQL snapshot import row cap, 0 = unlimited
+	SQLImportRowLimit int // SQL snapshot import row cap, 0 = unlimited
 }
 
 type productionBackendRule struct {
@@ -125,7 +125,7 @@ func Load() {
 		TempCleanupOnStart: getEnvBool("TEMP_CLEANUP_ON_START", false),
 		ReportEchartsUrl:   getEnv("REPORT_ECHARTS_URL", "/assets/echarts.min.js"),
 
-		PostgresImportRowLimit: getEnvInt("POSTGRES_IMPORT_ROW_LIMIT", 1000000),
+		SQLImportRowLimit: getEnvInt("SQL_IMPORT_ROW_LIMIT", 1000000),
 	}
 
 	if Cfg.LLMAPIKey == "" || IsPlaceholderValue(Cfg.LLMAPIKey) {
