@@ -649,7 +649,7 @@ const sqlWorkspaceDataSources = computed(() =>
   ),
 );
 
-const newSource = ref({
+const defaultPostgresSourceForm = () => ({
   name: "",
   host: "",
   port: 5432,
@@ -660,17 +660,9 @@ const newSource = ref({
   password: "",
   allowlist: [{ schema: "public", name: "", kind: "table" }],
 });
-const editSource = ref({
-  name: "",
-  host: "",
-  port: 5432,
-  database_name: "",
-  default_schema: "public",
-  ssl_mode: "require",
-  username: "",
-  password: "",
-  allowlist: [{ schema: "public", name: "", kind: "table" }],
-});
+
+const newSource = ref(defaultPostgresSourceForm());
+const editSource = ref(defaultPostgresSourceForm());
 
 async function handleCreateSource() {
   creating.value = true;
@@ -684,31 +676,22 @@ async function handleCreateSource() {
       return;
     }
     showCreateForm.value = false;
-    newSource.value = {
-      name: "",
-      host: "",
-      port: 5432,
-      database_name: "",
-      default_schema: "public",
-      ssl_mode: "require",
-      username: "",
-      password: "",
-      allowlist: [{ schema: "public", name: "", kind: "table" }],
-    };
+    newSource.value = defaultPostgresSourceForm();
   } finally {
     creating.value = false;
   }
 }
 
 async function openImportFor(ds) {
-  const res = await fetch(`/api/data-sources/${ds.id}/catalog`, {
-    headers: getAuthHeaders(),
-  });
-  if (res.ok) {
-    const data = await res.json();
-    importCatalog.value = data.objects || [];
-    importingSource.value = ds;
+  importingSource.value = ds;
+  importCatalog.value = [];
+  importError.value = "";
+  const result = await store.fetchSourceCatalog(ds.id);
+  if (result?.ok === false) {
+    importError.value = result.error || "加载可导入对象失败";
+    return;
   }
+  importCatalog.value = result.data?.objects || [];
 }
 
 function startEditSource(ds) {
@@ -891,7 +874,11 @@ function stopImportPolling() {
 async function loadProfileDetail(profileId) {
   selectedProfileId.value = profileId;
   confirmError.value = "";
-  await store.fetchProfileDetail(profileId);
+  const result = await store.fetchProfileDetail(profileId);
+  if (result?.ok === false) {
+    confirmError.value = result.error || "加载语义详情失败";
+    return;
+  }
   resetConfirmDraft(store.semanticProfileDetails[profileId]);
 }
 
@@ -908,7 +895,12 @@ async function handleConfirm(profileId, scope) {
   }
   confirmingProfileId.value = profileId;
   try {
-    const result = await store.confirmProfile(profileId, scope, overrides);
+    const result = await store.confirmProfile(
+      profileId,
+      scope,
+      overrides,
+      scope === "session" ? props.sessionId : "",
+    );
     if (result?.ok === false) {
       confirmError.value = result.error || "确认失败";
       return;
@@ -1018,11 +1010,6 @@ function buildConfirmOverrides(detail) {
   }
 
   return overrides;
-}
-
-function getAuthHeaders() {
-  const token = localStorage.getItem("oda_token");
-  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 </script>
 

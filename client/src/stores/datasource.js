@@ -7,189 +7,202 @@ export const useDataSourceStore = defineStore("dataSource", () => {
   const semanticProfileSummaries = ref([]);
   const semanticProfileDetails = ref({});
   const loading = ref(false);
+  const lastError = ref("");
 
   async function fetchSessionSources(sessionId) {
-    if (!sessionId) return;
-    loading.value = true;
-    try {
-      const res = await fetch(`/api/sessions/${sessionId}/sources`, {
-        headers: getAuthHeaders(),
+    if (!sessionId) return { ok: false, error: "session_id is required" };
+    return withLoading(async () => {
+      const result = await requestJSON(`/api/sessions/${sessionId}/sources`, {
+        fallback: "failed to fetch session sources",
       });
-      if (res.ok) {
-        const data = await res.json();
-        sessionSources.value = data.sources || [];
-        semanticProfileSummaries.value = (data.profiles || []).map((p) => ({
-          profile_id: p.profile_id,
-          source_id: p.source_id,
-          analysis_table_name: p.analysis_table_name,
-          profile_status: p.profile_status,
-          schema_signature: p.schema_signature,
-        }));
-      }
-    } finally {
-      loading.value = false;
-    }
+      if (!result.ok) return result;
+
+      const data = result.data || {};
+      sessionSources.value = data.sources || [];
+      semanticProfileSummaries.value = (data.profiles || []).map((p) => ({
+        profile_id: p.profile_id,
+        source_id: p.source_id,
+        analysis_table_name: p.analysis_table_name,
+        profile_status: p.profile_status,
+        schema_signature: p.schema_signature,
+      }));
+      return result;
+    });
   }
 
   async function fetchWorkspaceDataSources() {
-    loading.value = true;
-    try {
-      const res = await fetch("/api/data-sources", {
-        headers: getAuthHeaders(),
+    return withLoading(async () => {
+      const result = await requestJSON("/api/data-sources", {
+        fallback: "failed to fetch data sources",
       });
-      if (res.ok) {
-        const data = await res.json();
-        workspaceDataSources.value = data.data_sources || [];
-      }
-    } finally {
-      loading.value = false;
-    }
+      if (!result.ok) return result;
+
+      const data = result.data || {};
+      workspaceDataSources.value = data.data_sources || [];
+      return result;
+    });
   }
 
   async function fetchProfileDetail(profileId) {
-    if (!profileId) return;
-    loading.value = true;
-    try {
-      const res = await fetch(`/api/semantic-profiles/${profileId}`, {
-        headers: getAuthHeaders(),
+    if (!profileId) return { ok: false, error: "profile_id is required" };
+    return withLoading(async () => {
+      const result = await requestJSON(`/api/semantic-profiles/${profileId}`, {
+        fallback: "failed to fetch profile",
       });
-      if (res.ok) {
-        const data = await res.json();
-        semanticProfileDetails.value[profileId] = data;
-      }
-    } finally {
-      loading.value = false;
-    }
+      if (!result.ok) return result;
+
+      const data = result.data || {};
+      semanticProfileDetails.value[profileId] = data;
+      return result;
+    });
   }
 
-  async function confirmProfile(profileId, scope, overrides) {
-    const res = await fetch(`/api/semantic-profiles/${profileId}/confirm`, {
+  async function confirmProfile(profileId, scope, overrides, sessionId = "") {
+    return requestJSON(`/api/semantic-profiles/${profileId}/confirm`, {
       method: "POST",
-      headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ scope, overrides }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId, scope, overrides }),
+      fallback: "confirm failed",
     });
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => "");
-      return {
-        ok: false,
-        error: errBody || `confirm failed (HTTP ${res.status})`,
-      };
-    }
-    return { ok: true, data: await res.json() };
   }
 
   async function createPostgresSource(name, config) {
-    const res = await fetch("/api/data-sources", {
+    const result = await requestJSON("/api/data-sources", {
       method: "POST",
-      headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name,
         source_type: "postgres_connection",
         postgres: config,
       }),
+      fallback: "create failed",
     });
-    if (res.ok) {
+    if (result.ok) {
       await fetchWorkspaceDataSources();
-      return { ok: true, data: await res.json() };
     }
-    const errBody = await res.text().catch(() => "");
-    return {
-      ok: false,
-      error: errBody || `create failed (HTTP ${res.status})`,
-    };
+    return result;
   }
 
   async function updatePostgresSource(sourceId, name, config) {
-    const res = await fetch(`/api/data-sources/${sourceId}`, {
+    const result = await requestJSON(`/api/data-sources/${sourceId}`, {
       method: "PUT",
-      headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, postgres: config }),
+      fallback: "update failed",
     });
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => "");
-      return {
-        ok: false,
-        error: errBody || `update failed (HTTP ${res.status})`,
-      };
+    if (result.ok) {
+      await fetchWorkspaceDataSources();
     }
-    await fetchWorkspaceDataSources();
-    return { ok: true, data: await res.json() };
+    return result;
   }
 
   async function deleteWorkspaceSource(sourceId) {
-    const res = await fetch(`/api/data-sources/${sourceId}`, {
+    const result = await requestJSON(`/api/data-sources/${sourceId}`, {
       method: "DELETE",
-      headers: getAuthHeaders(),
+      fallback: "delete failed",
     });
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => "");
-      return {
-        ok: false,
-        error: errBody || `delete failed (HTTP ${res.status})`,
-      };
+    if (result.ok) {
+      await fetchWorkspaceDataSources();
     }
-    await fetchWorkspaceDataSources();
-    return { ok: true };
+    return result;
   }
 
   async function testConnection(sourceId) {
-    const res = await fetch(`/api/data-sources/${sourceId}/test`, {
+    const result = await requestJSON(`/api/data-sources/${sourceId}/test`, {
       method: "POST",
-      headers: getAuthHeaders(),
+      fallback: "请求失败",
     });
-    return res.ok ? await res.json() : { success: false, message: "请求失败" };
+    return result.ok ? result.data : { success: false, message: result.error };
+  }
+
+  async function fetchSourceCatalog(sourceId) {
+    return requestJSON(`/api/data-sources/${sourceId}/catalog`, {
+      fallback: "加载可导入对象失败",
+    });
   }
 
   async function importFromSource(sourceId, sessionId, schemaName, objectName) {
-    try {
-      const res = await fetch(`/api/data-sources/${sourceId}/import`, {
-        method: "POST",
-        headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
-        body: JSON.stringify({
-          session_id: sessionId,
-          schema_name: schemaName,
-          object_name: objectName,
-        }),
-      });
-      if (res.ok) {
-        await fetchSessionSources(sessionId);
-        return await res.json();
-      }
-      const errBody = await res.text().catch(() => "");
-      return {
-        ok: false,
-        error: errBody || `import failed (HTTP ${res.status})`,
-      };
-    } catch (e) {
-      return { ok: false, error: e.message || "network error" };
+    const result = await requestJSON(`/api/data-sources/${sourceId}/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: sessionId,
+        schema_name: schemaName,
+        object_name: objectName,
+      }),
+      fallback: "import failed",
+    });
+    if (result.ok) {
+      await fetchSessionSources(sessionId);
+      return result.data;
     }
+    return result;
   }
 
   async function removeSessionSource(sessionId, sourceId, sourceObjectKey) {
     const params = new URLSearchParams({
       source_object_key: sourceObjectKey || "",
     });
-    const res = await fetch(
+    const result = await requestJSON(
       `/api/sessions/${sessionId}/sources/${sourceId}?${params.toString()}`,
       {
         method: "DELETE",
-        headers: getAuthHeaders(),
+        fallback: "remove failed",
       },
     );
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => "");
-      return {
-        ok: false,
-        error: errBody || `remove failed (HTTP ${res.status})`,
-      };
+    if (result.ok) {
+      await fetchSessionSources(sessionId);
     }
-    await fetchSessionSources(sessionId);
-    return { ok: true };
+    return result;
   }
 
   function getAuthHeaders() {
     const token = localStorage.getItem("oda_token");
     return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+
+  async function readResponseError(res, fallback) {
+    const body = await res.text().catch(() => "");
+    const message = body.trim() || `${fallback} (HTTP ${res.status})`;
+    return message.replace(/\s+$/g, "");
+  }
+
+  async function requestJSON(url, { fallback, headers = {}, ...options } = {}) {
+    try {
+      const res = await fetch(url, {
+        ...options,
+        headers: { ...getAuthHeaders(), ...headers },
+      });
+      if (!res.ok) {
+        return { ok: false, error: await readResponseError(res, fallback) };
+      }
+      return { ok: true, data: await readResponseJSON(res) };
+    } catch (e) {
+      return { ok: false, error: e.message || "network error" };
+    }
+  }
+
+  async function withLoading(operation) {
+    loading.value = true;
+    lastError.value = "";
+    try {
+      const result = await operation();
+      if (result?.ok === false) {
+        lastError.value = result.error || "request failed";
+      }
+      return result;
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  async function readResponseJSON(res) {
+    if (res.status === 204) return null;
+    if (typeof res.text !== "function") {
+      return typeof res.json === "function" ? await res.json() : null;
+    }
+    const body = await res.text();
+    return body.trim() ? JSON.parse(body) : null;
   }
 
   return {
@@ -198,6 +211,7 @@ export const useDataSourceStore = defineStore("dataSource", () => {
     semanticProfileSummaries,
     semanticProfileDetails,
     loading,
+    lastError,
     fetchSessionSources,
     fetchWorkspaceDataSources,
     fetchProfileDetail,
@@ -206,6 +220,7 @@ export const useDataSourceStore = defineStore("dataSource", () => {
     updatePostgresSource,
     deleteWorkspaceSource,
     testConnection,
+    fetchSourceCatalog,
     importFromSource,
     removeSessionSource,
   };

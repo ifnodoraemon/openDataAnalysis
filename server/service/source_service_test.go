@@ -128,6 +128,47 @@ func TestConfirmProfileRejectsInvalidOverridesJSONWithoutAmbiguities(t *testing.
 	}
 }
 
+func TestCreateSemanticProfileMarksUnambiguousFactsConfirmed(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeSemanticProfileRepo{}
+	service := &SourceService{
+		SemanticProfileRepo: repo,
+	}
+
+	profile, err := service.CreateSemanticProfile(context.Background(), "s_1", "ws_1", "ds_1", "snap_1", "sales", "sig_1", ProfiledFacts{})
+	if err != nil {
+		t.Fatalf("CreateSemanticProfile returned error: %v", err)
+	}
+	if profile.ProfileStatus != domain.ProfileStatusConfirmed {
+		t.Fatalf("expected unambiguous profile to be confirmed, got %q", profile.ProfileStatus)
+	}
+	if repo.profile == nil || repo.profile.ProfileStatus != domain.ProfileStatusConfirmed {
+		t.Fatalf("expected persisted profile status to be confirmed, got %#v", repo.profile)
+	}
+}
+
+func TestCreateSemanticProfileKeepsAmbiguousFactsProfiled(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeSemanticProfileRepo{}
+	service := &SourceService{
+		SemanticProfileRepo: repo,
+	}
+
+	profile, err := service.CreateSemanticProfile(context.Background(), "s_1", "ws_1", "ds_1", "snap_1", "sales", "sig_1", ProfiledFacts{
+		Ambiguities: []Ambiguity{
+			{Kind: "ambiguous_metrics", Candidates: []string{"revenue", "net_revenue"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateSemanticProfile returned error: %v", err)
+	}
+	if profile.ProfileStatus != domain.ProfileStatusProfiled {
+		t.Fatalf("expected ambiguous profile to stay profiled, got %q", profile.ProfileStatus)
+	}
+}
+
 func TestSourceScopedPGTableNameAvoidsCrossSourceCollision(t *testing.T) {
 	t.Parallel()
 
@@ -208,7 +249,9 @@ type fakeSemanticProfileRepo struct {
 }
 
 func (r *fakeSemanticProfileRepo) Create(ctx context.Context, profile *domain.SemanticProfile) error {
-	return errors.New("not implemented")
+	cp := *profile
+	r.profile = &cp
+	return nil
 }
 
 func (r *fakeSemanticProfileRepo) GetByID(ctx context.Context, id string) (*domain.SemanticProfile, error) {

@@ -618,7 +618,7 @@ func (s *SourceService) CreateSemanticProfile(ctx context.Context, sessionID, wo
 		SnapshotID:        snapshotID,
 		AnalysisTableName: analysisTableName,
 		SchemaSignature:   schemaSignature,
-		ProfileStatus:     domain.ProfileStatusProfiled,
+		ProfileStatus:     profileStatusForJSON(string(profileJSON)),
 		ProfileJSON:       string(profileJSON),
 		CreatedAt:         time.Now(),
 		UpdatedAt:         time.Now(),
