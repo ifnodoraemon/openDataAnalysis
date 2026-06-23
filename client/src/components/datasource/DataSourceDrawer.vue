@@ -197,21 +197,19 @@
           <div class="source-meta">
             <span class="badge postgres">{{ ds.source_type }}</span>
             <span :class="['status', ds.status]">{{ ds.status }}</span>
-            <span v-if="ds.postgres?.host" class="table-name"
-              >{{ ds.postgres.host }}:{{ ds.postgres.port }}/{{
-                ds.postgres.database_name
+            <span v-if="ds.config?.host" class="table-name"
+              >{{ ds.config.host }}:{{ ds.config.port }}/{{
+                ds.config.database_name
               }}</span
             >
             <span
-              v-if="ds.postgres?.last_test_status"
+              v-if="ds.config?.last_test_status"
               :class="[
                 'status',
-                ds.postgres.last_test_status === 'success'
-                  ? 'active'
-                  : 'invalid',
+                ds.config.last_test_status === 'success' ? 'active' : 'invalid',
               ]"
             >
-              test: {{ ds.postgres.last_test_status }}
+              test: {{ ds.config.last_test_status }}
             </span>
             <button
               class="btn-xs"
@@ -695,7 +693,7 @@ async function openImportFor(ds) {
 }
 
 function startEditSource(ds) {
-  const pg = ds.postgres || {};
+  const pg = ds.config || {};
   editingSourceId.value = ds.id;
   sourceMessage.value = "";
   editSource.value = {

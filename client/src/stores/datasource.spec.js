@@ -78,4 +78,78 @@ describe("data source store", () => {
 
     expect(result).toEqual({ success: false, message: "not authorized" });
   });
+
+  it("creates postgres sources with separated public config and credential", async () => {
+    const store = useDataSourceStore();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        text: async () => JSON.stringify({ id: "ds_1" }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        text: async () => JSON.stringify({ data_sources: [] }),
+      });
+    global.fetch = fetchMock;
+
+    await store.createPostgresSource("Analytics", {
+      host: "db.example.com",
+      port: 5432,
+      database_name: "analytics",
+      default_schema: "public",
+      ssl_mode: "require",
+      username: "reader",
+      password: "secret",
+      allowlist: [{ schema: "public", name: "orders", kind: "table" }],
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body).toEqual({
+      name: "Analytics",
+      source_type: "postgres_connection",
+      config: {
+        host: "db.example.com",
+        port: 5432,
+        database_name: "analytics",
+        default_schema: "public",
+        ssl_mode: "require",
+        username: "reader",
+        allowlist: [{ schema: "public", name: "orders", kind: "table" }],
+      },
+      credential: { password: "secret" },
+    });
+    expect(JSON.stringify(body.config)).not.toContain("secret");
+  });
+
+  it("omits credential when updating postgres source without a new password", async () => {
+    const store = useDataSourceStore();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        text: async () => JSON.stringify({ id: "ds_1" }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        text: async () => JSON.stringify({ data_sources: [] }),
+      });
+    global.fetch = fetchMock;
+
+    await store.updatePostgresSource("ds_1", "Analytics", {
+      host: "db.example.com",
+      port: 5432,
+      database_name: "analytics",
+      default_schema: "public",
+      ssl_mode: "require",
+      username: "reader",
+      password: "",
+      allowlist: [{ schema: "public", name: "orders", kind: "table" }],
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.credential).toBeUndefined();
+    expect(body.config.password).toBeUndefined();
+  });
 });

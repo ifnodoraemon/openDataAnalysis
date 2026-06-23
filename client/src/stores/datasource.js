@@ -67,13 +67,15 @@ export const useDataSourceStore = defineStore("dataSource", () => {
   }
 
   async function createPostgresSource(name, config) {
+    const { publicConfig, credential } = splitPostgresConfig(config);
     const result = await requestJSON("/api/data-sources", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name,
         source_type: "postgres_connection",
-        postgres: config,
+        config: publicConfig,
+        credential,
       }),
       fallback: "create failed",
     });
@@ -84,10 +86,15 @@ export const useDataSourceStore = defineStore("dataSource", () => {
   }
 
   async function updatePostgresSource(sourceId, name, config) {
+    const { publicConfig, credential } = splitPostgresConfig(config);
+    const payload = { name, config: publicConfig };
+    if (credential.password) {
+      payload.credential = credential;
+    }
     const result = await requestJSON(`/api/data-sources/${sourceId}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, postgres: config }),
+      body: JSON.stringify(payload),
       fallback: "update failed",
     });
     if (result.ok) {
@@ -154,6 +161,14 @@ export const useDataSourceStore = defineStore("dataSource", () => {
       await fetchSessionSources(sessionId);
     }
     return result;
+  }
+
+  function splitPostgresConfig(config = {}) {
+    const { password = "", ...publicConfig } = config || {};
+    return {
+      publicConfig,
+      credential: { password },
+    };
   }
 
   function getAuthHeaders() {
@@ -223,5 +238,6 @@ export const useDataSourceStore = defineStore("dataSource", () => {
     fetchSourceCatalog,
     importFromSource,
     removeSessionSource,
+    splitPostgresConfig,
   };
 });

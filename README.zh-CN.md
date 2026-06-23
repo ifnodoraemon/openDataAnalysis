@@ -105,6 +105,24 @@ MaaS 目标架构契约见 [`docs/maas-production-architecture.md`](docs/maas-pr
 - `POST /api/data-sources/{sourceID}/import`
 - `GET /ws?token=...&session_id=...`
 
+创建 connector-backed source 使用公开 `config` 加加密 `credential`：
+
+```json
+{
+  "name": "Analytics PG",
+  "source_type": "postgres_connection",
+  "config": {
+    "host": "db.example.com",
+    "port": 5432,
+    "database_name": "analytics",
+    "default_schema": "public",
+    "username": "reader",
+    "allowlist": [{ "name": "orders", "kind": "table" }]
+  },
+  "credential": { "password": "secret" }
+}
+```
+
 除 `/api/auth/login` 和 `/api/health` 外，API 默认需要 token。
 
 ## 开发检查

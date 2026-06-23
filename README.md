@@ -105,6 +105,24 @@ Data size tiers:
 - `POST /api/data-sources/{sourceID}/import`
 - `GET /ws?token=...&session_id=...`
 
+Connector-backed source creation uses public `config` plus encrypted `credential`:
+
+```json
+{
+  "name": "Analytics PG",
+  "source_type": "postgres_connection",
+  "config": {
+    "host": "db.example.com",
+    "port": 5432,
+    "database_name": "analytics",
+    "default_schema": "public",
+    "username": "reader",
+    "allowlist": [{ "name": "orders", "kind": "table" }]
+  },
+  "credential": { "password": "secret" }
+}
+```
+
 All APIs except `/api/auth/login` and `/api/health` require a token by default.
 
 ## Development Checks
