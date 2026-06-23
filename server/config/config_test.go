@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -62,6 +63,7 @@ func TestLoadLLMTimeoutConfig(t *testing.T) {
 	t.Setenv("AUTH_SECRET", "abcdefghijklmnopqrstuvwxyz123456")
 	t.Setenv("LLM_HTTP_TIMEOUT_SECONDS", "321")
 	t.Setenv("LLM_RETRY_BUDGET_SECONDS", "654")
+	t.Setenv("CORS_ALLOWED_ORIGINS", "https://app.example.com, https://admin.example.com")
 
 	Load()
 
@@ -70,6 +72,95 @@ func TestLoadLLMTimeoutConfig(t *testing.T) {
 	}
 	if Cfg.LLMRetryBudgetSec != 654 {
 		t.Fatalf("expected LLMRetryBudgetSec=654, got %d", Cfg.LLMRetryBudgetSec)
+	}
+	if Cfg.DeploymentMode != "development" {
+		t.Fatalf("expected development mode by default, got %q", Cfg.DeploymentMode)
+	}
+	if len(Cfg.AllowedOrigins) != 2 || Cfg.AllowedOrigins[0] != "https://app.example.com" || Cfg.AllowedOrigins[1] != "https://admin.example.com" {
+		t.Fatalf("unexpected allowed origins: %#v", Cfg.AllowedOrigins)
+	}
+}
+
+func TestIsOriginAllowed(t *testing.T) {
+	cfg := &Config{
+		AllowedOrigins: []string{"https://app.example.com", "http://localhost:5173"},
+	}
+
+	if !cfg.IsOriginAllowed("https://app.example.com") {
+		t.Fatal("expected configured origin to be allowed")
+	}
+	if !cfg.IsOriginAllowed("") {
+		t.Fatal("expected empty origin to be allowed for non-browser/internal requests")
+	}
+	if cfg.IsOriginAllowed("https://evil.example.com") {
+		t.Fatal("did not expect unknown origin to be allowed")
+	}
+}
+
+func TestProductionReadinessRejectsDevelopmentBackends(t *testing.T) {
+	cfg := &Config{
+		DeploymentMode:      "production",
+		AllowedOrigins:      []string{"http://localhost:5173"},
+		MetadataStore:       "sqlite",
+		StorageProvider:     "local",
+		RunBackend:          "inprocess",
+		AnalysisStore:       "session_sqlite",
+		PythonArtifactStore: "executor_local",
+	}
+
+	err := cfg.ValidateProductionReadiness()
+	if err == nil {
+		t.Fatal("expected production readiness validation to fail")
+	}
+	for _, want := range []string{
+		"METADATA_STORE=sqlite",
+		"STORAGE_PROVIDER=local",
+		"RUN_BACKEND=inprocess",
+		"ANALYSIS_STORE=session_sqlite",
+		"PYTHON_ARTIFACT_STORE=executor_local",
+		"CORS_ALLOWED_ORIGINS",
+		"DEFAULT_USER_* bootstrap",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected production readiness error to contain %q, got %v", want, err)
+		}
+	}
+}
+
+func TestProductionReadinessAllowsDevelopmentMode(t *testing.T) {
+	cfg := &Config{
+		DeploymentMode:      "development",
+		AllowedOrigins:      []string{"http://localhost:5173"},
+		MetadataStore:       "sqlite",
+		StorageProvider:     "local",
+		RunBackend:          "inprocess",
+		AnalysisStore:       "session_sqlite",
+		PythonArtifactStore: "executor_local",
+	}
+
+	if err := cfg.ValidateProductionReadiness(); err != nil {
+		t.Fatalf("development mode should allow local defaults: %v", err)
+	}
+}
+
+func TestIsPlaceholderValue(t *testing.T) {
+	for _, value := range []string{
+		"replace-with-a-long-random-secret",
+		"REPLACE_WITH_A_LONG_RANDOM_SECRET",
+		"REPLACE_WITH_YOUR_API_KEY",
+		"change me",
+		"CHANGE_ME_generate-a-long-random-secret-here",
+		"placeholder",
+		"admin",
+		"password",
+	} {
+		if !IsPlaceholderValue(value) {
+			t.Fatalf("expected placeholder to be detected: %q", value)
+		}
+	}
+
+	if IsPlaceholderValue("8f3995c9dbd14f1eb1cf8d3f9a296e11") {
+		t.Fatal("expected random-looking value to be accepted")
 	}
 }
 

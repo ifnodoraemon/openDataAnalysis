@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/ifnodoraemon/openDataAnalysis/agent"
 	"github.com/ifnodoraemon/openDataAnalysis/auth"
+	"github.com/ifnodoraemon/openDataAnalysis/config"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 	"github.com/ifnodoraemon/openDataAnalysis/service"
 	"github.com/ifnodoraemon/openDataAnalysis/session"
@@ -33,7 +34,7 @@ var reportPreviewTools = map[string]struct{}{
 var upgrader = websocket.Upgrader{
 	Subprotocols: []string{"mcp-token"},
 	CheckOrigin: func(r *http.Request) bool {
-		return true
+		return config.Cfg == nil || config.Cfg.IsOriginAllowed(r.Header.Get("Origin"))
 	},
 }
 
@@ -71,6 +72,21 @@ func unregisterWS(sessionID string, conn *websocket.Conn) {
 			delete(wsConns, sessionID)
 		}
 	}
+}
+
+func failRunStart(ctx context.Context, conn *websocket.Conn, writeMu *sync.Mutex, sess *session.Session, runID string, err error) {
+	if err == nil {
+		return
+	}
+	errMsg := err.Error()
+	sess.FinishRun(runID, "failed")
+	_ = withPersistenceContext(ctx, func(persistCtx context.Context) error {
+		return runRepo.UpdateStatus(persistCtx, runID, domain.RunStatusFailed, &errMsg)
+	})
+	sendSessionEvent(conn, writeMu, sess.ID, runID, agent.WSEvent{
+		Type: agent.EventError,
+		Data: agent.ErrorData{Message: errMsg},
+	})
 }
 
 // CloseSessionWebSockets forces immediate disconnection of all active websockets tied to a session.
@@ -637,10 +653,16 @@ func WSHandler(w http.ResponseWriter, r *http.Request) {
 				ctx, cancel := context.WithCancel(resumeCtx)
 				sess.UpdateCancelFunc(activeRunID, cancel)
 
-				go func() {
-					defer cancel()
-					sess.Engine.Run(ctx, "", sess.RuntimeVars, runEmitter.Emit)
-				}()
+				if err := dispatchRunExecution(runExecution{
+					Context:     ctx,
+					Session:     sess,
+					RuntimeVars: sess.RuntimeVars,
+					Emit:        runEmitter.Emit,
+					OnDone:      cancel,
+				}); err != nil {
+					cancel()
+					failRunStart(requestCtx, conn, &writeMu, sess, activeRunID, err)
+				}
 				continue
 			}
 
@@ -764,7 +786,17 @@ func WSHandler(w http.ResponseWriter, r *http.Request) {
 			})
 
 			runtimeVarProvider := mergeRuntimeVarProvider(sess.RuntimeVars, extraRuntime)
-			go sess.Engine.Run(ctx, userContent, runtimeVarProvider, runEmitter.Emit)
+			if err := dispatchRunExecution(runExecution{
+				Context:     ctx,
+				Session:     sess,
+				UserInput:   userContent,
+				RuntimeVars: runtimeVarProvider,
+				Emit:        runEmitter.Emit,
+			}); err != nil {
+				sess.CancelRun(runID)
+				failRunStart(requestCtx, conn, &writeMu, sess, runID, err)
+				continue
+			}
 
 		case agent.EventStop:
 			dataBytes, _ := json.Marshal(event.Data)

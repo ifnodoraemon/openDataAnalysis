@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"log"
 	"net/url"
 	"os"
@@ -27,6 +28,13 @@ type Config struct {
 
 	// 服务配置
 	ServerPort           string
+	DeploymentMode       string
+	AllowedOrigins       []string
+	MetadataStore        string
+	StorageProvider      string
+	RunBackend           string
+	AnalysisStore        string
+	PythonArtifactStore  string
 	StorageRoot          string
 	CacheRoot            string
 	MetadataDBPath       string
@@ -48,6 +56,12 @@ type Config struct {
 
 	// 数据源导入
 	PostgresImportRowLimit int // PostgreSQL snapshot import row cap, 0 = unlimited
+}
+
+type productionBackendRule struct {
+	Value           string
+	DevelopmentOnly string
+	Issue           string
 }
 
 var Cfg *Config
@@ -86,6 +100,13 @@ func Load() {
 		LLMDebug:             getEnvBool("LLM_DEBUG", false),
 		LLMDebugDir:          getEnv("LLM_DEBUG_DIR", "./data/llm-debug"),
 		ServerPort:           getEnv("SERVER_PORT", "8080"),
+		DeploymentMode:       normalizeMode(getEnv("DEPLOYMENT_MODE", "development")),
+		AllowedOrigins:       getEnvList("CORS_ALLOWED_ORIGINS", defaultAllowedOrigins()),
+		MetadataStore:        NormalizeBackend(getEnv("METADATA_STORE", "sqlite")),
+		StorageProvider:      NormalizeBackend(getEnv("STORAGE_PROVIDER", "local")),
+		RunBackend:           NormalizeBackend(getEnv("RUN_BACKEND", "inprocess")),
+		AnalysisStore:        NormalizeBackend(getEnv("ANALYSIS_STORE", "session_sqlite")),
+		PythonArtifactStore:  NormalizeBackend(getEnv("PYTHON_ARTIFACT_STORE", "executor_local")),
 		StorageRoot:          getEnv("STORAGE_ROOT", "./data/storage"),
 		CacheRoot:            getEnv("CACHE_ROOT", "./data/cache"),
 		MetadataDBPath:       getEnv("METADATA_DB_PATH", "./data/metadata/app.db"),
@@ -107,11 +128,11 @@ func Load() {
 		PostgresImportRowLimit: getEnvInt("POSTGRES_IMPORT_ROW_LIMIT", 1000000),
 	}
 
-	if Cfg.LLMAPIKey == "" {
-		log.Println("Warning: LLM_API_KEY is not set")
+	if Cfg.LLMAPIKey == "" || IsPlaceholderValue(Cfg.LLMAPIKey) {
+		log.Println("Warning: LLM_API_KEY is not set or uses a placeholder")
 	}
 
-	if Cfg.AuthSecret == "" || Cfg.AuthSecret == "replace-with-a-long-random-secret" {
+	if Cfg.AuthSecret == "" || IsPlaceholderValue(Cfg.AuthSecret) {
 		log.Println("CRITICAL: AUTH_SECRET is not set or uses the default placeholder. Tokens may be forgeable. Set a strong random secret.")
 	}
 
@@ -124,7 +145,95 @@ func Load() {
 		Cfg.ReportEchartsUrl = ""
 	}
 
-	log.Printf("config loaded llm_provider=%s llm_model=%s llm_endpoint=%s", Cfg.LLMProvider, Cfg.LLMModel, Cfg.LLMAPIEndpoint)
+	log.Printf("config loaded mode=%s metadata_store=%s storage_provider=%s run_backend=%s analysis_store=%s llm_provider=%s llm_model=%s llm_endpoint=%s",
+		Cfg.DeploymentMode,
+		Cfg.MetadataStore,
+		Cfg.StorageProvider,
+		Cfg.RunBackend,
+		Cfg.AnalysisStore,
+		Cfg.LLMProvider,
+		Cfg.LLMModel,
+		Cfg.LLMAPIEndpoint,
+	)
+}
+
+func (c *Config) IsProduction() bool {
+	if c == nil {
+		return false
+	}
+	return normalizeMode(c.DeploymentMode) == "production"
+}
+
+func (c *Config) ValidateProductionReadiness() error {
+	if c == nil || !c.IsProduction() {
+		return nil
+	}
+
+	var issues []string
+	for _, rule := range c.productionBackendRules() {
+		if NormalizeBackend(rule.Value) == rule.DevelopmentOnly {
+			issues = append(issues, rule.Issue)
+		}
+	}
+	if len(c.AllowedOrigins) == 0 || containsWildcard(c.AllowedOrigins) || containsLocalOrigin(c.AllowedOrigins) {
+		issues = append(issues, "CORS_ALLOWED_ORIGINS must be explicit production origins; wildcard and localhost origins are not allowed")
+	}
+	issues = append(issues, "DEFAULT_USER_* bootstrap is development-only; production needs managed user/workspace provisioning")
+	if len(issues) > 0 {
+		return fmt.Errorf("production deployment is not ready:\n- %s", strings.Join(issues, "\n- "))
+	}
+	return nil
+}
+
+func (c *Config) productionBackendRules() []productionBackendRule {
+	return []productionBackendRule{
+		{
+			Value:           c.MetadataStore,
+			DevelopmentOnly: "sqlite",
+			Issue:           "METADATA_STORE=sqlite is development-only; production needs a shared metadata store such as postgres",
+		},
+		{
+			Value:           c.StorageProvider,
+			DevelopmentOnly: "local",
+			Issue:           "STORAGE_PROVIDER=local is development-only; production needs object storage such as s3",
+		},
+		{
+			Value:           c.RunBackend,
+			DevelopmentOnly: "inprocess",
+			Issue:           "RUN_BACKEND=inprocess is single-server only; production needs a durable run/job backend",
+		},
+		{
+			Value:           c.AnalysisStore,
+			DevelopmentOnly: "session_sqlite",
+			Issue:           "ANALYSIS_STORE=session_sqlite is local scratch state; production needs durable snapshot ownership and worker recovery",
+		},
+		{
+			Value:           c.PythonArtifactStore,
+			DevelopmentOnly: "executor_local",
+			Issue:           "PYTHON_ARTIFACT_STORE=executor_local cannot survive executor restart or multiple executors",
+		},
+	}
+}
+
+func (c *Config) IsOriginAllowed(origin string) bool {
+	origin = strings.TrimSpace(origin)
+	if origin == "" {
+		return true
+	}
+	if c == nil {
+		return false
+	}
+	allowedOrigins := c.AllowedOrigins
+	if len(allowedOrigins) == 0 {
+		allowedOrigins = defaultAllowedOrigins()
+	}
+	for _, allowed := range allowedOrigins {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "*" || strings.EqualFold(allowed, origin) {
+			return true
+		}
+	}
+	return false
 }
 
 func defaultLLMAPIEndpoint(provider, baseURL string) string {
@@ -180,6 +289,81 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+func getEnvList(key string, defaultValue []string) []string {
+	raw, ok := os.LookupEnv(key)
+	if !ok {
+		return append([]string(nil), defaultValue...)
+	}
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		value := strings.TrimSpace(part)
+		if value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
+func defaultAllowedOrigins() []string {
+	return []string{
+		"http://localhost",
+		"http://localhost:5173",
+		"http://127.0.0.1",
+		"http://127.0.0.1:5173",
+	}
+}
+
+func normalizeMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "prod", "production":
+		return "production"
+	case "test", "testing":
+		return "test"
+	default:
+		return "development"
+	}
+}
+
+func NormalizeBackend(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func IsPlaceholderValue(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	collapsed := strings.NewReplacer("-", "", "_", "", " ", "").Replace(normalized)
+	return strings.HasPrefix(normalized, "change_me") ||
+		strings.HasPrefix(normalized, "change-me") ||
+		strings.HasPrefix(collapsed, "changeme") ||
+		strings.HasPrefix(collapsed, "replacewith") ||
+		normalized == "placeholder" ||
+		normalized == "password" ||
+		normalized == "admin"
+}
+
+func containsWildcard(values []string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+func containsLocalOrigin(values []string) bool {
+	for _, value := range values {
+		parsed, err := url.Parse(strings.TrimSpace(value))
+		if err != nil {
+			continue
+		}
+		host := strings.ToLower(parsed.Hostname())
+		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+			return true
+		}
+	}
+	return false
 }
 
 func getEnvBool(key string, defaultValue bool) bool {

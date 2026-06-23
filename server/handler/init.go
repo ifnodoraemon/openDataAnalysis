@@ -14,30 +14,40 @@ import (
 	sqliterepo "github.com/ifnodoraemon/openDataAnalysis/repository/sqlite"
 	"github.com/ifnodoraemon/openDataAnalysis/service"
 	"github.com/ifnodoraemon/openDataAnalysis/session"
+	"github.com/ifnodoraemon/openDataAnalysis/storage"
 	localstorage "github.com/ifnodoraemon/openDataAnalysis/storage/local"
 )
+
 var (
-	defaultIdentity           auth.Identity
-	fileService               *service.FileService
-	sourceService             *service.SourceService
-	metadataStore             *metadata.Store
-	tokenManager              *auth.TokenManager
-	userRepo                  repository.UserRepository
-	workspaceRepo             repository.WorkspaceRepository
-	runRepo                   repository.RunRepository
-	sessionRepo               repository.SessionRepository
-	reportRepo                repository.ReportRepository
-	messageRepo               repository.MessageRepository
-	dataSourceRepo            repository.DataSourceRepository
-	dbConnectionRepo          repository.DatabaseConnectionRepository
-	snapshotRepo              repository.SourceSnapshotRepository
-	sessionSourceBindingRepo  repository.SessionSourceBindingRepository
-	semanticProfileRepo       repository.SemanticProfileRepository
-	semanticConfirmationRepo  repository.SemanticConfirmationRepository
+	defaultIdentity            auth.Identity
+	fileService                *service.FileService
+	sourceService              *service.SourceService
+	metadataStore              *metadata.Store
+	tokenManager               *auth.TokenManager
+	userRepo                   repository.UserRepository
+	workspaceRepo              repository.WorkspaceRepository
+	runRepo                    repository.RunRepository
+	sessionRepo                repository.SessionRepository
+	reportRepo                 repository.ReportRepository
+	messageRepo                repository.MessageRepository
+	dataSourceRepo             repository.DataSourceRepository
+	dbConnectionRepo           repository.DatabaseConnectionRepository
+	snapshotRepo               repository.SourceSnapshotRepository
+	sessionSourceBindingRepo   repository.SessionSourceBindingRepository
+	semanticProfileRepo        repository.SemanticProfileRepository
+	semanticConfirmationRepo   repository.SemanticConfirmationRepository
 	ShutdownEventPersistWorker func()
 )
 
+type backendRequirement struct {
+	Env       string
+	Value     string
+	Supported string
+}
+
 func Initialize() {
+	ensureProductionReadiness()
+	ensureSupportedBackends()
 	ensureRequiredConfig()
 	tokenManager = auth.NewTokenManager(config.Cfg.AuthSecret)
 	defaultIdentity = auth.Identity{
@@ -99,7 +109,7 @@ func Initialize() {
 	})
 
 	fileService = &service.FileService{
-		Storage:       localstorage.New(config.Cfg.StorageRoot, ""),
+		Storage:       configuredObjectStorage(),
 		FileRepo:      fileRepo,
 		ReportRepo:    reportRepo,
 		WorkspaceRepo: workspaceRepo,
@@ -138,6 +148,40 @@ func Initialize() {
 	ShutdownEventPersistWorker = startEventPersistWorker()
 }
 
+func ensureProductionReadiness() {
+	if err := config.Cfg.ValidateProductionReadiness(); err != nil {
+		panic(err)
+	}
+}
+
+func ensureSupportedBackends() {
+	requirements := []backendRequirement{
+		{Env: "METADATA_STORE", Value: config.Cfg.MetadataStore, Supported: "sqlite"},
+		{Env: "STORAGE_PROVIDER", Value: config.Cfg.StorageProvider, Supported: "local"},
+		{Env: "RUN_BACKEND", Value: config.Cfg.RunBackend, Supported: "inprocess"},
+		{Env: "ANALYSIS_STORE", Value: config.Cfg.AnalysisStore, Supported: "session_sqlite"},
+		{Env: "PYTHON_ARTIFACT_STORE", Value: config.Cfg.PythonArtifactStore, Supported: "executor_local"},
+	}
+	for _, requirement := range requirements {
+		normalized := config.NormalizeBackend(requirement.Value)
+		if normalized == "" {
+			continue
+		}
+		if normalized != requirement.Supported {
+			panic("unsupported backend config: " + requirement.Env + "=" + requirement.Value + " is not implemented in this binary")
+		}
+	}
+}
+
+func configuredObjectStorage() storage.ObjectStorage {
+	switch config.NormalizeBackend(config.Cfg.StorageProvider) {
+	case "", "local":
+		return localstorage.New(config.Cfg.StorageRoot, "")
+	default:
+		panic("unsupported storage provider: " + config.Cfg.StorageProvider)
+	}
+}
+
 func AuthMiddleware(next http.Handler) http.Handler {
 	return auth.Middleware(tokenManager)(next)
 }
@@ -156,17 +200,8 @@ func ensureRequiredConfig() {
 		if strings.TrimSpace(value) == "" {
 			panic("missing required config: " + key)
 		}
-		if isPlaceholderSecret(value) {
+		if config.IsPlaceholderValue(value) {
 			panic("insecure placeholder config: " + key)
 		}
 	}
-}
-
-func isPlaceholderSecret(value string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(value))
-	return strings.HasPrefix(normalized, "change_me") ||
-		normalized == "replace-with-a-long-random-secret" ||
-		normalized == "password" ||
-		normalized == "admin" ||
-		normalized == "changeme"
 }

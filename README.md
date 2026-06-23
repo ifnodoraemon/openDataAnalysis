@@ -11,8 +11,8 @@ Interactive data analysis for tabular data. Users upload CSV/Excel files or impo
 - Agent runtime with tool calling and self-directed planning, not a fixed DAG.
 - Auth, workspaces, sessions, runs, file ownership, and resumable reports.
 - CSV/Excel upload plus PostgreSQL workspace sources imported as bounded snapshots.
-- Go backend, Vue 3 frontend, SQLite metadata DB, and per-session SQLite analysis DBs.
-- Local object storage abstraction with a clean migration boundary for S3-compatible storage.
+- Go backend, Vue 3 frontend, SQLite metadata DB, and per-session SQLite analysis DBs in development mode.
+- Local object storage abstraction with explicit production guardrails for the S3-compatible migration.
 
 ## Quick Start
 
@@ -36,6 +36,21 @@ docker compose logs -f python-executor
 docker compose down
 ```
 
+## Deployment Modes
+
+The default Docker Compose setup is a development profile. It uses local SQLite metadata, local object storage, in-process run execution, session SQLite analysis scratch DBs, and executor-local Python artifacts.
+
+Production must be configured explicitly with `DEPLOYMENT_MODE=production`. In that mode the server fails closed while any local or single-process backend is still selected:
+
+- `METADATA_STORE=sqlite`
+- `STORAGE_PROVIDER=local`
+- `RUN_BACKEND=inprocess`
+- `ANALYSIS_STORE=session_sqlite`
+- `PYTHON_ARTIFACT_STORE=executor_local`
+- wildcard or localhost `CORS_ALLOWED_ORIGINS`
+
+The target MaaS contract is documented in [`docs/maas-production-architecture.md`](docs/maas-production-architecture.md). Shared local volumes and sticky WebSocket sessions are not considered a production scaling strategy.
+
 ## Architecture
 
 | Layer | Notes |
@@ -43,12 +58,12 @@ docker compose down
 | Frontend | Vue 3 + Vite + Pinia |
 | Backend | Go + Chi + Gorilla WebSocket |
 | Agent Runtime | Tool-calling ReAct loop; runtime exposes state/tools, model judges the path |
-| Analysis DB | One SQLite scratch DB per session |
-| Metadata DB | SQLite for users, workspaces, sessions, files, runs, reports, and source facts |
+| Analysis DB | Development: one SQLite scratch DB per session. Production target: rebuildable worker scratch state from durable snapshot manifests |
+| Metadata DB | Development: SQLite. Production target: PostgreSQL behind repository interfaces |
 | Python Executor | Separate service for advanced analysis that SQL does not fit |
-| Storage | Local object storage abstraction; S3-compatible backend is a future boundary |
+| Storage | Development: local object storage. Production target: S3-compatible object storage |
 
-Runtime data lives under `data/`:
+Development runtime data lives under `data/`:
 
 - `data/metadata/`: metadata SQLite
 - `data/cache/`: session SQLite DBs
@@ -107,6 +122,7 @@ cd python-executor && python -m pytest test_sandbox.py
 - `AGENTS.md`: repository-level agent constraints and prompt layering rules.
 - `docs/product-first-principles.zh-CN.md`: product first principles.
 - `docs/agentic-principles.md`: agent runtime design principles.
+- `docs/maas-production-architecture.md`: production MaaS backend contract and migration order.
 - `docs/building-agent-lessons.zh-CN.md`: concise agent runtime lessons, Chinese.
 - `docs/database-source-mvp.md`: database source implementation and boundaries.
 - `docs/benchmark.md`: regression evaluation plan.

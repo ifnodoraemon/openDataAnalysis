@@ -11,8 +11,8 @@
 - Agent 自主决定工具调用顺序，不使用隐藏 DAG。
 - 支持鉴权、工作区、会话、run、文件归属和报告恢复。
 - 支持 CSV/Excel 上传，以及 PostgreSQL 工作区数据源的 bounded snapshot import。
-- 后端使用 Go，前端使用 Vue 3，分析工作库使用 session-scoped SQLite。
-- 文件和报告通过存储抽象管理，当前默认本地文件系统。
+- 开发模式下使用 Go 后端、Vue 3 前端、SQLite 元数据库和 session-scoped SQLite 分析工作库。
+- 文件和报告通过存储抽象管理，并对 S3-compatible 迁移设定生产模式守卫。
 
 ## 快速开始
 
@@ -36,6 +36,21 @@ docker compose logs -f python-executor
 docker compose down
 ```
 
+## 部署模式
+
+默认 Docker Compose 是开发 profile。它使用本地 SQLite 元数据、本地对象存储、进程内 run 执行、session SQLite 分析工作库，以及 executor 本地 Python 产物。
+
+生产部署必须显式设置 `DEPLOYMENT_MODE=production`。在该模式下，只要仍选择以下本地或单进程后端，服务会拒绝启动：
+
+- `METADATA_STORE=sqlite`
+- `STORAGE_PROVIDER=local`
+- `RUN_BACKEND=inprocess`
+- `ANALYSIS_STORE=session_sqlite`
+- `PYTHON_ARTIFACT_STORE=executor_local`
+- wildcard 或 localhost `CORS_ALLOWED_ORIGINS`
+
+MaaS 目标架构契约见 [`docs/maas-production-architecture.md`](docs/maas-production-architecture.md)。共享本地卷和 WebSocket sticky session 不被视为生产扩展方案。
+
 ## 架构概览
 
 | 层 | 说明 |
@@ -43,12 +58,12 @@ docker compose down
 | Frontend | Vue 3 + Vite + Pinia |
 | Backend | Go + Chi + Gorilla WebSocket |
 | Agent Runtime | Tool-calling ReAct loop，状态和工具由 runtime 暴露，路径由模型判断 |
-| Analysis DB | 每个 session 一个 SQLite 分析工作库 |
-| Metadata DB | SQLite，保存用户、工作区、会话、文件、run、报告和数据源事实 |
+| Analysis DB | 开发模式：每个 session 一个 SQLite 分析工作库。生产目标：worker 可重建 scratch state，事实来自 durable snapshot manifest |
+| Metadata DB | 开发模式：SQLite。生产目标：通过 repository 接口接入 PostgreSQL |
 | Python Executor | 独立服务，用于 SQL 不适合的高级分析 |
-| Storage | 本地对象存储抽象，保留 S3-compatible 迁移边界 |
+| Storage | 开发模式：本地对象存储。生产目标：S3-compatible 对象存储 |
 
-运行期目录都收敛到 `data/`：
+开发模式运行期目录都收敛到 `data/`：
 
 - `data/metadata/`：元数据库
 - `data/cache/`：session SQLite
@@ -107,6 +122,7 @@ cd python-executor && python -m pytest test_sandbox.py
 - `AGENTS.md`：仓库级 agent 约束和提示分层规则。
 - `docs/product-first-principles.zh-CN.md`：产品第一性原则。
 - `docs/agentic-principles.md`：agent runtime 设计原则。
+- `docs/maas-production-architecture.md`：生产 MaaS 后端契约和迁移顺序。
 - `docs/building-agent-lessons.zh-CN.md`：Agent runtime 实践经验。
 - `docs/database-source-mvp.md`：数据库数据源当前实现和边界。
 - `docs/benchmark.md`：回归评测方案。
