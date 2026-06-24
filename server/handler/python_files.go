@@ -32,11 +32,8 @@ func ProxyPythonFileHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	endpoint := os.Getenv("PYTHON_MCP_URL")
-	if endpoint == "" {
-		endpoint = "http://python-executor:8081"
-	}
-	proxyToken := os.Getenv("PROXY_TOKEN")
+	endpoint := configuredPythonMCPURL()
+	proxyToken := configuredPythonProxyToken()
 	if proxyToken == "" {
 		http.Error(w, "file proxy service not configured", http.StatusServiceUnavailable)
 		return
@@ -103,4 +100,21 @@ func authorizePythonFileAccess(r *http.Request, filename string) bool {
 		RunID:       runID,
 	}
 	return tools.VerifyPythonFileAccessSignature(filename, meta, config.Cfg.AuthSecret, sig)
+}
+
+func configuredPythonMCPURL() string {
+	if config.Cfg != nil && strings.TrimSpace(config.Cfg.PythonMCPURL) != "" {
+		return strings.TrimRight(strings.TrimSpace(config.Cfg.PythonMCPURL), "/")
+	}
+	if endpoint := strings.TrimSpace(os.Getenv("PYTHON_MCP_URL")); endpoint != "" {
+		return strings.TrimRight(endpoint, "/")
+	}
+	return "http://python-executor:8081"
+}
+
+func configuredPythonProxyToken() string {
+	if config.Cfg != nil && strings.TrimSpace(config.Cfg.ProxyToken) != "" {
+		return strings.TrimSpace(config.Cfg.ProxyToken)
+	}
+	return strings.TrimSpace(os.Getenv("PROXY_TOKEN"))
 }

@@ -34,8 +34,12 @@ var reportPreviewTools = map[string]struct{}{
 var upgrader = websocket.Upgrader{
 	Subprotocols: []string{"mcp-token"},
 	CheckOrigin: func(r *http.Request) bool {
-		return config.Cfg == nil || config.Cfg.IsOriginAllowed(r.Header.Get("Origin"))
+		return isWebSocketOriginAllowed(r.Header.Get("Origin"))
 	},
+}
+
+func isWebSocketOriginAllowed(origin string) bool {
+	return config.Cfg != nil && config.Cfg.IsOriginAllowed(origin)
 }
 
 const persistenceTimeout = 10 * time.Second

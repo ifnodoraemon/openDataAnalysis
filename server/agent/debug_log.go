@@ -43,7 +43,7 @@ type debugWriter struct {
 }
 
 func (w *debugWriter) StartSpan(meta TraceMetadata, kind, name, parentSpanID, toolCallID string) SpanInfo {
-	if !config.Cfg.LLMDebug {
+	if !llmDebugEnabled() {
 		return SpanInfo{}
 	}
 
@@ -83,7 +83,7 @@ func (w *debugWriter) StartSpan(meta TraceMetadata, kind, name, parentSpanID, to
 }
 
 func (w *debugWriter) WriteEvent(span SpanInfo, eventName string, payload map[string]interface{}) {
-	if !config.Cfg.LLMDebug || span.TraceID == "" || span.SpanID == "" {
+	if !llmDebugEnabled() || span.TraceID == "" || span.SpanID == "" {
 		return
 	}
 
@@ -110,9 +110,10 @@ func (w *debugWriter) WriteEvent(span SpanInfo, eventName string, payload map[st
 		return
 	}
 
-	dailyPath := filepath.Join(config.Cfg.LLMDebugDir, span.Date, "events.jsonl")
-	tracePath := filepath.Join(config.Cfg.LLMDebugDir, span.Date, span.TraceID, "events.jsonl")
-	spanPath := filepath.Join(config.Cfg.LLMDebugDir, span.Date, span.TraceID, "spans", span.SpanID, "events.jsonl")
+	debugDir := llmDebugDir()
+	dailyPath := filepath.Join(debugDir, span.Date, "events.jsonl")
+	tracePath := filepath.Join(debugDir, span.Date, span.TraceID, "events.jsonl")
+	spanPath := filepath.Join(debugDir, span.Date, span.TraceID, "spans", span.SpanID, "events.jsonl")
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -125,11 +126,11 @@ func (w *debugWriter) WriteEvent(span SpanInfo, eventName string, payload map[st
 }
 
 func (w *debugWriter) WriteBlob(span SpanInfo, name string, payload []byte) string {
-	if !config.Cfg.LLMDebug || span.TraceID == "" || span.SpanID == "" {
+	if !llmDebugEnabled() || span.TraceID == "" || span.SpanID == "" {
 		return ""
 	}
 
-	path := filepath.Join(config.Cfg.LLMDebugDir, span.Date, span.TraceID, "spans", span.SpanID, name)
+	path := filepath.Join(llmDebugDir(), span.Date, span.TraceID, "spans", span.SpanID, name)
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -177,7 +178,7 @@ func (w *debugWriter) ensureTraceMetaLocked(span SpanInfo) {
 	if err != nil {
 		return
 	}
-	metaPath := filepath.Join(config.Cfg.LLMDebugDir, span.Date, span.TraceID, "trace.json")
+	metaPath := filepath.Join(llmDebugDir(), span.Date, span.TraceID, "trace.json")
 	if err := os.MkdirAll(filepath.Dir(metaPath), 0o755); err != nil {
 		return
 	}
@@ -210,7 +211,7 @@ func (w *debugWriter) ensureSpanMetaLocked(span SpanInfo) {
 	if err != nil {
 		return
 	}
-	metaPath := filepath.Join(config.Cfg.LLMDebugDir, span.Date, span.TraceID, "spans", span.SpanID, "span.json")
+	metaPath := filepath.Join(llmDebugDir(), span.Date, span.TraceID, "spans", span.SpanID, "span.json")
 	if err := os.MkdirAll(filepath.Dir(metaPath), 0o755); err != nil {
 		return
 	}
@@ -239,4 +240,15 @@ func sanitizeTracePart(value string) string {
 func blobSHA256(payload []byte) string {
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])
+}
+
+func llmDebugEnabled() bool {
+	return config.Cfg != nil && config.Cfg.LLMDebug
+}
+
+func llmDebugDir() string {
+	if config.Cfg != nil && strings.TrimSpace(config.Cfg.LLMDebugDir) != "" {
+		return config.Cfg.LLMDebugDir
+	}
+	return "./data/llm-debug"
 }

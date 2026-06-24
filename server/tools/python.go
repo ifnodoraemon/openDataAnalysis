@@ -85,8 +85,25 @@ func (t *RunPythonTool) Endpoint() string {
 	return strings.TrimRight(endpoint, "/")
 }
 
+func configuredProxyToken() string {
+	if config.Cfg != nil && strings.TrimSpace(config.Cfg.ProxyToken) != "" {
+		return strings.TrimSpace(config.Cfg.ProxyToken)
+	}
+	return strings.TrimSpace(os.Getenv("PROXY_TOKEN"))
+}
+
+func configuredPublicAPIBaseURL() string {
+	if config.Cfg != nil && strings.TrimSpace(config.Cfg.PublicAPIBaseURL) != "" {
+		return strings.TrimRight(strings.TrimSpace(config.Cfg.PublicAPIBaseURL), "/")
+	}
+	if value := strings.TrimSpace(os.Getenv("PUBLIC_API_BASE_URL")); value != "" {
+		return strings.TrimRight(value, "/")
+	}
+	return strings.TrimRight(strings.TrimSpace(os.Getenv("API_BASE_URL")), "/")
+}
+
 func (t *RunPythonTool) HealthCheck(ctx context.Context) error {
-	proxyToken := os.Getenv("PROXY_TOKEN")
+	proxyToken := configuredProxyToken()
 	if strings.TrimSpace(proxyToken) == "" {
 		return fmt.Errorf("PROXY_TOKEN is not configured")
 	}
@@ -193,9 +210,11 @@ func (t *RunPythonTool) Execute(args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("failed to build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if proxyToken := os.Getenv("PROXY_TOKEN"); proxyToken != "" {
-		req.Header.Set("X-Proxy-Token", proxyToken)
+	proxyToken := configuredProxyToken()
+	if proxyToken == "" {
+		return "", fmt.Errorf("PROXY_TOKEN is not configured")
 	}
+	req.Header.Set("X-Proxy-Token", proxyToken)
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -213,10 +232,7 @@ func (t *RunPythonTool) Execute(args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("failed to parse Python execution result: %w", err)
 	}
 
-	apiBaseURL := strings.TrimRight(os.Getenv("API_BASE_URL"), "/")
-	if apiBaseURL == "" {
-		apiBaseURL = "http://localhost:8080"
-	}
+	apiBaseURL := configuredPublicAPIBaseURL()
 	meta := ExecutionMetadataFromContext(execCtx)
 	for i, f := range result.Files {
 		result.Files[i] = buildPythonFileURL(apiBaseURL, f, meta)
@@ -226,7 +242,8 @@ func (t *RunPythonTool) Execute(args json.RawMessage) (string, error) {
 }
 
 func buildPythonFileURL(apiBaseURL, filename string, meta ExecutionMetadata) string {
-	base := fmt.Sprintf("%s/api/python-files/%s", strings.TrimRight(apiBaseURL, "/"), url.PathEscape(filename))
+	path := fmt.Sprintf("/api/python-files/%s", url.PathEscape(filename))
+	base := strings.TrimRight(strings.TrimSpace(apiBaseURL), "/") + path
 	secret := ""
 	if config.Cfg != nil {
 		secret = strings.TrimSpace(config.Cfg.AuthSecret)

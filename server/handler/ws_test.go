@@ -51,7 +51,9 @@ func (r *captureMessageRepo) snapshot() ([]*domain.RunMessage, error) {
 }
 
 func TestWebSocketUpgraderSelectsAuthSubprotocol(t *testing.T) {
-	t.Parallel()
+	prevCfg := config.Cfg
+	config.Cfg = &config.Config{AllowedOrigins: []string{"http://localhost"}}
+	t.Cleanup(func() { config.Cfg = prevCfg })
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -79,6 +81,16 @@ func TestWebSocketUpgraderSelectsAuthSubprotocol(t *testing.T) {
 
 	if got := conn.Subprotocol(); got != "mcp-token" {
 		t.Fatalf("expected selected subprotocol mcp-token, got %q", got)
+	}
+}
+
+func TestWebSocketOriginCheckRejectsMissingConfig(t *testing.T) {
+	prevCfg := config.Cfg
+	config.Cfg = nil
+	t.Cleanup(func() { config.Cfg = prevCfg })
+
+	if isWebSocketOriginAllowed("https://app.example.com") {
+		t.Fatal("expected missing config to reject websocket origin")
 	}
 }
 

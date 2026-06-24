@@ -1,11 +1,18 @@
 (function () {
   function showMessage(el, message, color) {
-    el.innerHTML =
-      '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:' +
-      color +
-      ';font-size:14px;">' +
-      message +
-      "</div>";
+    while (el.firstChild) {
+      el.removeChild(el.firstChild);
+    }
+
+    var box = document.createElement("div");
+    box.style.display = "flex";
+    box.style.alignItems = "center";
+    box.style.justifyContent = "center";
+    box.style.height = "100%";
+    box.style.color = color;
+    box.style.fontSize = "14px";
+    box.textContent = String(message || "");
+    el.appendChild(box);
   }
 
   function parseOption(el) {

@@ -28,15 +28,21 @@ type LLMClient struct {
 
 // NewLLMClient 创建 LLM 客户端
 func NewLLMClient() *LLMClient {
+	provider := "openai"
+	model := ""
+	if config.Cfg != nil {
+		provider = config.Cfg.LLMProvider
+		model = config.Cfg.LLMModel
+	}
 	client := &LLMClient{
-		provider: config.Cfg.LLMProvider,
-		model:    config.Cfg.LLMModel,
+		provider: provider,
+		model:    model,
 		httpClient: &http.Client{
 			Timeout: llmHTTPTimeout(),
 		},
 	}
 
-	if client.provider == "anthropic" {
+	if config.Cfg != nil && client.provider == "anthropic" {
 		client.initAnthropic()
 	}
 
@@ -125,6 +131,13 @@ func isRetryableLLMError(err error) bool {
 
 // ChatWithTools 统一的调用接口，包含对底层网络不稳定的重试逻辑（指数退避，区分可重试错误）
 func (l *LLMClient) ChatWithTools(ctx context.Context, bundle *PromptBundle, toolSpecs []tools.ToolSpec) (*LLMResponse, error) {
+	if config.Cfg == nil {
+		return nil, fmt.Errorf("LLM config is not initialized")
+	}
+	if strings.TrimSpace(config.Cfg.LLMAPIKey) == "" || config.IsPlaceholderValue(config.Cfg.LLMAPIKey) {
+		return nil, fmt.Errorf("LLM_API_KEY is not configured")
+	}
+
 	retryCtx, retryCancel := context.WithTimeout(ctx, llmRetryBudget())
 	defer retryCancel()
 

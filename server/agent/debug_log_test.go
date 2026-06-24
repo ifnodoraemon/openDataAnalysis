@@ -11,8 +11,6 @@ import (
 )
 
 func TestDebugWriterWritesMetaAndIndexes(t *testing.T) {
-	t.Parallel()
-
 	previousCfg := config.Cfg
 	config.Cfg = &config.Config{
 		LLMDebug:    true,
@@ -96,5 +94,27 @@ func TestDebugWriterWritesMetaAndIndexes(t *testing.T) {
 	}
 	if !strings.Contains(string(dailyIndexBytes), `"request_bytes":11`) {
 		t.Fatalf("expected daily index to contain compact payload summary, got %s", string(dailyIndexBytes))
+	}
+}
+
+func TestDebugWriterWithoutConfigIsDisabled(t *testing.T) {
+	previousCfg := config.Cfg
+	config.Cfg = nil
+	t.Cleanup(func() {
+		config.Cfg = previousCfg
+	})
+
+	writer := &debugWriter{
+		traceSpanSequence: make(map[string]int),
+		traceMetaReady:    make(map[string]bool),
+		spanMetaReady:     make(map[string]bool),
+	}
+	span := writer.StartSpan(TraceMetadata{RunID: "r_1"}, "llm", "openai", "", "")
+	if span.TraceID != "" || span.SpanID != "" {
+		t.Fatalf("expected disabled debug writer to return empty span, got %#v", span)
+	}
+	writer.WriteEvent(SpanInfo{TraceID: "trace", SpanID: "span"}, "event", nil)
+	if path := writer.WriteBlob(SpanInfo{TraceID: "trace", SpanID: "span"}, "request.json", []byte("{}")); path != "" {
+		t.Fatalf("expected disabled debug writer to skip blob, got %s", path)
 	}
 }

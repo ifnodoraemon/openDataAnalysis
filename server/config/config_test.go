@@ -64,6 +64,8 @@ func TestLoadLLMTimeoutConfig(t *testing.T) {
 	t.Setenv("LLM_HTTP_TIMEOUT_SECONDS", "321")
 	t.Setenv("LLM_RETRY_BUDGET_SECONDS", "654")
 	t.Setenv("CORS_ALLOWED_ORIGINS", "https://app.example.com, https://admin.example.com")
+	t.Setenv("PROXY_TOKEN", "proxy-token")
+	t.Setenv("PUBLIC_API_BASE_URL", "https://analysis.example.com")
 
 	Load()
 
@@ -78,6 +80,12 @@ func TestLoadLLMTimeoutConfig(t *testing.T) {
 	}
 	if len(Cfg.AllowedOrigins) != 2 || Cfg.AllowedOrigins[0] != "https://app.example.com" || Cfg.AllowedOrigins[1] != "https://admin.example.com" {
 		t.Fatalf("unexpected allowed origins: %#v", Cfg.AllowedOrigins)
+	}
+	if Cfg.ProxyToken != "proxy-token" {
+		t.Fatalf("expected proxy token to load from env")
+	}
+	if Cfg.PublicAPIBaseURL != "https://analysis.example.com" {
+		t.Fatalf("unexpected public api base url: %q", Cfg.PublicAPIBaseURL)
 	}
 }
 

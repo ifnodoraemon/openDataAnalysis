@@ -59,7 +59,7 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 	}
 
 	// 当 LLM 配置可用时，将语义预分析器注入 Ingester，导入文件后自动触发
-	if config.Cfg != nil && config.Cfg.LLMAPIKey != "" {
+	if config.Cfg != nil && strings.TrimSpace(config.Cfg.LLMAPIKey) != "" && !config.IsPlaceholderValue(config.Cfg.LLMAPIKey) {
 		llmClient := agent.NewLLMClient()
 		ingester.SemanticEnricher = llmClient.SimpleChatFunc()
 	}
@@ -203,7 +203,9 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 	}
 	if pt, err := masterReg.Get("code_run_python"); err == nil {
 		if runPython, ok := pt.(*tools.RunPythonTool); ok {
-			runPython.MCPEndpoint = config.Cfg.PythonMCPURL
+			if config.Cfg != nil {
+				runPython.MCPEndpoint = config.Cfg.PythonMCPURL
+			}
 			if err := runPython.HealthCheck(context.Background()); err != nil {
 				log.Printf("code_run_python disabled for session %s: %v", id, err)
 			} else {

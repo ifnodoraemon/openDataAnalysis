@@ -40,6 +40,8 @@ type Config struct {
 	MetadataDBPath       string
 	TempDir              string
 	PythonMCPURL         string
+	ProxyToken           string
+	PublicAPIBaseURL     string
 	AuthSecret           string
 	DefaultUserID        string
 	DefaultUserEmail     string
@@ -112,6 +114,8 @@ func Load() {
 		MetadataDBPath:       getEnv("METADATA_DB_PATH", "./data/metadata/app.db"),
 		TempDir:              getEnv("TEMP_DIR", "./data/tmp"),
 		PythonMCPURL:         getEnv("PYTHON_MCP_URL", ""),
+		ProxyToken:           getEnv("PROXY_TOKEN", ""),
+		PublicAPIBaseURL:     getEnv("PUBLIC_API_BASE_URL", getEnv("API_BASE_URL", "")),
 		AuthSecret:           getEnv("AUTH_SECRET", ""),
 		DefaultUserID:        getEnv("DEFAULT_USER_ID", ""),
 		DefaultUserEmail:     getEnv("DEFAULT_USER_EMAIL", ""),

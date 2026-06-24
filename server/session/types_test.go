@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ifnodoraemon/openDataAnalysis/agent"
+	"github.com/ifnodoraemon/openDataAnalysis/config"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 	"github.com/ifnodoraemon/openDataAnalysis/tools"
 )
@@ -21,6 +22,59 @@ func (s *stubSnapshotLoader) LoadReportSnapshot(_ context.Context, _, _, _, runI
 	s.calls++
 	s.runID = runID
 	return s.snapshot, s.err
+}
+
+func TestNewSessionToleratesMissingGlobalConfig(t *testing.T) {
+	prev := config.Cfg
+	config.Cfg = nil
+	t.Cleanup(func() { config.Cfg = prev })
+	t.Setenv("PROXY_TOKEN", "")
+
+	sess, err := New("sess_1", "ws_1", "user_1", t.TempDir(), nil, nil)
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	if sess.Engine == nil || sess.Registry == nil {
+		t.Fatalf("expected session runtime to initialize")
+	}
+}
+
+func TestNewSessionDoesNotEnableSemanticEnricherForPlaceholderLLMKey(t *testing.T) {
+	prev := config.Cfg
+	config.Cfg = &config.Config{LLMAPIKey: "REPLACE_WITH_YOUR_API_KEY"}
+	t.Cleanup(func() { config.Cfg = prev })
+	t.Setenv("PROXY_TOKEN", "")
+
+	sess, err := New("sess_1", "ws_1", "user_1", t.TempDir(), nil, nil)
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	if sess.Ingester.SemanticEnricher != nil {
+		t.Fatal("did not expect semantic enricher for placeholder LLM key")
+	}
+}
+
+func TestNewSessionEnablesSemanticEnricherForConfiguredLLMKey(t *testing.T) {
+	prev := config.Cfg
+	config.Cfg = &config.Config{
+		LLMProvider:  "openai",
+		LLMAPIKey:    "sk-test-realish-key",
+		LLMBaseURL:   "https://api.openai.com",
+		LLMModel:     "gpt-4o",
+		AuthSecret:   "abcdefghijklmnopqrstuvwxyz123456",
+		ProxyToken:   "",
+		PythonMCPURL: "",
+	}
+	t.Cleanup(func() { config.Cfg = prev })
+	t.Setenv("PROXY_TOKEN", "")
+
+	sess, err := New("sess_1", "ws_1", "user_1", t.TempDir(), nil, nil)
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	if sess.Ingester.SemanticEnricher == nil {
+		t.Fatal("expected semantic enricher for configured LLM key")
+	}
 }
 
 func TestPrepareUserRunLoadsSnapshotThroughLoader(t *testing.T) {

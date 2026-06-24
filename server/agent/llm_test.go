@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -51,6 +52,38 @@ func TestNewLLMClientUsesConfigurableTimeouts(t *testing.T) {
 	}
 	if got := llmRetryBudget(); got != 456*time.Second {
 		t.Fatalf("expected retry budget 456s, got %s", got)
+	}
+}
+
+func TestNewLLMClientWithoutConfigDoesNotPanic(t *testing.T) {
+	previous := config.Cfg
+	config.Cfg = nil
+	t.Cleanup(func() { config.Cfg = previous })
+
+	client := NewLLMClient()
+	if client == nil || client.httpClient == nil {
+		t.Fatal("expected client to initialize without global config")
+	}
+	_, err := client.ChatWithTools(context.Background(), &PromptBundle{Task: "hello"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "LLM config is not initialized") {
+		t.Fatalf("expected missing config error, got %v", err)
+	}
+}
+
+func TestChatWithToolsRejectsPlaceholderAPIKey(t *testing.T) {
+	previous := config.Cfg
+	config.Cfg = &config.Config{
+		LLMProvider:    "openai",
+		LLMModel:       "gpt-4o",
+		LLMAPIKey:      "REPLACE_WITH_YOUR_API_KEY",
+		LLMAPIEndpoint: "https://api.openai.com/v1/responses",
+	}
+	t.Cleanup(func() { config.Cfg = previous })
+
+	client := NewLLMClient()
+	_, err := client.ChatWithTools(context.Background(), &PromptBundle{Task: "hello"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "LLM_API_KEY is not configured") {
+		t.Fatalf("expected missing api key error, got %v", err)
 	}
 }
 

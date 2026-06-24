@@ -77,6 +77,7 @@ func TestRunPythonToolSignsGeneratedFileURLs(t *testing.T) {
 	config.Cfg = &config.Config{AuthSecret: "abcdefghijklmnopqrstuvwxyz123456"}
 	t.Cleanup(func() { config.Cfg = prevCfg })
 	t.Setenv("API_BASE_URL", "http://api.test")
+	t.Setenv("PROXY_TOKEN", "proxy-token")
 
 	const filename = "req_12345678_plot.png"
 	meta := ExecutionMetadata{
@@ -129,8 +130,21 @@ func TestRunPythonToolSignsGeneratedFileURLs(t *testing.T) {
 	}
 }
 
+func TestRunPythonToolRequiresProxyTokenBeforeExecute(t *testing.T) {
+	prevCfg := config.Cfg
+	config.Cfg = nil
+	t.Cleanup(func() { config.Cfg = prevCfg })
+	t.Setenv("PROXY_TOKEN", "")
+
+	tool := &RunPythonTool{MCPEndpoint: "http://127.0.0.1:1"}
+	_, err := tool.Execute(json.RawMessage(`{"code":"print(1)","timeout":1}`))
+	if err == nil || !strings.Contains(err.Error(), "PROXY_TOKEN is not configured") {
+		t.Fatalf("expected missing proxy token error, got %v", err)
+	}
+}
+
 func TestRunPythonToolExecutionTimeout(t *testing.T) {
-	t.Parallel()
+	t.Setenv("PROXY_TOKEN", "proxy-token")
 
 	fakeHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(7 * time.Second) // wait longer than the client timeout (1 + 5 = 6s)
@@ -163,6 +177,32 @@ func TestRunPythonToolExecutionTimeout(t *testing.T) {
 	}
 	if dur > 8*time.Second {
 		t.Fatalf("expected tool to time out at around 6s, but it took %v", dur)
+	}
+}
+
+func TestBuildPythonFileURLDefaultsToRelativeAPIPath(t *testing.T) {
+	prevCfg := config.Cfg
+	config.Cfg = &config.Config{AuthSecret: "abcdefghijklmnopqrstuvwxyz123456"}
+	t.Cleanup(func() { config.Cfg = prevCfg })
+
+	meta := ExecutionMetadata{
+		WorkspaceID: "w_1",
+		SessionID:   "s_1",
+		RunID:       "r_1",
+	}
+	got := buildPythonFileURL("", "plot 1.png", meta)
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse file url: %v", err)
+	}
+	if parsed.Scheme != "" || parsed.Host != "" {
+		t.Fatalf("expected relative API path, got %s", got)
+	}
+	if parsed.EscapedPath() != "/api/python-files/plot%201.png" {
+		t.Fatalf("unexpected relative path: %s", parsed.EscapedPath())
+	}
+	if parsed.Query().Get("session_id") != meta.SessionID || parsed.Query().Get("run_id") != meta.RunID {
+		t.Fatalf("missing run scope query: %s", parsed.RawQuery)
 	}
 }
 
