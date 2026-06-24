@@ -753,6 +753,11 @@ func (ing *Ingester) tryEnrichAfterImport(tableName string) {
 		return
 	}
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[PANIC RECOVER] tryEnrichAfterImport (table=%s): %v", tableName, r)
+			}
+		}()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := ing.EnrichSemanticProfile(ctx, tableName, ing.SemanticEnricher); err != nil {

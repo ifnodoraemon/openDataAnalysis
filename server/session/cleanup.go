@@ -208,6 +208,11 @@ func (m *Manager) StartPeriodicCleanup(sessionTTLHours, traceRetentionDays int, 
 	m.mu.Unlock()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[PANIC RECOVER] periodic session cleanup: %v", r)
+			}
+		}()
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for {

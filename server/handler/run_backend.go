@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/ifnodoraemon/openDataAnalysis/agent"
 	"github.com/ifnodoraemon/openDataAnalysis/config"
@@ -48,6 +49,17 @@ func (inProcessRunBackend) Run(exec runExecution) error {
 		if exec.OnDone != nil {
 			defer exec.OnDone()
 		}
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[PANIC RECOVER] inProcessRunBackend.Run: %v", r)
+				if exec.Emit != nil {
+					exec.Emit(agent.WSEvent{
+						Type: agent.EventError,
+						Data: agent.ErrorData{Message: fmt.Sprintf("Internal agent error: %v", r)},
+					})
+				}
+			}
+		}()
 		exec.Session.Engine.Run(exec.Context, exec.UserInput, exec.RuntimeVars, exec.Emit)
 	}()
 	return nil

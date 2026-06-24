@@ -168,6 +168,11 @@ func startEventPersistWorker() func() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[PANIC RECOVER] startEventPersistWorker: %v", r)
+			}
+		}()
 		for {
 			select {
 			case <-ctx.Done():
@@ -880,6 +885,9 @@ func saveEventToDB(ctx context.Context, workspaceID, sessionID, runID string, ev
 			overflowWg.Add(1)
 			go func() {
 				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[PANIC RECOVER] saveEventToDB: %v", r)
+					}
 					atomic.AddInt32(&overflowCnt, -1)
 					overflowWg.Done()
 				}()
