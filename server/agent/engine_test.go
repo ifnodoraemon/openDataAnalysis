@@ -478,3 +478,79 @@ func TestCompactMessagesLockedSkipsWithoutMeasuredTokens(t *testing.T) {
 		t.Fatalf("expected no compaction without measured tokens")
 	}
 }
+
+func TestSpecialToolHandlersFallback(t *testing.T) {
+	t.Parallel()
+
+	engine := &Engine{}
+	handlers := engine.specialToolHandlers()
+
+	handler, ok := handlers["user_request_input"]
+	if !ok {
+		t.Fatal("expected user_request_input handler")
+	}
+
+	// 1. Valid arguments should pass
+	toolCall := LLMToolCall{
+		ID:   "call_1",
+		Type: LLMToolTypeFunction,
+		Function: LLMFunctionCall{
+			Name:      "user_request_input",
+			Arguments: `{"question":"How are you?"}`,
+		},
+	}
+	var emitted []WSEvent
+	emit := func(ev WSEvent) {
+		emitted = append(emitted, ev)
+	}
+	res, err, stop := handler(nil, toolCall, "Fallback prompt", emit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !stop {
+		t.Fatal("expected stop=true")
+	}
+	if res != "" {
+		t.Fatalf("expected empty result, got %q", res)
+	}
+	if len(emitted) != 1 || emitted[0].Type != EventUserRequestInput {
+		t.Fatalf("expected event user_request_input, got %#v", emitted)
+	}
+	payload := emitted[0].Data.(AskUserData)
+	if payload.Question != "How are you?" {
+		t.Fatalf("expected question 'How are you?', got %q", payload.Question)
+	}
+
+	// 2. Empty arguments but non-empty assistant content should fallback
+	toolCallEmpty := LLMToolCall{
+		ID:   "call_2",
+		Type: LLMToolTypeFunction,
+		Function: LLMFunctionCall{
+			Name:      "user_request_input",
+			Arguments: `{}`,
+		},
+	}
+	emitted = nil
+	res, err, stop = handler(nil, toolCallEmpty, "What is your preference?", emit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !stop {
+		t.Fatal("expected stop=true")
+	}
+	if len(emitted) != 1 || emitted[0].Type != EventUserRequestInput {
+		t.Fatalf("expected event user_request_input, got %#v", emitted)
+	}
+	payload = emitted[0].Data.(AskUserData)
+	if payload.Question != "What is your preference?" {
+		t.Fatalf("expected fallback question 'What is your preference?', got %q", payload.Question)
+	}
+
+	// 3. Empty arguments and empty assistant content should error
+	emitted = nil
+	_, err, _ = handler(nil, toolCallEmpty, "", emit)
+	if err == nil || !strings.Contains(err.Error(), "question is required") {
+		t.Fatalf("expected error containing 'question is required', got: %v", err)
+	}
+}
+

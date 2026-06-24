@@ -40,7 +40,7 @@ type executionContextAware interface {
 	SetExecutionContext(context.Context)
 }
 
-type specialToolHandler func(context.Context, LLMToolCall, func(WSEvent)) (string, error, bool)
+type specialToolHandler func(context.Context, LLMToolCall, string, func(WSEvent)) (string, error, bool)
 
 // isRetryableToolError 判断工具执行错误是否属于可重试的网络临时故障。
 func isRetryableToolError(err error) bool {
@@ -389,15 +389,43 @@ func (e *Engine) prepareRuntimeTools(ctx context.Context, emit func(WSEvent)) {
 
 func (e *Engine) specialToolHandlers() map[string]specialToolHandler {
 	return map[string]specialToolHandler{
-		"user_request_input": func(ctx context.Context, toolCall LLMToolCall, emit func(WSEvent)) (string, error, bool) {
+		"user_request_input": func(ctx context.Context, toolCall LLMToolCall, assistantContent string, emit func(WSEvent)) (string, error, bool) {
 			payload, err := parseAskUserToolCallArguments(toolCall.Function.Arguments)
+			if err != nil {
+				// Fallback when question is missing from tool arguments but is provided in choice.Message.Content
+				trimmedContent := strings.TrimSpace(assistantContent)
+				if trimmedContent != "" {
+					var args askUserToolCallArguments
+					_ = json.Unmarshal([]byte(toolCall.Function.Arguments), &args)
+
+					allowCustom := true
+					if args.AllowCustom != nil {
+						allowCustom = *args.AllowCustom
+					}
+					options, _ := validateAskUserOptions(args.Options)
+					selectionMode, _ := normalizeAskUserSelectionMode(args.SelectionMode)
+
+					payload = AskUserData{
+						Question:      trimmedContent,
+						Reason:        strings.TrimSpace(args.Reason),
+						Scope:         strings.TrimSpace(args.Scope),
+						ContextRef:    strings.TrimSpace(args.ContextRef),
+						InputHint:     strings.TrimSpace(args.InputHint),
+						Required:      args.Required,
+						SelectionMode: selectionMode,
+						AllowCustom:   allowCustom,
+						Options:       options,
+					}
+					err = nil
+				}
+			}
 			if err != nil {
 				return "", err, true
 			}
 			emit(WSEvent{Type: EventUserRequestInput, Data: payload})
 			return "", nil, true
 		},
-		"report_finalize": func(ctx context.Context, toolCall LLMToolCall, emit func(WSEvent)) (string, error, bool) {
+		"report_finalize": func(ctx context.Context, toolCall LLMToolCall, assistantContent string, emit func(WSEvent)) (string, error, bool) {
 			result, err := e.registry.Execute(toolCall.Function.Name, json.RawMessage(toolCall.Function.Arguments))
 			if err == nil && result != "" {
 				result = applyReportHTMLGuardrail(result)
@@ -562,7 +590,7 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 
 				if handler, ok := specialHandlers[toolCall.Function.Name]; ok {
 					var stop bool
-					result, execErr, stop = handler(ctx, toolCall, emit)
+					result, execErr, stop = handler(ctx, toolCall, choice.Message.Content, emit)
 					if execErr != nil && toolCall.Function.Name == "user_request_input" {
 						emit(WSEvent{Type: EventError, Data: ErrorData{Message: execErr.Error()}})
 						return
