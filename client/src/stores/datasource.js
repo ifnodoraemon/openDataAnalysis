@@ -19,12 +19,16 @@ export const useDataSourceStore = defineStore("dataSource", () => {
       if (!result.ok) return result;
 
       const data = result.data || {};
-      sessionSources.value = data.sources || [];
-      semanticProfileSummaries.value = (data.profiles || []).map((p) => ({
+      const sources = data.sources || [];
+      sessionSources.value = sources;
+      const profiles =
+        data.profiles ||
+        sources.filter((source) => source.profile_id || source.profile_status);
+      semanticProfileSummaries.value = profiles.map((p) => ({
         profile_id: p.profile_id,
         source_id: p.source_id,
         analysis_table_name: p.analysis_table_name,
-        profile_status: p.profile_status,
+        profile_status: p.profile_status || p.semantic_status,
         schema_signature: p.schema_signature,
       }));
       return result;

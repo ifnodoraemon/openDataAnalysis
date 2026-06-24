@@ -11,6 +11,7 @@ Interactive data analysis for tabular data. Users upload CSV/Excel files or impo
 - Agent runtime with tool calling and self-directed planning, not a fixed DAG.
 - Auth, workspaces, sessions, runs, file ownership, and resumable reports.
 - CSV/Excel upload plus PostgreSQL/MySQL workspace sources imported as bounded snapshots.
+- Workspace semantic assets, general governance fact inspection, and audit events for critical data operations.
 - Go backend, Vue 3 frontend, SQLite metadata DB, and per-session SQLite analysis DBs in development mode.
 - Local object storage abstraction with explicit production guardrails for the S3-compatible migration.
 
@@ -62,6 +63,8 @@ The target MaaS contract is documented in [`docs/maas-production-architecture.md
 | Metadata DB | Development: SQLite. Production target: PostgreSQL behind repository interfaces |
 | Python Executor | Separate service for advanced analysis that SQL does not fit |
 | Storage | Development: local object storage. Production target: S3-compatible object storage |
+| Semantic Assets | Workspace-level reusable facts from user-confirmed metric, time, unit, and join semantics |
+| Audit | Critical data imports, semantic confirmations, and semantic asset changes are persisted as audit events |
 
 Development runtime data lives under `data/`:
 
@@ -104,6 +107,8 @@ Data size tiers:
 - `GET /api/data-sources/{sourceID}/catalog`
 - `POST /api/data-sources/{sourceID}/import`
 - `GET /ws?token=...&session_id=...`
+
+Agent observation tools also include `state_governance_inspect` for general data governance facts in the current session. It does not trigger a fixed workflow.
 
 Connector-backed SQL source creation uses public `config` plus encrypted `credential`:
 

@@ -16,7 +16,10 @@ server/.env
 /data/
 /python-workspace/
 /server/data/cache/*.db
+/server/data/cache/*.db-shm
+/server/data/cache/*.db-wal
 /server/data/metadata/
+/server/data/storage/
 /server/storage/workspaces/
 /server/tmp/
 

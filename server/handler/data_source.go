@@ -119,6 +119,10 @@ func SemanticProfileDetailHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	confJSON, _ := json.Marshal(confirmations)
+	assets, assetErr := sourceService.GetSemanticAssets(r.Context(), identity.WorkspaceID, profile.SchemaSignature)
+	if assetErr != nil {
+		log.Printf("SemanticProfileDetailHandler: semantic asset lookup failed workspace_id=%s signature=%s err=%v", identity.WorkspaceID, profile.SchemaSignature, assetErr)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -131,6 +135,7 @@ func SemanticProfileDetailHandler(w http.ResponseWriter, r *http.Request) {
 		"profile_status":      string(profile.ProfileStatus),
 		"profile_json":        json.RawMessage(profile.ProfileJSON),
 		"confirmations":       json.RawMessage(string(confJSON)),
+		"semantic_assets":     assets,
 		"created_at":          profile.CreatedAt,
 		"updated_at":          profile.UpdatedAt,
 	})
@@ -176,8 +181,12 @@ func ConfirmProfileHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.SessionID != "" {
 		sess, sessErr := sessionRepo.GetByID(r.Context(), req.SessionID)
-		if sessErr != nil || sess.WorkspaceID != identity.WorkspaceID {
+		if sessErr != nil || sess.UserID != identity.UserID || sess.WorkspaceID != identity.WorkspaceID {
 			http.Error(w, "session not found or not authorized", http.StatusForbidden)
+			return
+		}
+		if profile.SessionID != req.SessionID {
+			http.Error(w, "profile does not belong to requested session", http.StatusBadRequest)
 			return
 		}
 	}
@@ -618,7 +627,38 @@ func ImportDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		resp["ingest_status"] = "success"
 	}
+	sourceService.RecordAuditEvent(r.Context(), domain.AuditEvent{
+		WorkspaceID:  identity.WorkspaceID,
+		SessionID:    req.SessionID,
+		ActorUserID:  identity.UserID,
+		EventType:    "data_source_imported",
+		ResourceType: "source_snapshot",
+		ResourceID:   result.SnapshotID,
+		PayloadJSON: serviceAuditPayload(map[string]interface{}{
+			"source_id":           sourceID,
+			"source_type":         string(ds.SourceType),
+			"schema_name":         req.SchemaName,
+			"object_name":         req.ObjectName,
+			"analysis_table_name": result.TableName,
+			"row_count":           result.RowCount,
+			"column_count":        result.ColCount,
+			"rows_imported":       result.RowsImported,
+			"rows_skipped":        result.RowsSkipped,
+			"import_truncated":    result.ImportTruncated,
+			"profile_id":          result.ProfileID,
+			"ingest_status":       resp["ingest_status"],
+		}),
+		CreatedAt: time.Now(),
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func serviceAuditPayload(payload map[string]interface{}) string {
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return "{}"
+	}
+	return string(out)
 }

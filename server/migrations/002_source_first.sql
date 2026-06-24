@@ -90,3 +90,38 @@ create table semantic_confirmations (
 
 create index idx_semantic_confirmations_profile on semantic_confirmations(profile_id);
 create index idx_semantic_confirmations_workspace on semantic_confirmations(workspace_id);
+
+create table semantic_assets (
+  id varchar(64) primary key,
+  workspace_id varchar(64) not null references workspaces(id),
+  source_id varchar(64) not null default '',
+  schema_signature varchar(64) not null default '',
+  asset_kind varchar(64) not null,
+  asset_key varchar(255) not null,
+  asset_value_json jsonb not null default '{}',
+  created_from_profile_id varchar(64) not null default '',
+  created_from_confirmation_id varchar(64) not null default '',
+  created_by varchar(64) not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(workspace_id, schema_signature, asset_kind, asset_key)
+);
+
+create index idx_semantic_assets_workspace on semantic_assets(workspace_id);
+create index idx_semantic_assets_schema on semantic_assets(workspace_id, schema_signature);
+
+create table audit_events (
+  id varchar(64) primary key,
+  workspace_id varchar(64) not null references workspaces(id),
+  session_id varchar(64) not null default '',
+  run_id varchar(64) not null default '',
+  actor_user_id varchar(64) not null default '',
+  event_type varchar(128) not null,
+  resource_type varchar(64) not null,
+  resource_id varchar(128) not null,
+  payload_json jsonb not null default '{}',
+  created_at timestamptz not null default now()
+);
+
+create index idx_audit_events_workspace on audit_events(workspace_id, created_at desc);
+create index idx_audit_events_resource on audit_events(resource_type, resource_id);

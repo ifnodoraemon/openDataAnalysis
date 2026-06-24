@@ -7,11 +7,11 @@ import (
 	"strings"
 )
 
-// SemanticProfile 表示由 LLM 分析给出的一张表的精炼业务语义档案
+// SemanticProfile 表示由 LLM 分析给出的一张表的精炼数据语义档案
 type SemanticProfile struct {
-	TableSummary string              `json:"table_summary"`
-	Columns      []SemanticColumn    `json:"columns"`
-	Relations    []SemanticRelation  `json:"relations"`
+	TableSummary string             `json:"table_summary"`
+	Columns      []SemanticColumn   `json:"columns"`
+	Relations    []SemanticRelation `json:"relations"`
 }
 
 // SemanticColumn 列语义档案
@@ -47,7 +47,7 @@ var AnalyzeTableSemantics = func(ctx context.Context, chatFn LLMChatFunc, schema
 		tablesCtx = fmt.Sprintf("Current session has these other tables available for Join analysis: %s", strings.Join(activeTables, ", "))
 	}
 
-	prompt := fmt.Sprintf(`You are a senior data analyst. Perform a business semantic pre-analysis on the following newly extracted table Schema.
+	prompt := fmt.Sprintf(`You are a senior data analyst. Perform a domain-neutral data semantic pre-analysis on the following newly extracted table Schema.
 The target table structure and data sample distribution are as follows:
 %s
 
@@ -55,11 +55,11 @@ The target table structure and data sample distribution are as follows:
 
 Analyze the table and output JSON only. The structure must follow this format:
 {
-  "table_summary": "One-sentence summary of this table's business purpose",
+  "table_summary": "One-sentence summary of what this table appears to represent",
   "columns": [
     {
       "name": "Original column name",
-      "business_alias": "Guessed business alias",
+      "business_alias": "Guessed user-facing or domain alias",
       "role": "time | metric | dimension | id",
       "calculation_logic": "Guess or explanation of the metric's definition; leave empty if none",
       "warnings": ["Low-confidence or anomalous data hints", ...] 

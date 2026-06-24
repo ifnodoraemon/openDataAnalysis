@@ -60,6 +60,7 @@ type ToolContext struct {
 	WorkspaceID                string
 	SessionSourcesProvider     SessionSourcesProvider
 	ProfileDetailProvider      ProfileDetailProvider
+	GovernanceProvider         GovernanceProvider
 	ConfirmedOverridesProvider ConfirmedOverridesProvider
 	KnownRowCount              KnownRowCountProvider
 	QueryLocker                QueryLocker

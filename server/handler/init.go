@@ -37,6 +37,8 @@ var (
 	sessionSourceBindingRepo   repository.SessionSourceBindingRepository
 	semanticProfileRepo        repository.SemanticProfileRepository
 	semanticConfirmationRepo   repository.SemanticConfirmationRepository
+	semanticAssetRepo          repository.SemanticAssetRepository
+	auditEventRepo             repository.AuditEventRepository
 	ShutdownEventPersistWorker func()
 )
 
@@ -78,6 +80,8 @@ func Initialize() {
 	sessionSourceBindingRepo = sqliterepo.NewSessionSourceBindingRepository(store.DB)
 	semanticProfileRepo = sqliterepo.NewSemanticProfileRepository(store.DB)
 	semanticConfirmationRepo = sqliterepo.NewSemanticConfirmationRepository(store.DB)
+	semanticAssetRepo = sqliterepo.NewSemanticAssetRepository(store.DB)
+	auditEventRepo = sqliterepo.NewAuditEventRepository(store.DB)
 
 	now := time.Now()
 	defaultPasswordHash, err := auth.HashPassword(config.Cfg.DefaultUserPassword)
@@ -124,6 +128,8 @@ func Initialize() {
 		sessionSourceBindingRepo,
 		semanticProfileRepo,
 		semanticConfirmationRepo,
+		semanticAssetRepo,
+		auditEventRepo,
 	)
 	sourceConnectors = service.NewSourceConnectorRegistry()
 	sourceConnectors.Register(service.NewPostgresConnector(sourceService))

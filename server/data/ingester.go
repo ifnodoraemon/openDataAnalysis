@@ -800,7 +800,7 @@ func (ing *Ingester) EnrichSemanticProfile(ctx context.Context, tableName string
 		return fmt.Errorf("LLM semantic analysis failed: %w", err)
 	}
 
-	log.Printf("[Info] AI semantic analysis completed, extracted business aliases and relation predictions for table: %s", tableName)
+	log.Printf("[Info] AI semantic analysis completed, extracted domain aliases and relation predictions for table: %s", tableName)
 
 	// 4. 校验 relation hints
 	// 尝试获取目标表的 schema 用于验证

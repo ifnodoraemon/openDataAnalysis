@@ -101,12 +101,18 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 			if sourceService == nil {
 				return "{}", "[]", nil
 			}
-			profile, confirmations, err := sourceService.GetProfileDetail(context.Background(), profileID)
+			profile, confirmations, err := sourceService.GetSessionProfileDetail(context.Background(), id, profileID)
 			if err != nil {
 				return "{}", "[]", err
 			}
 			confJSON, _ := json.Marshal(confirmations)
 			return profile.ProfileJSON, string(confJSON), nil
+		},
+		GovernanceProvider: func() (service.GovernanceInspection, error) {
+			if sourceService == nil {
+				return service.GovernanceInspection{}, nil
+			}
+			return sourceService.InspectSessionGovernance(context.Background(), workspaceID, id)
 		},
 		ConfirmedOverridesProvider: func(tableName string) map[string]interface{} {
 			if sourceService == nil {
@@ -177,6 +183,7 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 		"state_time_context_inspect",
 		"state_session_sources_inspect",
 		"state_semantic_profile_inspect",
+		"state_governance_inspect",
 		"data_list_tables",
 		"data_describe_table",
 		"data_query_sql",

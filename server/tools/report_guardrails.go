@@ -489,17 +489,30 @@ func blockNeedsEvidence(block ReportBlock) bool {
 	if strings.TrimSpace(text) == "" {
 		return false
 	}
-	keywords := []string{
-		"revenue", "sales", "cost", "profit", "margin", "rate", "ratio", "trend", "growth", "decline",
-		"rows", "total", "average", "median", "percent", "share", "同比", "环比", "趋势", "增长", "下降",
-		"占比", "收入", "销售", "成本", "利润", "总计", "平均", "中位数", "数据", "表", "图",
-	}
-	for _, keyword := range keywords {
-		if strings.Contains(text, keyword) && reportNumberPattern.MatchString(text) {
+	for _, line := range strings.Split(text, "\n") {
+		claimText := normalizeSectionTitle(trimReportLinePrefix(line))
+		if strings.TrimSpace(claimText) == "" {
+			continue
+		}
+		if reportNumberPattern.MatchString(claimText) {
 			return true
 		}
 	}
 	return false
+}
+
+func trimReportLinePrefix(line string) string {
+	line = strings.TrimSpace(line)
+	line = strings.TrimLeft(line, "#>")
+	line = strings.TrimSpace(line)
+	for {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") || strings.HasPrefix(trimmed, "+ ") {
+			line = strings.TrimSpace(trimmed[2:])
+			continue
+		}
+		return trimmed
+	}
 }
 
 func chartIDsForBlock(block ReportBlock) []string {

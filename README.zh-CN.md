@@ -11,6 +11,7 @@
 - Agent 自主决定工具调用顺序，不使用隐藏 DAG。
 - 支持鉴权、工作区、会话、run、文件归属和报告恢复。
 - 支持 CSV/Excel 上传，以及 PostgreSQL/MySQL 工作区数据源的 bounded snapshot import。
+- 支持 workspace 级语义资产沉淀、通用治理事实巡检和关键数据操作审计。
 - 开发模式下使用 Go 后端、Vue 3 前端、SQLite 元数据库和 session-scoped SQLite 分析工作库。
 - 文件和报告通过存储抽象管理，并对 S3-compatible 迁移设定生产模式守卫。
 
@@ -62,6 +63,8 @@ MaaS 目标架构契约见 [`docs/maas-production-architecture.md`](docs/maas-pr
 | Metadata DB | 开发模式：SQLite。生产目标：通过 repository 接口接入 PostgreSQL |
 | Python Executor | 独立服务，用于 SQL 不适合的高级分析 |
 | Storage | 开发模式：本地对象存储。生产目标：S3-compatible 对象存储 |
+| Semantic Assets | workspace 级语义资产，用于复用用户确认的口径、时间列、单位和 join 事实 |
+| Audit | 关键数据导入、语义确认和资产变更写入审计事件 |
 
 开发模式运行期目录都收敛到 `data/`：
 
@@ -104,6 +107,8 @@ MaaS 目标架构契约见 [`docs/maas-production-architecture.md`](docs/maas-pr
 - `GET /api/data-sources/{sourceID}/catalog`
 - `POST /api/data-sources/{sourceID}/import`
 - `GET /ws?token=...&session_id=...`
+
+Agent observation tools 还包括 `state_governance_inspect`，用于读取当前 session 的通用数据治理事实，不触发固定 workflow。
 
 创建 connector-backed SQL source 使用公开 `config` 加加密 `credential`：
 

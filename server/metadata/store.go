@@ -270,6 +270,39 @@ func (s *Store) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_semantic_confirmations_profile ON semantic_confirmations(profile_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_semantic_confirmations_workspace ON semantic_confirmations(workspace_id)`,
+
+		`CREATE TABLE IF NOT EXISTS semantic_assets (
+			id TEXT PRIMARY KEY,
+			workspace_id TEXT NOT NULL,
+			source_id TEXT NOT NULL DEFAULT '',
+			schema_signature TEXT NOT NULL DEFAULT '',
+			asset_kind TEXT NOT NULL,
+			asset_key TEXT NOT NULL,
+			asset_value_json TEXT NOT NULL DEFAULT '{}',
+			created_from_profile_id TEXT NOT NULL DEFAULT '',
+			created_from_confirmation_id TEXT NOT NULL DEFAULT '',
+			created_by TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			UNIQUE(workspace_id, schema_signature, asset_kind, asset_key)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_semantic_assets_workspace ON semantic_assets(workspace_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_semantic_assets_schema ON semantic_assets(workspace_id, schema_signature)`,
+
+		`CREATE TABLE IF NOT EXISTS audit_events (
+			id TEXT PRIMARY KEY,
+			workspace_id TEXT NOT NULL,
+			session_id TEXT NOT NULL DEFAULT '',
+			run_id TEXT NOT NULL DEFAULT '',
+			actor_user_id TEXT NOT NULL DEFAULT '',
+			event_type TEXT NOT NULL,
+			resource_type TEXT NOT NULL,
+			resource_id TEXT NOT NULL,
+			payload_json TEXT NOT NULL DEFAULT '{}',
+			created_at DATETIME NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_events_workspace ON audit_events(workspace_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_events_resource ON audit_events(resource_type, resource_id)`,
 	}
 
 	for _, stmt := range stmts {

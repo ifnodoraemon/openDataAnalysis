@@ -11,6 +11,7 @@ type SessionSourcesProvider func() ([]service.SessionSourceSummary, error)
 type SessionProfilesProvider func() ([]service.SemanticProfileSummary, error)
 type ProfileDetailProvider func(profileID string) (profileJSON string, confirmationsJSON string, err error)
 type ProfileConfirmer func(profileID, confirmedBy, scope, overridesJSON string) error
+type GovernanceProvider func() (service.GovernanceInspection, error)
 
 func init() {
 	RegisterGlobalTool(func(ctx ToolContext) Tool {
@@ -35,6 +36,12 @@ func init() {
 			SessionID:   ctx.SessionID,
 			WorkspaceID: ctx.WorkspaceID,
 		}
+	})
+	RegisterGlobalTool(func(ctx ToolContext) Tool {
+		if ctx.GovernanceProvider == nil {
+			return nil
+		}
+		return &InspectGovernanceTool{Provider: ctx.GovernanceProvider}
 	})
 }
 
@@ -98,6 +105,39 @@ func (t *InspectSemanticProfileTool) Execute(args json.RawMessage) (string, erro
 		"confirmations": json.RawMessage(confirmationsJSON),
 	}
 	return toolSuccess("state_semantic_profile_inspect", payload), nil
+}
+
+type InspectGovernanceTool struct {
+	Provider GovernanceProvider
+}
+
+func (t *InspectGovernanceTool) Name() string { return "state_governance_inspect" }
+func (t *InspectGovernanceTool) Description() string {
+	return "Read current session's general data governance facts: source coverage, snapshot status, semantic ambiguity count, profile warnings, reusable semantic asset count, and issue severities. Does not modify any state and does not prescribe follow-up actions."
+}
+func (t *InspectGovernanceTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{},"required":[]}`)
+}
+
+func (t *InspectGovernanceTool) Execute(args json.RawMessage) (string, error) {
+	if t.Provider == nil {
+		return "", fmt.Errorf("governance provider is not initialized")
+	}
+	inspection, err := t.Provider()
+	if err != nil {
+		return "", err
+	}
+	payload := map[string]interface{}{
+		"source_count":         inspection.SourceCount,
+		"semantic_asset_count": inspection.SemanticAssetCount,
+		"issue_count":          inspection.IssueCount,
+		"severity_counts":      inspection.SeverityCounts,
+		"sources":              inspection.Sources,
+		"issues":               inspection.Issues,
+		"generated_at":         inspection.GeneratedAt,
+		"ui_summary":           fmt.Sprintf("%d governance facts inspected; %d issues found.", inspection.SourceCount, inspection.IssueCount),
+	}
+	return toolSuccess("state_governance_inspect", payload), nil
 }
 
 type ConfirmSourceProfileTool struct {

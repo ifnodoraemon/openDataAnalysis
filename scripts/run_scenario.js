@@ -7,21 +7,45 @@ const OUTPUT_ROOT = path.join(ROOT, 'tmp', 'scenario-runs');
 let activeTimelinePath = '';
 
 function parseArgs(argv) {
-  const args = { baseUrl: 'http://127.0.0.1', scenarioId: '', timeoutSec: 180 };
+  const args = { baseUrl: 'http://127.0.0.1:8080', scenarioId: '', timeoutSec: 180 };
   for (let i = 2; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === '--id') args.scenarioId = argv[++i];
-    else if (arg === '--base-url') args.baseUrl = argv[++i];
-    else if (arg === '--timeout') args.timeoutSec = Number(argv[++i]);
+    if (arg === '--id') args.scenarioId = requireArgValue(argv, ++i, arg);
+    else if (arg === '--base-url') args.baseUrl = requireArgValue(argv, ++i, arg);
+    else if (arg === '--timeout') args.timeoutSec = Number(requireArgValue(argv, ++i, arg));
     else if (arg === '--help' || arg === '-h') {
-      console.log('Usage: node scripts/run_scenario.js --id <scenario_id> [--base-url http://127.0.0.1] [--timeout 180]');
+      console.log('Usage: node scripts/run_scenario.js --id <scenario_id> [--base-url http://127.0.0.1:8080] [--timeout 180]');
       process.exit(0);
+    } else {
+      throw new Error(`unknown argument: ${arg}`);
     }
   }
   if (!args.scenarioId) {
     throw new Error('missing --id');
   }
+  if (!Number.isFinite(args.timeoutSec) || args.timeoutSec <= 0) {
+    throw new Error('invalid --timeout');
+  }
   return args;
+}
+
+function requireArgValue(argv, index, flag) {
+  const value = argv[index];
+  if (!value || value.startsWith('--')) {
+    throw new Error(`missing value for ${flag}`);
+  }
+  return value;
+}
+
+function serverOrigin(baseUrl) {
+  let raw = String(baseUrl || '').trim();
+  if (!/^https?:\/\//i.test(raw)) raw = `http://${raw}`;
+  const parsed = new URL(raw);
+  if (!parsed.port) parsed.port = '8080';
+  parsed.pathname = '';
+  parsed.search = '';
+  parsed.hash = '';
+  return parsed.toString().replace(/\/$/, '');
 }
 
 function loadEnvFile(filePath) {
@@ -116,7 +140,7 @@ function loadScenarioById(id) {
   for (const dir of listScenarioDirs()) {
     const yamlPath = path.join(dir, 'scenario.yaml');
     const data = parseSimpleYaml(fs.readFileSync(yamlPath, 'utf8'));
-    if (data.id === id) return { dir, data, yamlPath };
+    if (data.id === id || path.basename(dir) === id) return { dir, data, yamlPath };
   }
   throw new Error(`scenario not found: ${id}`);
 }
@@ -138,11 +162,11 @@ async function httpJson(url, init = {}) {
   return data;
 }
 
-async function uploadFile(baseUrl, token, sessionId, filePath) {
+async function uploadFile(apiOrigin, token, sessionId, filePath) {
   const form = new FormData();
   const buf = fs.readFileSync(filePath);
   form.append('file', new Blob([buf], { type: 'text/csv' }), path.basename(filePath));
-  const res = await fetch(`${baseUrl}:8080/api/upload?session_id=${encodeURIComponent(sessionId)}`, {
+  const res = await fetch(`${apiOrigin}/api/upload?session_id=${encodeURIComponent(sessionId)}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: form,
@@ -178,8 +202,9 @@ function summarizeEvents(events) {
 function classifyErrorMessage(message) {
   const text = normalizeText(message);
   if (!text) return '';
+  if (text.includes('insufficient balance') || text.includes('status=402')) return 'llm_request_failed';
   if (text.includes('tls handshake timeout')) return 'llm_network_timeout';
-  if (text.includes('llm api request failed')) return 'llm_request_failed';
+  if (text.includes('llm api request failed') || text.includes('openai chat completions api call failed')) return 'llm_request_failed';
   if (text.includes('context deadline exceeded')) return 'timeout';
   if (text.includes('connection refused')) return 'connection_refused';
   return 'runtime_error';
@@ -665,7 +690,7 @@ function evaluateScenario(scenario, events, runData, reportHtml, summary) {
 
 async function main() {
   const args = parseArgs(process.argv);
-  const apiOrigin = `${args.baseUrl}:8080`;
+  const apiOrigin = serverOrigin(args.baseUrl);
   const wsOrigin = apiOrigin.replace(/^http/, 'ws');
   const env = loadEnvFile(path.join(ROOT, 'server', '.env'));
   const loginEmail = env.DEFAULT_USER_EMAIL;
@@ -702,7 +727,7 @@ async function main() {
   const uploads = [];
   for (const rel of scenario.data.files || []) {
     const fullPath = path.join(scenario.dir, rel);
-    uploads.push(await uploadFile(args.baseUrl, token, sessionId, fullPath));
+    uploads.push(await uploadFile(apiOrigin, token, sessionId, fullPath));
     appendTimelineNote(outDir, startedAt, 'file_uploaded', path.basename(fullPath));
   }
 
@@ -816,6 +841,11 @@ async function main() {
 
 main().catch((err) => {
   printTimelineTail(activeTimelinePath);
-  console.error(err.stack || String(err));
+  const message = err && err.message ? err.message : String(err);
+  if (!activeTimelinePath) {
+    console.error(`Error: ${message}`);
+  } else {
+    console.error(err.stack || `Error: ${message}`);
+  }
   process.exit(1);
 });

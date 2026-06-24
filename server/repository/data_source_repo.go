@@ -60,3 +60,14 @@ type SemanticConfirmationRepository interface {
 	ListByWorkspace(ctx context.Context, workspaceID string) ([]domain.SemanticConfirmation, error)
 	DeleteByProfile(ctx context.Context, profileID string) error
 }
+
+type SemanticAssetRepository interface {
+	Upsert(ctx context.Context, asset *domain.SemanticAsset) error
+	ListByWorkspace(ctx context.Context, workspaceID string) ([]domain.SemanticAsset, error)
+	ListBySchema(ctx context.Context, workspaceID, schemaSignature string) ([]domain.SemanticAsset, error)
+}
+
+type AuditEventRepository interface {
+	Create(ctx context.Context, event *domain.AuditEvent) error
+	ListByWorkspace(ctx context.Context, workspaceID string, limit int) ([]domain.AuditEvent, error)
+}

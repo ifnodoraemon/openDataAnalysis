@@ -18,8 +18,52 @@ DEFAULT_SCENARIOS=(
     "16_delegate_failure_recovery" # delegate 失败恢复
 )
 
-BASE_URL="${1:-http://127.0.0.1}"
-TIMEOUT="${2:-120}"
+BASE_URL="http://127.0.0.1"
+TIMEOUT="120"
+POSITIONAL_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --base-url)
+            if [ $# -lt 2 ]; then
+                echo "missing value for --base-url" >&2
+                exit 64
+            fi
+            BASE_URL="$2"
+            shift 2
+            ;;
+        --timeout)
+            if [ $# -lt 2 ]; then
+                echo "missing value for --timeout" >&2
+                exit 64
+            fi
+            TIMEOUT="$2"
+            shift 2
+            ;;
+        --help|-h)
+            echo "Usage: $0 [--base-url http://127.0.0.1] [--timeout 120]"
+            echo "       $0 [base-url] [timeout]"
+            exit 0
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            echo "unknown option: $1" >&2
+            exit 64
+            ;;
+        *)
+            POSITIONAL_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+if [ ${#POSITIONAL_ARGS[@]} -ge 1 ]; then
+    BASE_URL="${POSITIONAL_ARGS[0]}"
+fi
+if [ ${#POSITIONAL_ARGS[@]} -ge 2 ]; then
+    TIMEOUT="${POSITIONAL_ARGS[1]}"
+fi
 SCENARIOS=(${SMOKE_SCENARIOS:-${DEFAULT_SCENARIOS[@]}})
 SKIP_INFRA="${SKIP_INFRA_FAILURES:-0}"
 
@@ -55,12 +99,16 @@ classify_infra_blocker() {
         echo "$category"
         return
     fi
-    if printf '%s\n' "$raw" | grep -Eiq 'too many requests|status[=:]429|\b429\b|llm api request failed'; then
+    if printf '%s\n' "$raw" | grep -Eiq 'too many requests|status[=:]429|status[=:]402|\b429\b|\b402\b|insufficient balance|llm api request failed|openai chat completions api call failed'; then
         echo "llm_request_failed"
         return
     fi
-    if printf '%s\n' "$raw" | grep -Eiq 'tls handshake timeout|context deadline exceeded|connection refused'; then
+    if printf '%s\n' "$raw" | grep -Eiq 'tls handshake timeout|context deadline exceeded|connection refused|fetch failed|ECONNREFUSED|failed to fetch'; then
         echo "network_or_service_unavailable"
+        return
+    fi
+    if printf '%s\n' "$raw" | grep -Eiq 'missing default login credentials|server/.env'; then
+        echo "missing_smoke_credentials"
         return
     fi
     if printf '%s\n' "$raw" | grep -Eiq 'scenario timeout after'; then
@@ -120,13 +168,14 @@ for scenario_id in "${SCENARIOS[@]}"; do
 done
 
 # 输出汇总 JSON
+pass_rate=$(python3 -c 'import sys; p=int(sys.argv[1]); t=int(sys.argv[2]); print(f"{(p * 100 / t if t else 0):.1f}%")' "$passed" "$total")
 summary_json=$(cat <<EOF
 {
     "total": $total,
     "passed": $passed,
     "failed": $failed,
     "infra_blocked": $infra_blocked,
-    "pass_rate": "$(echo "scale=1; $passed * 100 / $total" | bc)%",
+    "pass_rate": "$pass_rate",
     "scenarios": [$(IFS=,; echo "${results[*]}")]
 }
 EOF

@@ -1,6 +1,6 @@
 # 数据库数据源
 
-更新日期：2026-06-22
+更新日期：2026-06-24
 
 本文档记录当前数据库数据源实现和边界。历史 source-first 计划已合并进本文档；过期草案不再保留。
 
@@ -44,6 +44,8 @@
 | `SessionSourceBinding` | session 当前绑定的 source/object -> active snapshot |
 | `SemanticProfile` | schema、候选语义、候选 join、歧义、warning 等结构化事实 |
 | `SemanticConfirmation` | 用户对口径、时间列、单位或 join 的 session/workspace 级确认 |
+| `SemanticAsset` | workspace 级可复用语义资产，由用户确认沉淀，按 schema signature 复用 |
+| `AuditEvent` | 关键数据操作和语义资产变更的审计事件 |
 
 ## SQL 连接边界
 
@@ -92,6 +94,17 @@ SQL_IMPORT_ROW_LIMIT=1000000
 - `workspace` 范围可在 schema signature 匹配时复用。
 - session override 后应用，覆盖 workspace override。
 
+workspace 范围的确认还会沉淀为 `SemanticAsset`：
+
+- 当前从用户确认事实中提取主时间列、指标定义、单位标注、join 候选和通用 override。
+- 新 profile 创建时会读取同 workspace、同 schema signature 的语义资产并自动应用。
+- 语义资产是复用事实，不是关键词触发器，也不规定 agent 下一步流程。
+
+关键事件会写入 `AuditEvent`：
+
+- 数据源导入完成后记录 source、snapshot、目标分析表、行列数、截断状态和 profile ID。
+- profile 确认和语义资产 upsert 会记录 actor、scope、schema signature 和资产键。
+
 ## API
 
 - `POST /api/data-sources`：创建 connector-backed source，请求体使用 `source_type`、`config`、`credential`。
@@ -123,6 +136,7 @@ Connector 不负责 agent 决策、不直接生成报告，也不把上游 live 
 
 - `state_session_sources_inspect`
 - `state_semantic_profile_inspect`
+- `state_governance_inspect`
 - `state_source_confirm_profile`
 
 分析工具仍只面向 session SQLite snapshot：
@@ -132,6 +146,8 @@ Connector 不负责 agent 决策、不直接生成报告，也不把上游 live 
 - `data_query_sql`
 
 Agent 不直接生成上游数据库 SQL。
+
+`state_governance_inspect` 只返回通用数据治理事实，例如 snapshot 状态、导入截断、profile warning、语义歧义和可复用语义资产数量；它不返回 `next_action`，也不按固定行业或工作流触发行为。
 
 ## 后续方向
 

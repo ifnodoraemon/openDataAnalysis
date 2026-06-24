@@ -66,6 +66,38 @@ describe("data source store", () => {
     expect(store.sessionSources).toEqual([]);
   });
 
+  it("derives semantic profile summaries from session source facts", async () => {
+    const store = useDataSourceStore();
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          sources: [
+            {
+              source_id: "ds_1",
+              analysis_table_name: "sales",
+              semantic_status: "profiled",
+              profile_id: "sp_1",
+              schema_signature: "sig_1",
+            },
+          ],
+        }),
+    });
+
+    const result = await store.fetchSessionSources("sess_1");
+
+    expect(result.ok).toBe(true);
+    expect(store.semanticProfileSummaries).toEqual([
+      {
+        profile_id: "sp_1",
+        source_id: "ds_1",
+        analysis_table_name: "sales",
+        profile_status: "profiled",
+        schema_signature: "sig_1",
+      },
+    ]);
+  });
+
   it("returns backend failure text when testing a connection fails", async () => {
     const store = useDataSourceStore();
     global.fetch = vi.fn().mockResolvedValue({

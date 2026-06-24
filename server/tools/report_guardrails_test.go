@@ -408,3 +408,23 @@ func TestReportEditStateConcurrentBlockMutationAndReset(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestBlockNeedsEvidenceForGenericNumericClaims(t *testing.T) {
+	t.Parallel()
+
+	if !blockNeedsEvidence(ReportBlock{ID: "analysis", Kind: "markdown", Content: "设备温度升高 3.5 摄氏度。"}) {
+		t.Fatal("expected generic numeric claim to require evidence without domain keywords")
+	}
+	if !blockNeedsEvidence(ReportBlock{ID: "analysis", Kind: "markdown", Content: "模型响应延迟下降 18%。"}) {
+		t.Fatal("expected percentage claim to require evidence without business keywords")
+	}
+}
+
+func TestBlockNeedsEvidenceIgnoresStructuralSectionOrdinals(t *testing.T) {
+	t.Parallel()
+
+	block := ReportBlock{ID: "overview", Kind: "markdown", Title: "第1章 数据概览", Content: "## 2. 字段说明\n\n正文"}
+	if blockNeedsEvidence(block) {
+		t.Fatal("expected structural section ordinals without numeric claims to skip evidence requirement")
+	}
+}

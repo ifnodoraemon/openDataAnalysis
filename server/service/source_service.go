@@ -24,6 +24,8 @@ type SourceService struct {
 	SessionSourceBindingRepo repository.SessionSourceBindingRepository
 	SemanticProfileRepo      repository.SemanticProfileRepository
 	SemanticConfirmationRepo repository.SemanticConfirmationRepository
+	SemanticAssetRepo        repository.SemanticAssetRepository
+	AuditEventRepo           repository.AuditEventRepository
 }
 
 func NewSourceService(
@@ -33,6 +35,8 @@ func NewSourceService(
 	bindingRepo repository.SessionSourceBindingRepository,
 	profileRepo repository.SemanticProfileRepository,
 	confirmRepo repository.SemanticConfirmationRepository,
+	assetRepo repository.SemanticAssetRepository,
+	auditRepo repository.AuditEventRepository,
 ) *SourceService {
 	return &SourceService{
 		DataSourceRepo:           dsRepo,
@@ -41,6 +45,8 @@ func NewSourceService(
 		SessionSourceBindingRepo: bindingRepo,
 		SemanticProfileRepo:      profileRepo,
 		SemanticConfirmationRepo: confirmRepo,
+		SemanticAssetRepo:        assetRepo,
+		AuditEventRepo:           auditRepo,
 	}
 }
 
@@ -428,6 +434,20 @@ func (s *SourceService) GetProfileDetail(ctx context.Context, profileID string) 
 	return profile, confirmations, nil
 }
 
+func (s *SourceService) GetSessionProfileDetail(ctx context.Context, sessionID, profileID string) (*domain.SemanticProfile, []domain.SemanticConfirmation, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, nil, fmt.Errorf("session_id is required")
+	}
+	profile, confirmations, err := s.GetProfileDetail(ctx, profileID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if profile.SessionID != sessionID {
+		return nil, nil, fmt.Errorf("profile %s does not belong to session %s", profileID, sessionID)
+	}
+	return profile, confirmations, nil
+}
+
 type ProfiledFacts struct {
 	Schema             *data.SchemaInfo    `json:"schema"`
 	ProfileMode        string              `json:"profile_mode"`
@@ -627,14 +647,20 @@ func (s *SourceService) CreateSemanticProfile(ctx context.Context, sessionID, wo
 		return nil, fmt.Errorf("failed to create semantic profile: %w", err)
 	}
 
+	workspaceConfirmations := make([]domain.SemanticConfirmation, 0, 2)
 	wsConfirmation, wsErr := s.SemanticProfileRepo.FindWorkspaceConfirmation(ctx, workspaceID, schemaSignature)
 	if wsErr != nil {
 		log.Printf("CreateSemanticProfile: FindWorkspaceConfirmation failed workspace_id=%s signature=%s err=%v", workspaceID, schemaSignature, wsErr)
 	}
 	if wsConfirmation != nil {
-		confirmations := []domain.SemanticConfirmation{*wsConfirmation}
-		merged := applyConfirmationsToProfile(string(profileJSON), confirmations)
-		merged = removeResolvedAmbiguities(merged, confirmationOverrideJSONs(confirmations))
+		workspaceConfirmations = append(workspaceConfirmations, *wsConfirmation)
+	}
+	if assetConfirmation := s.semanticAssetConfirmation(ctx, workspaceID, schemaSignature); assetConfirmation != nil {
+		workspaceConfirmations = append(workspaceConfirmations, *assetConfirmation)
+	}
+	if len(workspaceConfirmations) > 0 {
+		merged := applyConfirmationsToProfile(string(profileJSON), workspaceConfirmations)
+		merged = removeResolvedAmbiguities(merged, confirmationOverrideJSONs(workspaceConfirmations))
 		if err := s.SemanticProfileRepo.UpdateProfileJSON(ctx, profile.ID, merged); err != nil {
 			log.Printf("CreateSemanticProfile: merge workspace overrides failed profile_id=%s err=%v", profile.ID, err)
 		} else {
@@ -644,7 +670,7 @@ func (s *SourceService) CreateSemanticProfile(ctx context.Context, sessionID, wo
 		status := profileStatusForJSON(merged)
 		_ = s.SemanticProfileRepo.UpdateStatus(ctx, profile.ID, status)
 		profile.ProfileStatus = status
-		log.Printf("workspace confirmation auto-applied for profile %s (signature=%s)", profile.ID, schemaSignature)
+		log.Printf("workspace semantic knowledge auto-applied for profile %s (signature=%s)", profile.ID, schemaSignature)
 	}
 
 	return profile, nil
@@ -697,6 +723,20 @@ func (s *SourceService) ConfirmProfile(ctx context.Context, profileID, workspace
 	}
 	if err := s.SemanticConfirmationRepo.Create(ctx, confirmation); err != nil {
 		return nil, fmt.Errorf("failed to create semantic confirmation: %w", err)
+	}
+	s.recordAudit(ctx, domain.AuditEvent{
+		WorkspaceID:  workspaceID,
+		SessionID:    sessionID,
+		ActorUserID:  confirmedBy,
+		EventType:    "semantic_profile_confirmed",
+		ResourceType: "semantic_profile",
+		ResourceID:   profileID,
+		PayloadJSON:  auditPayloadJSON(map[string]interface{}{"scope": scope, "schema_signature": profile.SchemaSignature}),
+	})
+	if scope == string(domain.ConfirmationScopeWorkspace) {
+		if err := s.upsertSemanticAssetsFromConfirmation(ctx, profile, confirmation); err != nil {
+			log.Printf("ConfirmProfile: semantic asset upsert failed profile_id=%s confirmation_id=%s err=%v", profileID, confirmation.ID, err)
+		}
 	}
 
 	confirmations := s.applicableConfirmations(ctx, workspaceID, profile.SchemaSignature, profileID)
