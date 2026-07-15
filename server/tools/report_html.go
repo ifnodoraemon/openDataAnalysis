@@ -29,7 +29,19 @@ func ResolveReportTitleFromState(state *ReportState) string {
 	if state == nil {
 		return ""
 	}
-	return state.FinalTitle
+	if t := strings.TrimSpace(state.FinalTitle); t != "" {
+		return t
+	}
+	// Derive title from first block's heading when FinalTitle not yet set (streaming preview)
+	for _, block := range state.Blocks {
+		if heading, level, ok := firstMarkdownHeading(block.Content); ok && level <= 2 {
+			return heading
+		}
+		if t := strings.TrimSpace(block.Title); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 // RenderReportHTML 生成完整的研报 HTML（含 ECharts 图表支持）
@@ -38,7 +50,7 @@ func RenderReportHTML(title, author string, state *ReportState) string {
 		state = &ReportState{}
 	}
 	if title == "" && state != nil {
-		title = state.FinalTitle
+		title = ResolveReportTitleFromState(state)
 	}
 	if author == "" && state != nil {
 		author = state.FinalAuthor
@@ -461,7 +473,7 @@ type reportTOCItem struct {
 
 func renderReportTOC(blocks []ReportBlock, reportTitle string) string {
 	items := buildReportTOCItems(blocks, reportTitle)
-	if len(items) < 2 {
+	if len(items) < 1 {
 		return ""
 	}
 
