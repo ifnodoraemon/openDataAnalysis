@@ -168,8 +168,11 @@ function cleanAttributes(
     if (
       node.tagName === "SCRIPT" &&
       name === "id" &&
-      ["oda-echarts-loader", "oda-chart-runtime"].includes(value)
+      ["oda-echarts-loader", "oda-chart-runtime", "oda-math-loader", "oda-math-auto-render", "oda-math-runtime"].includes(value)
     ) {
+      continue;
+    }
+    if (name === "id" && allowReportAttrs) {
       continue;
     }
     if (name === "style") {
@@ -213,6 +216,7 @@ function cleanAttributes(
     if (
       allowReportAttrs &&
       [
+        "id",
         "title",
         "colspan",
         "rowspan",
@@ -273,7 +277,7 @@ export function sanitizeMarkdownHTML(html) {
   return doc.body.innerHTML;
 }
 
-const ECHARTS_CDN_HOSTS = new Set(["cdn.jsdelivr.net", "cdnjs.cloudflare.com"]);
+const CDN_HOSTS = new Set(["cdn.jsdelivr.net", "cdnjs.cloudflare.com"]);
 
 function isEChartsLoaderScript(node) {
   const src = node.getAttribute("src") || "";
@@ -289,8 +293,24 @@ function isEChartsLoaderScript(node) {
       return true;
     }
     return (
-      ECHARTS_CDN_HOSTS.has(url.hostname) && path.endsWith("echarts.min.js")
+      CDN_HOSTS.has(url.hostname) && path.endsWith("echarts.min.js")
     );
+  } catch {
+    return false;
+  }
+}
+
+function isMathScript(node) {
+  const src = node.getAttribute("src") || "";
+  const id = node.getAttribute("id") || "";
+  if (!id.startsWith("oda-math") || !src) return false;
+  try {
+    const url = new URL(src, window.location.origin);
+    const path = url.pathname.toLowerCase();
+    if (url.origin === window.location.origin && path === "/oda-math-runtime.js") {
+      return true;
+    }
+    return CDN_HOSTS.has(url.hostname) && (path.includes("katex") || path.includes("mathjax") || path.includes("auto-render"));
   } catch {
     return false;
   }
@@ -325,7 +345,8 @@ export function sanitizeReportHTML(html) {
   doc.querySelectorAll("script").forEach((node) => {
     const isLoader = isEChartsLoaderScript(node);
     const isRuntime = isChartRuntimeScript(node);
-    if (!isLoader && !isRuntime) {
+    const isMath = isMathScript(node);
+    if (!isLoader && !isRuntime && !isMath) {
       node.remove();
     }
   });

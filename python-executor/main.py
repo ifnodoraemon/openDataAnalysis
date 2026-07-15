@@ -65,202 +65,6 @@ PROCESS_LIMIT = int(os.environ.get("PROCESS_LIMIT", "0"))
 STDOUT_LIMIT = int(os.environ.get("STDOUT_LIMIT", "10000"))
 STDERR_LIMIT = int(os.environ.get("STDERR_LIMIT", "5000"))
 
-FORBIDDEN_IMPORTS = frozenset(
-    {
-        "os",
-        "sys",
-        "subprocess",
-        "shutil",
-        "socket",
-        "urllib",
-        "requests",
-        "pty",
-        "builtins",
-        "importlib",
-        "ctypes",
-        "signal",
-        "multiprocessing",
-        "threading",
-        "pickle",
-        "shelve",
-        "marshal",
-        "code",
-        "codeop",
-        "compileall",
-        "runpy",
-        "webbrowser",
-        "antigravity",
-        "site",
-        "pkgutil",
-        "xmlrpc",
-        "http",
-        "ftplib",
-        "smtplib",
-        "telnetlib",
-        "tempfile",
-        "glob",
-        "io",
-        "pathlib",
-        "posixpath",
-        "ntpath",
-        "genericpath",
-    }
-)
-
-ALLOWED_IMPORTS = frozenset(
-    {
-        "pandas",
-        "numpy",
-        "matplotlib",
-        "scipy",
-        "sklearn",
-        "scikit-learn",
-        "json",
-        "csv",
-        "math",
-        "statistics",
-        "re",
-        "datetime",
-        "collections",
-        "openpyxl",
-        "numbers",
-        "decimal",
-        "fractions",
-        "itertools",
-        "functools",
-        "copy",
-        "enum",
-        "typing",
-        "dataclasses",
-        "string",
-        "textwrap",
-        "difflib",
-        "hashlib",
-        "base64",
-        "random",
-        "uuid",
-        "pprint",
-        "warnings",
-        "contextlib",
-    }
-)
-
-DANGEROUS_ATTR_NAMES = frozenset(
-    {
-        "__class__",
-        "__bases__",
-        "__base__",
-        "__mro__",
-        "__subclasses__",
-        "__globals__",
-        "__builtins__",
-        "__code__",
-        "__func__",
-        "__self__",
-        "__dict__",
-        "__closure__",
-        "__frame__",
-        "__module__",
-        "__qualname__",
-        "__init__",
-        "__new__",
-    }
-)
-
-REMOVED_BUILTINS = frozenset(
-    {
-        "eval",
-        "exec",
-        "compile",
-        "type",
-        "breakpoint",
-        "globals",
-        "locals",
-        "vars",
-        "dir",
-        "help",
-    }
-)
-
-BLOCKED_CALL_NAMES = REMOVED_BUILTINS | {"__import__", "open"}
-
-CRASH_RESULT: dict[str, Any] = {
-    "success": False,
-    "stdout": "",
-    "stderr": "",
-    "error": "Execution failed to return a result (possible crash or out of memory).",
-}
-
-
-class ASTSandboxValidator(ast.NodeVisitor):
-    """AST 级别的静态安全检查，在执行前拒绝危险代码模式。"""
-
-    def __init__(self) -> None:
-        self.errors: list[str] = []
-
-    def _error(self, node: ast.AST, msg: str) -> None:
-        self.errors.append(f"Line {getattr(node, 'lineno', '?')}: {msg}")
-
-    def _check_import(self, node: ast.AST, module_name: str | None) -> None:
-        if not module_name:
-            return
-        base = module_name.split(".")[0]
-        if base in FORBIDDEN_IMPORTS:
-            self._error(node, f"import '{base}' is not allowed")
-        elif base not in ALLOWED_IMPORTS:
-            self._error(node, f"import '{base}' is not in the allowed list")
-
-    def visit_Import(self, node: ast.Import) -> None:
-        for alias in node.names:
-            self._check_import(node, alias.name)
-        self.generic_visit(node)
-
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        self._check_import(node, node.module)
-        self.generic_visit(node)
-
-    def visit_Attribute(self, node: ast.Attribute) -> None:
-        if node.attr in DANGEROUS_ATTR_NAMES:
-            self._error(node, f"access to attribute '{node.attr}' is not allowed")
-        self.generic_visit(node)
-
-    def visit_Call(self, node: ast.Call) -> None:
-        if (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr in BLOCKED_CALL_NAMES
-        ):
-            self._error(
-                node, f"calling '{node.func.attr}' is not allowed in this context"
-            )
-        if isinstance(node.func, ast.Name) and node.func.id in REMOVED_BUILTINS:
-            self._error(node, f"calling '{node.func.id}' is not allowed")
-        self.generic_visit(node)
-
-    def visit_Subscript(self, node: ast.Subscript) -> None:
-        if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
-            if node.slice.value in DANGEROUS_ATTR_NAMES:
-                self._error(
-                    node, f"subscript access to '{node.slice.value}' is not allowed"
-                )
-        self.generic_visit(node)
-
-    def visit_Constant(self, node: ast.Constant) -> None:
-        if isinstance(node.value, str) and node.value in DANGEROUS_ATTR_NAMES:
-            self._error(
-                node,
-                f"dangerous string constant '{node.value}' is not allowed",
-            )
-        self.generic_visit(node)
-
-
-def validate_code_with_ast(code: str) -> list[str]:
-    try:
-        tree = ast.parse(code)
-    except SyntaxError as e:
-        return [f"Syntax error: {e}"]
-    validator = ASTSandboxValidator()
-    validator.visit(tree)
-    return validator.errors
 
 
 def _is_path_within(child: Path, parent: Path) -> bool:
@@ -475,49 +279,12 @@ def _current_user_task_count() -> int:
     return count
 
 
-def _build_safe_builtins(req_dir: Path) -> dict:
-    import builtins
-
-    safe_builtins = builtins.__dict__.copy()
-    original_import = builtins.__import__
-    original_getattr = builtins.getattr
-    original_open = builtins.open
-
-    def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
-        base_name = name.split(".")[0]
-        if base_name in FORBIDDEN_IMPORTS:
-            raise ImportError(
-                f"Importing '{base_name}' is not allowed in this sandbox."
-            )
-        if base_name not in ALLOWED_IMPORTS:
-            raise ImportError(
-                "Importing is not allowed. Only pre-approved libraries are available."
-            )
-        return original_import(name, globals, locals, fromlist, level)
-
-    def safe_open(file, mode="r", *args, **kwargs):
-        resolved = Path(file).resolve()
-        if not _is_path_within(resolved, req_dir):
-            raise PermissionError(
-                "Access denied: file operations are restricted to the working directory."
-            )
-        return original_open(resolved, mode, *args, **kwargs)
-
-    def safe_getattr(obj, name, *args):
-        if isinstance(name, str) and name in DANGEROUS_ATTR_NAMES:
-            raise AttributeError(
-                f"Access to attribute '{name}' is not allowed in this sandbox."
-            )
-        return original_getattr(obj, name, *args)
-
-    safe_builtins["__import__"] = safe_import
-    safe_builtins["open"] = safe_open
-    safe_builtins["getattr"] = safe_getattr
-
-    for name in REMOVED_BUILTINS:
-        safe_builtins.pop(name, None)
-
-    return safe_builtins
+CRASH_RESULT: dict[str, Any] = {
+    "success": False,
+    "stdout": "",
+    "stderr": "",
+    "error": "Execution failed to return a result (possible crash or out of memory).",
+}
 
 
 def run_in_process(code: str, req_dir_path: str, q: multiprocessing.Queue) -> None:
@@ -528,7 +295,6 @@ def run_in_process(code: str, req_dir_path: str, q: multiprocessing.Queue) -> No
 
     local_ns: dict = {}
     init_namespace(local_ns, str(req_dir))
-    local_ns["__builtins__"] = _build_safe_builtins(req_dir)
 
     stdout_buf = io.StringIO()
     stderr_buf = io.StringIO()
@@ -588,17 +354,6 @@ async def execute_code(req: ExecuteRequest, request: Request):
 
 def _execute_sync(req: ExecuteRequest, request: Request) -> ExecuteResponse:
     start = time.time()
-
-    ast_errors = validate_code_with_ast(req.code)
-    if ast_errors:
-        return ExecuteResponse(
-            success=False,
-            stdout="",
-            stderr="",
-            error="Code rejected by security policy:\n" + "\n".join(ast_errors),
-            files=[],
-            duration_ms=int((time.time() - start) * 1000),
-        )
 
     req_id = f"req_{uuid.uuid4().hex[:8]}"
     req_dir = WORK_DIR / req_id

@@ -12,6 +12,10 @@ import (
 
 	"github.com/ifnodoraemon/openDataAnalysis/config"
 	htmlnode "golang.org/x/net/html"
+	"golang.org/x/net/html/atom"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
+	gmhtml "github.com/yuin/goldmark/renderer/html"
 )
 
 var (
@@ -98,86 +102,133 @@ func RenderReportHTML(title, author string, state *ReportState) string {
 	}
 	echartsScriptNode := fmt.Sprintf(`<script id="oda-echarts-loader" src="%s"></script>`, escapeHTMLAttr(echartsURL))
 
+	katexCSS := `<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">`
+	katexScripts := `<script id="oda-math-loader" defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script id="oda-math-auto-render" defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<script id="oda-math-runtime" defer src="/oda-math-runtime.js"></script>`
+
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>%s</title>
+%s
+%s
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;900&display=swap');
+
 :root {
-  --primary: #0f2b46;
-  --primary-light: #1a4a7a;
-  --primary-soft: #e8f0fe;
-  --accent: #e8a838;
-  --accent-light: #fef3c7;
-  --text: #1e293b;
+  --primary: #2563eb;
+  --primary-light: #3b82f6;
+  --primary-soft: #eff6ff;
+  --accent: #10b981;
+  --accent-light: #d1fae5;
+  --text: #334155;
   --text-light: #64748b;
   --text-muted: #94a3b8;
   --bg: #ffffff;
   --bg-alt: #f8fafc;
-  --bg-warm: #fffbf0;
+  --bg-warm: #fcfcfd;
   --border: #e2e8f0;
   --border-light: #f1f5f9;
-  --shadow-sm: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
-  --shadow-md: 0 4px 12px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.04);
-  --shadow-lg: 0 10px 30px rgba(0,0,0,0.1), 0 4px 8px rgba(0,0,0,0.05);
-  --radius: 12px;
-  --radius-sm: 8px;
+  --shadow-sm: 0 2px 4px rgba(0,0,0,0.02), 0 1px 2px rgba(0,0,0,0.04);
+  --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.05), 0 2px 4px -1px rgba(0,0,0,0.03);
+  --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.05), 0 4px 6px -2px rgba(0,0,0,0.03);
+  --shadow-hover: 0 20px 25px -5px rgba(0,0,0,0.08), 0 10px 10px -5px rgba(0,0,0,0.04);
+  --radius: 16px;
+  --radius-sm: 10px;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans SC", "PingFang SC", sans-serif;
+  font-family: "Inter", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   color: var(--text);
-  line-height: 1.85;
+  line-height: 1.7;
   background: var(--bg-alt);
   -webkit-font-smoothing: antialiased;
+  padding: 1rem;
 }
 
 .report-titlebar {
-  max-width: 780px;
-  margin: 2rem auto 0.75rem;
-  padding: 2rem 2.5rem 1.75rem;
+  max-width: 820px;
+  margin: 1.5rem auto 1rem;
+  padding: 3rem;
   background: var(--bg);
-  border-top: 4px solid var(--primary);
+  border-top: 6px solid var(--primary);
   border-radius: var(--radius);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-lg);
+  position: relative;
+  overflow: hidden;
+}
+.report-titlebar::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: linear-gradient(135deg, rgba(37,99,235,0.03) 0%%, rgba(255,255,255,0) 100%%);
+  pointer-events: none;
 }
 .report-titlebar h1 {
-  color: var(--primary);
-  font-size: 1.9rem;
-  line-height: 1.25;
+  color: #0f172a;
+  font-size: 2.2rem;
+  line-height: 1.3;
   font-weight: 800;
   margin: 0;
+  letter-spacing: -0.02em;
 }
 .report-titlebar .meta {
-  margin-top: 0.75rem;
+  margin-top: 1rem;
   color: var(--text-light);
-  font-size: 0.9rem;
+  font-size: 0.95rem;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.report-titlebar .meta::before {
+  content: '✍️';
+  font-size: 1.1em;
 }
 .report-toc {
-  max-width: 780px;
-  margin: 1rem auto 1.5rem;
-  padding: 1.4rem 2rem;
+  max-width: 820px;
+  margin: 1rem auto;
+  padding: 2rem 3rem;
   background: var(--bg);
   border-radius: var(--radius);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-md);
+  border-left: 4px solid var(--accent);
 }
 .report-toc h2 {
-  color: var(--primary);
-  font-size: 1rem;
+  color: #0f172a;
+  font-size: 1.2rem;
   font-weight: 800;
-  margin-bottom: 0.75rem;
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.report-toc h2::before {
+  content: '📑';
 }
 .report-toc ol {
-  list-style: decimal;
-  padding-left: 1.25rem;
+  list-style: none;
+  counter-reset: toc-counter;
   margin: 0;
 }
 .report-toc li {
+  position: relative;
   color: var(--text-light);
-  padding: 0.3rem 0;
-  border-bottom: 1px solid var(--border-light);
+  padding: 0.5rem 0 0.5rem 2rem;
+  border-bottom: 1px dashed var(--border);
+  transition: all 0.2s ease;
+}
+.report-toc li::before {
+  counter-increment: toc-counter;
+  content: counter(toc-counter) ".";
+  position: absolute;
+  left: 0;
+  color: var(--primary);
+  font-weight: 700;
+  font-size: 0.9rem;
 }
 .report-toc li:last-child {
   border-bottom: none;
@@ -185,186 +236,195 @@ body {
 .report-toc a {
   color: var(--text);
   text-decoration: none;
+  font-weight: 500;
+  transition: color 0.2s;
 }
 .report-toc a:hover {
-  color: var(--primary-light);
+  color: var(--primary);
 }
 
 /* === Sections === */
 .section {
-  max-width: 780px;
+  max-width: 820px;
   margin: 1.5rem auto;
-  padding: 2.5rem;
+  padding: 3rem;
   background: var(--bg);
   border-radius: var(--radius);
   box-shadow: var(--shadow-sm);
-  transition: box-shadow 0.3s ease;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  border: 1px solid var(--border-light);
 }
-.section:hover { box-shadow: var(--shadow-md); }
+.section:hover { 
+  box-shadow: var(--shadow-hover); 
+  transform: translateY(-2px);
+}
 .section h2 {
-  color: var(--primary);
-  font-size: 1.4rem;
-  font-weight: 700;
-  margin-bottom: 1.25rem;
+  color: #0f172a;
+  font-size: 1.6rem;
+  font-weight: 800;
+  margin-bottom: 1.5rem;
   padding-bottom: 0.75rem;
-  border-bottom: 2px solid var(--border);
+  border-bottom: 2px solid var(--border-light);
   position: relative;
+  letter-spacing: -0.01em;
 }
 .section h2::after {
   content: '';
   position: absolute;
   bottom: -2px;
   left: 0;
-  width: 60px;
-  height: 2px;
-  background: linear-gradient(90deg, var(--accent), transparent);
+  width: 80px;
+  height: 3px;
+  background: var(--primary);
+  border-radius: 2px;
 }
 .content p {
-  margin-bottom: 1.1rem;
-  text-indent: 2em;
+  margin-bottom: 1.25rem;
   color: var(--text);
-  font-size: 0.95rem;
+  font-size: 1.05rem;
 }
 .content h4 {
+  color: #0f172a;
+  font-size: 1.15rem;
+  font-weight: 700;
+  margin: 2rem 0 1rem;
+  padding-left: 1rem;
+  border-left: 4px solid var(--primary);
+  border-radius: 2px;
+}
+.content h3 {
+  color: #0f172a;
+  font-size: 1.3rem;
+  font-weight: 800;
+  margin: 2rem 0 1rem;
+}
+.content h5 {
   color: var(--primary);
   font-size: 1.05rem;
   font-weight: 600;
   margin: 1.5rem 0 0.75rem;
-  padding-left: 0.75rem;
-  border-left: 3px solid var(--accent);
 }
-.content h3 {
-  color: var(--primary);
-  font-size: 1.15rem;
-  font-weight: 700;
-  margin: 1.6rem 0 0.9rem;
-}
-.content h5 {
-  color: var(--primary-light);
-  font-size: 1rem;
-  font-weight: 600;
-  margin: 1.25rem 0 0.65rem;
-}
-.content ul {
-  margin: 0.75rem 0;
+.content ul, .content ol {
+  margin: 1rem 0 1.5rem;
   padding-left: 1.5rem;
 }
 .content li {
-  margin-bottom: 0.4rem;
-  font-size: 0.95rem;
+  margin-bottom: 0.5rem;
+  font-size: 1.05rem;
   color: var(--text);
+  padding-left: 0.25rem;
+}
+.content li::marker {
+  color: var(--primary);
+  font-weight: 600;
+}
+.content blockquote {
+  border-left: 4px solid var(--primary-light);
+  background: var(--primary-soft);
+  padding: 1rem 1.5rem;
+  margin: 1.5rem 0;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: #1e293b;
+  font-style: italic;
+}
+.content code {
+  background: var(--border-light);
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9em;
+  color: #ef4444;
 }
 
 /* === Charts === */
 .chart-box {
   width: 100%%;
-  height: 420px;
-  margin: 1.5rem 0;
+  height: 450px;
+  margin: 2rem 0;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   background: var(--bg);
   box-shadow: var(--shadow-sm);
-  transition: box-shadow 0.3s ease;
+  transition: all 0.3s ease;
+  overflow: hidden;
 }
-.chart-box:hover { box-shadow: var(--shadow-md); }
+.chart-box:hover { 
+  box-shadow: var(--shadow-lg); 
+  border-color: var(--primary-light);
+}
+
 /* === Tables === */
 table {
   width: 100%%;
   border-collapse: separate;
   border-spacing: 0;
-  margin: 1.25rem 0;
-  font-size: 0.88rem;
+  margin: 1.5rem 0;
+  font-size: 0.95rem;
   border-radius: var(--radius-sm);
   overflow: hidden;
   box-shadow: var(--shadow-sm);
+  border: 1px solid var(--border);
 }
 th {
-  background: linear-gradient(135deg, var(--primary) 0%%, var(--primary-light) 100%%);
-  color: white;
-  padding: 0.85rem 1rem;
+  background: var(--bg-alt);
+  color: #0f172a;
+  padding: 1rem 1.25rem;
   text-align: left;
-  font-weight: 600;
-  font-size: 0.82rem;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
+  font-weight: 700;
+  border-bottom: 2px solid var(--border);
 }
 td {
-  padding: 0.7rem 1rem;
+  padding: 1rem 1.25rem;
   border-bottom: 1px solid var(--border-light);
-  transition: background 0.15s ease;
+  color: var(--text);
+  background: var(--bg);
 }
-tr:nth-child(even) { background: var(--bg-alt); }
-tr:hover td { background: var(--primary-soft); }
-strong { color: var(--primary); font-weight: 600; }
+tr:last-child td {
+  border-bottom: none;
+}
+tr:hover td { 
+  background: var(--primary-soft); 
+}
+strong { 
+  color: #0f172a; 
+  font-weight: 700; 
+}
 
 /* === Print === */
 @media print {
   @page { size: A4; margin: 15mm 14mm; }
-  body { background: white; }
+  body { background: white; padding: 0; }
   .report-titlebar,
   .report-toc,
   .section {
     max-width: none;
-    box-shadow: none;
+    box-shadow: none !important;
+    border: none !important;
     border-radius: 0;
     background: white;
+    padding: 0 !important;
+    transform: none !important;
   }
   .report-titlebar {
-    margin: 0 0 12pt;
-    padding: 0 0 12pt;
-    page-break-after: avoid;
+    margin: 0 0 20pt;
+    border-top: none;
+    border-bottom: 2px solid var(--primary);
   }
   .report-toc {
-    margin: 0 0 14pt;
-    padding: 0 0 12pt;
-    page-break-after: avoid;
+    margin: 0 0 20pt;
+    border-left: none;
   }
   .section {
-    break-inside: auto;
-    page-break-inside: auto;
-    margin: 0 0 14pt;
-    padding: 0;
-  }
-  .section h2,
-  .content h3,
-  .content h4,
-  .content h5 {
-    break-after: avoid;
-    page-break-after: avoid;
-  }
-  .chart-box {
-    height: auto !important;
-    min-height: 0;
-    margin: 8pt 0 10pt;
-    padding: 0;
-    border: 0;
-    box-shadow: none;
-    overflow: visible;
-    break-inside: auto;
-    page-break-inside: auto;
-  }
-  .chart-box img,
-  .chart-box canvas {
-    display: block;
-    width: auto !important;
-    max-width: 100%%;
-    height: auto !important;
-    max-height: 76mm;
-    object-fit: contain;
-  }
-  table {
-    box-shadow: none;
-    break-inside: auto;
-    page-break-inside: auto;
-  }
-  tr {
-    break-inside: avoid;
-    page-break-inside: avoid;
+    margin: 0 0 20pt;
   }
 }
 /* === Responsive === */
 @media (max-width: 860px) {
-  .section { margin-left: 1rem; margin-right: 1rem; }
+  .report-titlebar, .report-toc, .section { 
+    padding: 1.5rem; 
+    border-radius: 12px;
+  }
+  body { padding: 0.5rem; }
 }
 %s
 </style>
@@ -376,7 +436,7 @@ strong { color: var(--primary); font-weight: 600; }
 %s
 %s
 </body>
-</html>`, safeTitle, customCSSBlock, echartsScriptNode, bodyClass, titleHeaderHTML, tocHTML, bodyHTML.String(), chartScripts)
+</html>`, safeTitle, katexCSS, katexScripts, customCSSBlock, echartsScriptNode, bodyClass, titleHeaderHTML, tocHTML, bodyHTML.String(), chartScripts)
 }
 
 func renderReportTitleHeader(title, author string) string {
@@ -1000,105 +1060,184 @@ func processContent(content string, charts []ChartData) string {
 	return html
 }
 
-// markdownToHTML 简单的 Markdown → HTML 转换
+// markdownToHTML 使用 goldmark 进行标准的 Markdown 到 HTML 的转换
 func markdownToHTML(md string) string {
-	lines := strings.Split(md, "\n")
-	var html strings.Builder
-	inList := false
-	inTable := false
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			if inList {
-				html.WriteString("</ul>\n")
-				inList = false
-			}
-			if inTable {
-				html.WriteString("</tbody></table>\n")
-				inTable = false
-			}
-			continue
-		}
-
-		// 表格
-		if strings.Contains(trimmed, "|") && !inTable {
-			html.WriteString("<table><thead><tr>")
-			cells := strings.Split(strings.Trim(trimmed, "|"), "|")
-			for _, cell := range cells {
-				html.WriteString(fmt.Sprintf("<th>%s</th>", formatInline(strings.TrimSpace(cell))))
-			}
-			html.WriteString("</tr></thead><tbody>\n")
-			inTable = true
-			continue
-		}
-		if inTable && strings.Contains(trimmed, "---") {
-			continue
-		}
-		if inTable && strings.Contains(trimmed, "|") {
-			html.WriteString("<tr>")
-			cells := strings.Split(strings.Trim(trimmed, "|"), "|")
-			for _, cell := range cells {
-				html.WriteString(fmt.Sprintf("<td>%s</td>", formatInline(strings.TrimSpace(cell))))
-			}
-			html.WriteString("</tr>\n")
-			continue
-		}
-
-		// 列表
-		if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
-			if !inList {
-				html.WriteString("<ul>\n")
-				inList = true
-			}
-			html.WriteString(fmt.Sprintf("<li>%s</li>\n", formatInline(trimmed[2:])))
-			continue
-		}
-
-		// 标题
-		if strings.HasPrefix(trimmed, "#### ") {
-			html.WriteString(fmt.Sprintf("<h5>%s</h5>\n", formatInline(trimmed[5:])))
-			continue
-		}
-		if strings.HasPrefix(trimmed, "### ") {
-			html.WriteString(fmt.Sprintf("<h4>%s</h4>\n", formatInline(trimmed[4:])))
-			continue
-		}
-		if strings.HasPrefix(trimmed, "## ") {
-			html.WriteString(fmt.Sprintf("<h3>%s</h3>\n", formatInline(trimmed[3:])))
-			continue
-		}
-		if strings.HasPrefix(trimmed, "# ") {
-			html.WriteString(fmt.Sprintf("<h2>%s</h2>\n", formatInline(trimmed[2:])))
-			continue
-		}
-
-		// 图表占位符 - 保持原样，让 processContent 处理
-		if strings.Contains(trimmed, "{{chart:") {
-			html.WriteString(trimmed + "\n")
-			continue
-		}
-
-		html.WriteString(fmt.Sprintf("<p>%s</p>\n", formatInline(trimmed)))
+	if strings.TrimSpace(md) == "" {
+		return ""
 	}
-
-	if inList {
-		html.WriteString("</ul>\n")
+	
+	// Pre-process: Extract math blocks to protect them from markdown formatting (like _, *)
+	replacements := make(map[string]string)
+	var out strings.Builder
+	out.Grow(len(md))
+	
+	i := 0
+	idCounter := 0
+	for i < len(md) {
+		if strings.HasPrefix(md[i:], "$$") {
+			start := i
+			i += 2
+			found := false
+			for i < len(md) {
+				if strings.HasPrefix(md[i:], "$$") {
+					i += 2
+					found = true
+					break
+				}
+				i++
+			}
+			if found {
+				idCounter++
+				id := fmt.Sprintf("MATH_PLACEHOLDER_%d_END", idCounter)
+				replacements[id] = md[start:i]
+				out.WriteString(id)
+				continue
+			}
+			i = start + 1
+			out.WriteByte(md[start])
+			continue
+		}
+		
+		if strings.HasPrefix(md[i:], "$") && (i == 0 || md[i-1] != '\\') {
+			start := i
+			i += 1
+			found := false
+			for i < len(md) {
+				if md[i] == '$' && md[i-1] != '\\' {
+					i += 1
+					found = true
+					break
+				}
+				i++
+			}
+			if found {
+				idCounter++
+				id := fmt.Sprintf("MATH_PLACEHOLDER_%d_END", idCounter)
+				replacements[id] = md[start:i]
+				out.WriteString(id)
+				continue
+			}
+			i = start + 1
+			out.WriteByte(md[start])
+			continue
+		}
+		
+		if strings.HasPrefix(md[i:], `\(`) {
+			start := i
+			i += 2
+			found := false
+			for i < len(md) {
+				if strings.HasPrefix(md[i:], `\)`) {
+					i += 2
+					found = true
+					break
+				}
+				i++
+			}
+			if found {
+				idCounter++
+				id := fmt.Sprintf("MATH_PLACEHOLDER_%d_END", idCounter)
+				replacements[id] = md[start:i]
+				out.WriteString(id)
+				continue
+			}
+			i = start + 1
+			out.WriteByte(md[start])
+			continue
+		}
+		
+		if strings.HasPrefix(md[i:], `\[`) {
+			start := i
+			i += 2
+			found := false
+			for i < len(md) {
+				if strings.HasPrefix(md[i:], `\]`) {
+					i += 2
+					found = true
+					break
+				}
+				i++
+			}
+			if found {
+				idCounter++
+				id := fmt.Sprintf("MATH_PLACEHOLDER_%d_END", idCounter)
+				replacements[id] = md[start:i]
+				out.WriteString(id)
+				continue
+			}
+			i = start + 1
+			out.WriteByte(md[start])
+			continue
+		}
+		
+		out.WriteByte(md[i])
+		i++
 	}
-	if inTable {
-		html.WriteString("</tbody></table>\n")
-	}
+	
+	newMd := out.String()
+	
+	gm := goldmark.New(
+		goldmark.WithExtensions(extension.GFM), // Removed mathjax, rely on manual extraction
+		goldmark.WithRendererOptions(
+			gmhtml.WithUnsafe(), // 允许在 Markdown 中保留 HTML，由前端 DOMPurify (sanitizeReportHTML) 进行最终防御
+		),
+	)
 
-	return html.String()
+	var buf bytes.Buffer
+	if err := gm.Convert([]byte(newMd), &buf); err != nil {
+		return fixCJKBoldHTML(fmt.Sprintf("<p>%s</p>", escapeHTMLText(md)))
+	}
+	
+	htmlStr := buf.String()
+	for k, v := range replacements {
+		htmlStr = strings.ReplaceAll(htmlStr, k, htmlstd.EscapeString(v))
+	}
+	
+	return fixCJKBoldHTML(htmlStr)
 }
 
-// formatInline 处理行内格式（加粗）
-func formatInline(text string) string {
-	text = escapeHTMLText(text)
-	for strings.Contains(text, "**") {
-		text = strings.Replace(text, "**", "<strong>", 1)
-		text = strings.Replace(text, "**", "</strong>", 1)
+func fixCJKBoldHTML(htmlStr string) string {
+	doc, err := htmlnode.ParseFragment(strings.NewReader(htmlStr), &htmlnode.Node{
+		Type:     htmlnode.ElementNode,
+		Data:     "div",
+		DataAtom: atom.Div,
+	})
+	if err != nil {
+		return htmlStr
 	}
+
+	re := regexp.MustCompile(`(?s)\*\*(.+?)\*\*`)
+
+	var walk func(*htmlnode.Node)
+	walk = func(n *htmlnode.Node) {
+		if n.Type == htmlnode.ElementNode && (n.Data == "code" || n.Data == "pre") {
+			return
+		}
+		if n.Type == htmlnode.TextNode && strings.Contains(n.Data, "**") {
+			n.Data = re.ReplaceAllString(n.Data, "%%ODA_STRONG_START%%$1%%ODA_STRONG_END%%")
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+
+	for _, node := range doc {
+		walk(node)
+	}
+
+	var out bytes.Buffer
+	for _, node := range doc {
+		htmlnode.Render(&out, node)
+	}
+	
+	res := out.String()
+	res = strings.ReplaceAll(res, "%%ODA_STRONG_START%%", "<strong>")
+	res = strings.ReplaceAll(res, "%%ODA_STRONG_END%%", "</strong>")
+	return res
+}
+
+// 兼容旧代码，但现在不再使用
+func formatInline(text string) string {
 	return text
 }
 
