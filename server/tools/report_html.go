@@ -1110,30 +1110,6 @@ func markdownToHTML(md string) string {
 			continue
 		}
 		
-		if strings.HasPrefix(md[i:], "$") && (i == 0 || md[i-1] != '\\') {
-			start := i
-			i += 1
-			found := false
-			for i < len(md) {
-				if md[i] == '$' && md[i-1] != '\\' {
-					i += 1
-					found = true
-					break
-				}
-				i++
-			}
-			if found {
-				idCounter++
-				id := fmt.Sprintf("MATH_PLACEHOLDER_%d_END", idCounter)
-				replacements[id] = md[start:i]
-				out.WriteString(id)
-				continue
-			}
-			i = start + 1
-			out.WriteByte(md[start])
-			continue
-		}
-		
 		if strings.HasPrefix(md[i:], `\(`) {
 			start := i
 			i += 2
