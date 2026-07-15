@@ -1,10 +1,10 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { ref, shallowRef } from "vue";
 
-const MAX_MESSAGES = 500;
+const MAX_MESSAGES = 5000;
 
 export const useAgentStore = defineStore("agent", () => {
-  const messages = ref([]);
+  const messages = shallowRef([]);
   const reportHTML = ref("");
   const isRunning = ref(false);
   const token = ref(localStorage.getItem("oda_token") || "");
@@ -18,7 +18,7 @@ export const useAgentStore = defineStore("agent", () => {
   const workspace = ref(null);
   const workspaces = ref([]);
   const sessions = ref([]);
-  const runs = ref([]);
+  const runs = shallowRef([]);
   const subgoals = ref([]);
   const memoryFacts = ref({});
   const reportQuote = ref(null);
@@ -98,14 +98,16 @@ export const useAgentStore = defineStore("agent", () => {
   let _msgSeq = 0;
 
   function addMessage(msg) {
-    messages.value.push({
+    const newMsg = {
       ...msg,
       id: `msg_${Date.now()}_${++_msgSeq}`,
       timestamp: new Date().toLocaleTimeString(),
-    });
-    if (messages.value.length > MAX_MESSAGES) {
-      messages.value = messages.value.slice(-MAX_MESSAGES);
+    };
+    let nextMessages = [...messages.value, newMsg];
+    if (nextMessages.length > MAX_MESSAGES) {
+      nextMessages = nextMessages.slice(-MAX_MESSAGES);
     }
+    messages.value = nextMessages;
   }
 
   function updateReport(html) {
