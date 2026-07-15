@@ -553,4 +553,3 @@ func TestSpecialToolHandlersFallback(t *testing.T) {
 		t.Fatalf("expected error containing 'question is required', got: %v", err)
 	}
 }
-

@@ -155,6 +155,8 @@ func (l *LLMClient) ChatWithTools(ctx context.Context, bundle *PromptBundle, too
 		switch l.provider {
 		case "anthropic":
 			resp, err = l.chatAnthropic(retryCtx, bundle, toolSpecs)
+		case "google":
+			resp, err = l.chatGoogle(retryCtx, bundle, toolSpecs)
 		default:
 			resp, err = l.chatOpenAI(retryCtx, bundle, toolSpecs)
 		}

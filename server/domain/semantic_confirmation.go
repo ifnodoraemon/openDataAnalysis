@@ -10,12 +10,12 @@ const (
 )
 
 type SemanticConfirmation struct {
-	ID          string
-	ProfileID   string
-	WorkspaceID string
-	SessionID   string
-	ConfirmedBy string
-	Scope       ConfirmationScope
+	ID            string
+	ProfileID     string
+	WorkspaceID   string
+	SessionID     string
+	ConfirmedBy   string
+	Scope         ConfirmationScope
 	OverridesJSON string
-	CreatedAt   time.Time
+	CreatedAt     time.Time
 }

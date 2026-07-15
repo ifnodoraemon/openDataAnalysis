@@ -53,10 +53,10 @@ func (t *MCPSyncedTool) Execute(args json.RawMessage) (string, error) {
 }
 
 type RegistrySync struct {
-	Client  *Client
-	Target  *tools.Registry
-	mu      sync.Mutex
-	synced  map[string]struct{}
+	Client *Client
+	Target *tools.Registry
+	mu     sync.Mutex
+	synced map[string]struct{}
 }
 
 func NewRegistrySync(client *Client, target *tools.Registry) *RegistrySync {

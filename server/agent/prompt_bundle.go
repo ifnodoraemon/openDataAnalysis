@@ -15,8 +15,10 @@ type ConversationItem struct {
 	Role             string // "user", "assistant", "system" (for tool)
 	Content          string
 	ReasoningContent string
-	ToolCalls        []LLMToolCall
-	ToolCallID       string
+	ToolCalls              []LLMToolCall
+	ToolCallID             string
+	ToolCallName           string
+	ToolCallThoughtSignature string
 }
 
 // RuntimeContextBlock 表示在会话过程中因为摘要、事实等被动态注入的上下文

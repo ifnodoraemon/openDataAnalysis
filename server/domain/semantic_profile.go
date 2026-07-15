@@ -12,14 +12,14 @@ const (
 )
 
 type SemanticProfile struct {
-	ID               string
-	SessionID        string
-	SourceID         string
-	SnapshotID       string
+	ID                string
+	SessionID         string
+	SourceID          string
+	SnapshotID        string
 	AnalysisTableName string
-	SchemaSignature  string
-	ProfileStatus    ProfileStatus
-	ProfileJSON      string
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	SchemaSignature   string
+	ProfileStatus     ProfileStatus
+	ProfileJSON       string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }

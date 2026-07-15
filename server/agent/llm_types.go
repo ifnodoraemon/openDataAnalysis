@@ -17,8 +17,9 @@ const (
 )
 
 type LLMFunctionCall struct {
-	Name      string
-	Arguments string
+	Name             string
+	Arguments        string
+	ThoughtSignature string
 }
 
 type LLMToolCall struct {

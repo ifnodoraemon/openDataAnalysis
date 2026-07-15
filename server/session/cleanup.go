@@ -271,5 +271,3 @@ func cleanupStaleTemp(tempDir string, maxAge time.Duration) {
 		}
 	}
 }
-
-

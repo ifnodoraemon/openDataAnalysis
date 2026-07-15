@@ -16,10 +16,10 @@ func init() {
 	})
 	RegisterGlobalTool(func(ctx ToolContext) Tool {
 		return &DescribeDataTool{
-			Ingester:                  ctx.Ingester,
+			Ingester:                   ctx.Ingester,
 			ConfirmedOverridesProvider: ctx.ConfirmedOverridesProvider,
-			KnownRowCount:             ctx.KnownRowCount,
-			QueryLocker:               ctx.QueryLocker,
+			KnownRowCount:              ctx.KnownRowCount,
+			QueryLocker:                ctx.QueryLocker,
 		}
 	})
 	RegisterGlobalTool(func(ctx ToolContext) Tool {
@@ -90,10 +90,10 @@ type ConfirmedOverridesProvider func(tableName string) map[string]interface{}
 type KnownRowCountProvider func(tableName string) (int, bool)
 
 type DescribeDataTool struct {
-	Ingester                  *data.Ingester
+	Ingester                   *data.Ingester
 	ConfirmedOverridesProvider ConfirmedOverridesProvider
-	KnownRowCount             KnownRowCountProvider
-	QueryLocker               QueryLocker
+	KnownRowCount              KnownRowCountProvider
+	QueryLocker                QueryLocker
 }
 
 func (t *DescribeDataTool) Name() string { return "data_describe_table" }
@@ -181,9 +181,9 @@ func (t *DescribeDataTool) Execute(args json.RawMessage) (string, error) {
 	timeColumnCandidates := make([]map[string]interface{}, 0, len(schema.TimeColumns))
 	for _, tc := range schema.TimeColumns {
 		candidate := map[string]interface{}{
-			"column_name":   tc.Name,
-			"grain":         tc.Grain,
-			"confirmed":     false,
+			"column_name": tc.Name,
+			"grain":       tc.Grain,
+			"confirmed":   false,
 		}
 		if tc.CoverageStart != "" {
 			candidate["coverage_start"] = tc.CoverageStart

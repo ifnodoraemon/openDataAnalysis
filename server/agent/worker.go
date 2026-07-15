@@ -517,6 +517,7 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 					Role:       LLMRoleTool,
 					Content:    delegateChildToolFailure(toolCall.Function.Name, execErr.Error()),
 					ToolCallID: toolCall.ID,
+					ToolCallName: toolCall.Function.Name,
 				})
 				continue
 			}
@@ -537,6 +538,7 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 				Role:       LLMRoleTool,
 				Content:    result,
 				ToolCallID: toolCall.ID,
+				ToolCallName: toolCall.Function.Name,
 			})
 		}
 	}

@@ -39,9 +39,9 @@ func TestCompactQueryResult_LargeResult(t *testing.T) {
 	rows := make([]interface{}, 50)
 	for i := range rows {
 		rows[i] = map[string]interface{}{
-			"id":     float64(i),
-			"value":  float64(i * 10),
-			"name":   "row",
+			"id":    float64(i),
+			"value": float64(i * 10),
+			"name":  "row",
 		}
 	}
 
