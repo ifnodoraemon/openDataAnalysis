@@ -56,6 +56,10 @@ export function useWebSocket() {
   const store = useAgentStore();
   const dataSourceStore = useDataSourceStore();
 
+  function authHeaders() {
+    return store.token ? { Authorization: `Bearer ${store.token}` } : {};
+  }
+
   function applySessionState(sessionId, runs, runtimeState = null) {
     store.resetAnalysis();
     store.setSession(sessionId || "");
