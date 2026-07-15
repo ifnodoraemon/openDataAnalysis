@@ -10,6 +10,13 @@ const PENDING_QUEUE_MAX = 100;
 
 let wsInstance = null;
 let reconnectTimer = null;
+
+function clearReconnectTimer() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
 let connectPromise = null;
 let bootstrapPromise = null;
 let reconnectEnabled = false;
