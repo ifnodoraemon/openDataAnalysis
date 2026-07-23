@@ -86,7 +86,7 @@ func GetRunHandler(w http.ResponseWriter, r *http.Request) {
 		"run": serializeRun(r.Context(), *run),
 	}
 
-	messages, err := messageRepo.ListByRun(r.Context(), runID)
+	messages, err := messageRepo.ListByRunPath(r.Context(), runID)
 	if err == nil {
 		resp["messages"] = messages
 	} else {

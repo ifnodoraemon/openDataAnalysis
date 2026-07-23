@@ -9,7 +9,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py .
+COPY main.py sandbox.py .
 RUN mkdir -p /app/workspace /app/.local /app/.cache \
     && groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser \
     && chown -R appuser:appuser /app/workspace /app/.local /app/.cache

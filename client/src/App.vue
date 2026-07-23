@@ -69,9 +69,7 @@ const hasRestoreError = computed(
 const restoreError = computed(() => store.bootstrapError || "请稍后重试。");
 
 onMounted(() => {
-  if (store.token) {
-    void initApp();
-  }
+  void initApp();
 });
 
 watch(

@@ -58,6 +58,17 @@ type Config struct {
 
 	// 数据源导入
 	SQLImportRowLimit int // SQL snapshot import row cap, 0 = unlimited
+
+	// PostgreSQL配置
+	PostgresDSN string
+
+	// S3配置
+	S3Endpoint       string
+	S3Region         string
+	S3Bucket         string
+	S3AccessKey      string
+	S3SecretKey      string
+	S3ForcePathStyle bool
 }
 
 type productionBackendRule struct {
@@ -130,6 +141,14 @@ func Load() {
 		ReportEchartsUrl:   getEnv("REPORT_ECHARTS_URL", "/assets/echarts.min.js"),
 
 		SQLImportRowLimit: getEnvInt("SQL_IMPORT_ROW_LIMIT", 1000000),
+
+		PostgresDSN:      getEnv("POSTGRES_DSN", "postgres://oda:password@localhost:5432/oda?sslmode=disable"),
+		S3Endpoint:       getEnv("S3_ENDPOINT", "http://localhost:9000"),
+		S3Region:         getEnv("S3_REGION", "us-east-1"),
+		S3Bucket:         getEnv("S3_BUCKET", "oda-storage"),
+		S3AccessKey:      getEnv("S3_ACCESS_KEY", "minioadmin"),
+		S3SecretKey:      getEnv("S3_SECRET_KEY", "minioadmin"),
+		S3ForcePathStyle: getEnvBool("S3_FORCE_PATH_STYLE", true),
 	}
 
 	if Cfg.LLMAPIKey == "" || IsPlaceholderValue(Cfg.LLMAPIKey) {
@@ -204,7 +223,7 @@ func (c *Config) productionBackendRules() []productionBackendRule {
 		{
 			Value:           c.RunBackend,
 			DevelopmentOnly: "inprocess",
-			Issue:           "RUN_BACKEND=inprocess is single-server only; production needs a durable run/job backend",
+			Issue:           "RUN_BACKEND=inprocess is single-server only; production needs a durable run/job backend such as river",
 		},
 		{
 			Value:           c.AnalysisStore,

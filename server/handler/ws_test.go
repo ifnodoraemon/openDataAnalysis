@@ -38,6 +38,10 @@ func (r *captureMessageRepo) ListByRun(context.Context, string) ([]domain.RunMes
 	return nil, nil
 }
 
+func (r *captureMessageRepo) ListByRunPath(context.Context, string) ([]domain.RunMessage, error) {
+	return nil, nil
+}
+
 func (r *captureMessageRepo) ListRecentByRun(context.Context, string, int) ([]domain.RunMessage, error) {
 	return nil, nil
 }

@@ -9,9 +9,16 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
+const TokenIssuer = "openDataAnalysis"
+
 type Claims struct {
+	JWTID       string `json:"jti,omitempty"`
+	Issuer      string `json:"iss,omitempty"`
+	Subject     string `json:"sub,omitempty"`
 	UserID      string `json:"userId"`
 	UserName    string `json:"userName"`
 	UserEmail   string `json:"userEmail"`
@@ -30,14 +37,18 @@ func NewTokenManager(secret string) *TokenManager {
 }
 
 func (m *TokenManager) Sign(identity Identity, ttl time.Duration) (string, error) {
+	now := time.Now()
 	claims := Claims{
+		JWTID:       uuid.New().String(),
+		Issuer:      TokenIssuer,
+		Subject:     identity.UserID,
 		UserID:      identity.UserID,
 		UserName:    identity.UserName,
 		UserEmail:   identity.UserEmail,
 		WorkspaceID: identity.WorkspaceID,
 		Workspace:   identity.Workspace,
-		IssuedAt:    time.Now().Unix(),
-		ExpiresAt:   time.Now().Add(ttl).Unix(),
+		IssuedAt:    now.Unix(),
+		ExpiresAt:   now.Add(ttl).Unix(),
 	}
 	payload, err := json.Marshal(claims)
 	if err != nil {
@@ -75,9 +86,17 @@ func (m *TokenManager) Parse(token string) (Identity, error) {
 	if claims.ExpiresAt < time.Now().Unix() {
 		return Identity{}, errors.New("token expired")
 	}
+	if claims.Issuer != "" && claims.Issuer != TokenIssuer {
+		return Identity{}, errors.New("invalid token issuer")
+	}
+
+	userID := claims.UserID
+	if userID == "" {
+		userID = claims.Subject
+	}
 
 	return Identity{
-		UserID:      claims.UserID,
+		UserID:      userID,
 		UserName:    claims.UserName,
 		UserEmail:   claims.UserEmail,
 		WorkspaceID: claims.WorkspaceID,

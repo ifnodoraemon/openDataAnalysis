@@ -1,3 +1,4 @@
+-- +goose Up
 create table users (
   id varchar(64) primary key,
   email varchar(255) not null unique,
@@ -119,3 +120,14 @@ create table run_messages (
 );
 
 create index idx_run_messages_run on run_messages(run_id);
+
+-- +goose Down
+drop table if exists run_messages;
+drop table if exists reports;
+drop table if exists analysis_runs;
+drop table if exists session_files;
+drop table if exists files;
+drop table if exists sessions;
+drop table if exists workspace_members;
+drop table if exists workspaces;
+drop table if exists users;

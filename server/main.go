@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/ifnodoraemon/openDataAnalysis/config"
 	"github.com/ifnodoraemon/openDataAnalysis/handler"
+	"github.com/ifnodoraemon/openDataAnalysis/metrics"
 )
 
 func main() {
@@ -23,6 +24,7 @@ func main() {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
+	r.Use(metrics.Middleware)
 	r.Use(handler.RequestLoggingMiddleware)
 	r.Use(middleware.Recoverer)
 	r.Use(cors.Handler(cors.Options{
@@ -32,13 +34,22 @@ func main() {
 		AllowCredentials: true,
 	}))
 
-	r.Post("/api/auth/login", handler.LoginHandler)
+	r.Handle("/metrics", metrics.Handler())
+
+	r.Group(func(authGroup chi.Router) {
+		authGroup.Use(handler.IPRateLimitMiddleware(30, 10))
+		authGroup.Post("/api/auth/login", handler.LoginHandler)
+		authGroup.Post("/api/auth/register", handler.RegisterHandler)
+		authGroup.Post("/api/auth/logout", handler.LogoutHandler)
+	})
+
 	r.Get("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
 	r.Group(func(protected chi.Router) {
 		protected.Use(handler.AuthMiddleware)
+		protected.Use(handler.UserRateLimitMiddleware(120, 30))
 
 		protected.Get("/ws", handler.WSHandler)
 

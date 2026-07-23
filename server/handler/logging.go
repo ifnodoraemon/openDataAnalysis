@@ -14,6 +14,11 @@ func RequestLoggingMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 
+		reqID := middleware.GetReqID(r.Context())
+		if reqID != "" {
+			w.Header().Set("X-Request-ID", reqID)
+		}
+
 		next.ServeHTTP(ww, r)
 
 		if shouldSkipAccessLog(r.URL.Path) {
@@ -21,7 +26,8 @@ func RequestLoggingMiddleware(next http.Handler) http.Handler {
 		}
 
 		log.Printf(
-			"http method=%s path=%s status=%d bytes=%d duration_ms=%d remote=%s",
+			"http req_id=%s method=%s path=%s status=%d bytes=%d duration_ms=%d remote=%s",
+			reqID,
 			r.Method,
 			r.URL.Path,
 			ww.Status(),

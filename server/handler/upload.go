@@ -5,11 +5,59 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	"github.com/ifnodoraemon/openDataAnalysis/auth"
 	"github.com/ifnodoraemon/openDataAnalysis/service"
 )
+
+var allowedExtensions = map[string]bool{
+	".csv":  true,
+	".xlsx": true,
+	".xls":  true,
+}
+
+var allowedMimeTypes = map[string]bool{
+	"text/csv":                          true,
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": true,
+	"application/vnd.ms-excel":          true,
+	"application/octet-stream":          true,
+}
+
+var magicBytes = map[string][]byte{
+	".xlsx": {0x50, 0x4B, 0x03, 0x04},
+	".xls":  {0xD0, 0xCF, 0x11, 0xE0},
+}
+
+func validateUploadedFile(filename, contentType string, head []byte) error {
+	cleanName := filepath.Clean(filename)
+	if strings.Contains(cleanName, "..") || filepath.IsAbs(cleanName) {
+		return fmt.Errorf("invalid filename: path traversal detected")
+	}
+	if strings.ContainsAny(cleanName, `<>:"|?*`) {
+		return fmt.Errorf("invalid filename: contains forbidden characters")
+	}
+
+	ext := strings.ToLower(filepath.Ext(filename))
+	if !allowedExtensions[ext] {
+		return fmt.Errorf("file type %s is not allowed. Allowed: .csv, .xlsx, .xls", ext)
+	}
+
+	if contentType != "" && !allowedMimeTypes[contentType] {
+		return fmt.Errorf("MIME type %s is not allowed", contentType)
+	}
+
+	if expected, ok := magicBytes[ext]; ok && len(head) >= len(expected) {
+		for i, b := range expected {
+			if head[i] != b {
+				return fmt.Errorf("file content does not match extension %s", ext)
+			}
+		}
+	}
+
+	return nil
+}
 
 func UploadHandler(w http.ResponseWriter, r *http.Request) {
 	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
@@ -43,6 +91,25 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
+
+	head := make([]byte, 8)
+	if _, err := file.Read(head); err != nil && err.Error() != "EOF" {
+		http.Error(w, "failed to read file header", http.StatusBadRequest)
+		return
+	}
+	if _, err := file.Seek(0, 0); err != nil {
+		http.Error(w, "failed to seek file", http.StatusInternalServerError)
+		return
+	}
+
+	if err := validateUploadedFile(
+		fileHeader.Filename,
+		fileHeader.Header.Get("Content-Type"),
+		head,
+	); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	uploaded, err := fileService.Upload(r.Context(), service.UploadFileInput{
 		UserID:      identity.UserID,
@@ -138,3 +205,4 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 func sourceScopedFileTableName(displayName, sourceID string) string {
 	return service.SourceScopedFileTableName(displayName, sourceID)
 }
+

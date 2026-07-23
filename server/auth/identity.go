@@ -40,6 +40,11 @@ func Middleware(tokenManager *TokenManager) func(http.Handler) http.Handler {
 				token = strings.TrimSpace(r.URL.Query().Get("token"))
 			}
 			if token == "" {
+				if cookie, err := r.Cookie("oda_token"); err == nil {
+					token = cookie.Value
+				}
+			}
+			if token == "" {
 				wsProtos := r.Header.Get("Sec-WebSocket-Protocol")
 				if wsProtos != "" {
 					parts := strings.Split(wsProtos, ",")

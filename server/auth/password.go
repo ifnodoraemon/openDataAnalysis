@@ -1,6 +1,9 @@
 package auth
 
 import (
+	"errors"
+	"unicode"
+
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -16,4 +19,25 @@ func HashPassword(password string) (string, error) {
 
 func VerifyPassword(password, encoded string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(encoded), []byte(password)) == nil
+}
+
+// ValidatePasswordStrength checks that password is at least 8 characters long
+// and contains both letters and digits.
+func ValidatePasswordStrength(password string) error {
+	if len(password) < 8 {
+		return errors.New("password must be at least 8 characters long")
+	}
+	var hasLetter, hasDigit bool
+	for _, char := range password {
+		if unicode.IsLetter(char) {
+			hasLetter = true
+		}
+		if unicode.IsDigit(char) {
+			hasDigit = true
+		}
+	}
+	if !hasLetter || !hasDigit {
+		return errors.New("password must contain both letters and numbers")
+	}
+	return nil
 }

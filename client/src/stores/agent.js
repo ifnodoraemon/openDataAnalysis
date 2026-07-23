@@ -7,7 +7,7 @@ export const useAgentStore = defineStore("agent", () => {
   const messages = shallowRef([]);
   const reportHTML = ref("");
   const isRunning = ref(false);
-  const token = ref(localStorage.getItem("oda_token") || "");
+  const token = ref("");
   const sessionId = ref("");
   const activeRunId = ref("");
   const selectedRunId = ref("");
@@ -34,65 +34,84 @@ export const useAgentStore = defineStore("agent", () => {
   }
 
   function patchRunInTree(items, runId, patch) {
-    return (items || []).map((item) => {
+    if (!items || !items.length) return items;
+    let changed = false;
+    const newItems = items.map((item) => {
       if (item.id === runId) {
+        changed = true;
         return { ...item, ...patch };
       }
       if (item.childRuns?.length) {
-        return {
-          ...item,
-          childRuns: patchRunInTree(item.childRuns, runId, patch),
-        };
+        const nextChildren = patchRunInTree(item.childRuns, runId, patch);
+        if (nextChildren !== item.childRuns) {
+          changed = true;
+          return { ...item, childRuns: nextChildren };
+        }
       }
       return item;
     });
+    return changed ? newItems : items;
   }
 
   function replaceRunInTree(items, nextRun) {
-    return (items || []).map((item) => {
+    if (!items || !items.length) return items;
+    let changed = false;
+    const newItems = items.map((item) => {
       if (item.id === nextRun.id) {
+        changed = true;
         return { ...item, ...nextRun };
       }
       if (item.childRuns?.length) {
-        return {
-          ...item,
-          childRuns: replaceRunInTree(item.childRuns, nextRun),
-        };
+        const nextChildren = replaceRunInTree(item.childRuns, nextRun);
+        if (nextChildren !== item.childRuns) {
+          changed = true;
+          return { ...item, childRuns: nextChildren };
+        }
       }
       return item;
     });
+    return changed ? newItems : items;
   }
 
   function setChildRunsInTree(items, parentRunId, childRuns) {
-    return (items || []).map((item) => {
+    if (!items || !items.length) return items;
+    let changed = false;
+    const newItems = items.map((item) => {
       if (item.id === parentRunId) {
+        changed = true;
         return { ...item, childRuns: childRuns || [] };
       }
       if (item.childRuns?.length) {
-        return {
-          ...item,
-          childRuns: setChildRunsInTree(item.childRuns, parentRunId, childRuns),
-        };
+        const nextChildren = setChildRunsInTree(item.childRuns, parentRunId, childRuns);
+        if (nextChildren !== item.childRuns) {
+          changed = true;
+          return { ...item, childRuns: nextChildren };
+        }
       }
       return item;
     });
+    return changed ? newItems : items;
   }
 
   function insertRunUnderParent(items, parentRunId, run) {
-    return (items || []).map((item) => {
+    if (!items || !items.length) return items;
+    let changed = false;
+    const newItems = items.map((item) => {
       if (item.id === parentRunId) {
+        changed = true;
         const existingChildren = item.childRuns || [];
-        const nextChildren = [...existingChildren, run];
-        return { ...item, childRuns: nextChildren };
+        return { ...item, childRuns: [...existingChildren, run] };
       }
       if (item.childRuns?.length) {
-        return {
-          ...item,
-          childRuns: insertRunUnderParent(item.childRuns, parentRunId, run),
-        };
+        const nextChildren = insertRunUnderParent(item.childRuns, parentRunId, run);
+        if (nextChildren !== item.childRuns) {
+          changed = true;
+          return { ...item, childRuns: nextChildren };
+        }
       }
       return item;
     });
+    return changed ? newItems : items;
   }
 
   let _msgSeq = 0;
@@ -184,12 +203,7 @@ export const useAgentStore = defineStore("agent", () => {
   }
 
   function setToken(nextToken) {
-    token.value = nextToken;
-    if (nextToken) {
-      localStorage.setItem("oda_token", nextToken);
-    } else {
-      localStorage.removeItem("oda_token");
-    }
+    token.value = nextToken || "";
   }
 
   function setWorkspaces(items) {

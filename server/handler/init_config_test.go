@@ -11,7 +11,7 @@ func TestEnsureSupportedBackendsRejectsUnsupportedProvider(t *testing.T) {
 	prev := config.Cfg
 	config.Cfg = &config.Config{
 		MetadataStore:       "sqlite",
-		StorageProvider:     "s3",
+		StorageProvider:     "unsupported_provider",
 		RunBackend:          "inprocess",
 		AnalysisStore:       "session_sqlite",
 		PythonArtifactStore: "executor_local",
@@ -23,7 +23,7 @@ func TestEnsureSupportedBackendsRejectsUnsupportedProvider(t *testing.T) {
 		if recovered == nil {
 			t.Fatal("expected unsupported backend panic")
 		}
-		if !strings.Contains(recovered.(string), "STORAGE_PROVIDER=s3") {
+		if !strings.Contains(recovered.(string), "STORAGE_PROVIDER=unsupported_provider") {
 			t.Fatalf("unexpected panic: %v", recovered)
 		}
 	}()

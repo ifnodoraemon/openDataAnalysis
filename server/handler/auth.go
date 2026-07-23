@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/ifnodoraemon/openDataAnalysis/auth"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 )
@@ -165,6 +166,8 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	setAuthCookie(w, token)
+
 	resp := map[string]interface{}{
 		"token": token,
 		"user": map[string]string{
@@ -181,6 +184,36 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func setAuthCookie(w http.ResponseWriter, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oda_token",
+		Value:    token,
+		Path:     "/",
+		MaxAge:   604800,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func clearAuthCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oda_token",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func LogoutHandler(w http.ResponseWriter, r *http.Request) {
+	clearAuthCookie(w)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func selectWorkspace(workspaces []domain.Workspace, workspaceID string) (domain.Workspace, error) {
@@ -237,6 +270,8 @@ func SwitchWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	setAuthCookie(w, token)
+
 	resp := map[string]interface{}{
 		"token": token,
 		"workspace": map[string]string{
@@ -245,5 +280,125 @@ func SwitchWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+type registerRequest struct {
+	Name          string `json:"name"`
+	Email         string `json:"email"`
+	Password      string `json:"password"`
+	WorkspaceName string `json:"workspaceName,omitempty"`
+}
+
+func RegisterHandler(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req registerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+	req.Name = strings.TrimSpace(req.Name)
+	req.Password = strings.TrimSpace(req.Password)
+
+	if req.Email == "" || req.Password == "" || req.Name == "" {
+		http.Error(w, "name, email, and password cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	if err := auth.ValidatePasswordStrength(req.Password); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	existing, err := userRepo.GetByEmail(r.Context(), req.Email)
+	if err == nil && existing != nil {
+		http.Error(w, "email already registered", http.StatusConflict)
+		return
+	}
+
+	passwordHash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		http.Error(w, "failed to process password", http.StatusInternalServerError)
+		return
+	}
+
+	now := time.Now()
+	userID := "usr_" + strings.ReplaceAll(uuid.New().String(), "-", "")[:12]
+	workspaceID := "ws_" + strings.ReplaceAll(uuid.New().String(), "-", "")[:12]
+	workspaceName := strings.TrimSpace(req.WorkspaceName)
+	if workspaceName == "" {
+		workspaceName = req.Name + "'s Workspace"
+	}
+
+	user := &domain.User{
+		ID:           userID,
+		Email:        req.Email,
+		PasswordHash: passwordHash,
+		Name:         req.Name,
+		Status:       domain.UserStatusActive,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+
+	if err := userRepo.Create(r.Context(), user); err != nil {
+		http.Error(w, "failed to create user", http.StatusInternalServerError)
+		return
+	}
+
+	workspace := &domain.Workspace{
+		ID:          workspaceID,
+		Name:        workspaceName,
+		Slug:        workspaceID,
+		OwnerUserID: userID,
+		Status:      domain.WorkspaceStatusActive,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	if err := workspaceRepo.CreateWorkspace(r.Context(), workspace); err != nil {
+		http.Error(w, "failed to create workspace", http.StatusInternalServerError)
+		return
+	}
+
+	member := &domain.WorkspaceMember{
+		WorkspaceID: workspaceID,
+		UserID:      userID,
+		Role:        domain.WorkspaceRoleOwner,
+		CreatedAt:   now,
+	}
+	_ = workspaceRepo.AddMember(r.Context(), member)
+
+	identity := auth.Identity{
+		UserID:      userID,
+		UserName:    req.Name,
+		UserEmail:   req.Email,
+		WorkspaceID: workspaceID,
+		Workspace:   workspaceName,
+	}
+	token, err := tokenManager.Sign(identity, 7*24*time.Hour)
+	if err != nil {
+		http.Error(w, "failed to generate token", http.StatusInternalServerError)
+		return
+	}
+
+	setAuthCookie(w, token)
+
+	resp := map[string]interface{}{
+		"token": token,
+		"user": map[string]string{
+			"id":    user.ID,
+			"name":  user.Name,
+			"email": user.Email,
+		},
+		"workspace": map[string]string{
+			"id":   workspace.ID,
+			"name": workspace.Name,
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(resp)
 }

@@ -7,8 +7,9 @@ type WorkspaceRole string
 
 const (
 	WorkspaceStatusActive WorkspaceStatus = "active"
-	WorkspaceRoleOwner    WorkspaceRole   = "owner"
-	WorkspaceRoleMember   WorkspaceRole   = "member"
+	WorkspaceRoleOwner  WorkspaceRole = "owner"
+	WorkspaceRoleAdmin  WorkspaceRole = "admin"
+	WorkspaceRoleMember WorkspaceRole = "member"
 )
 
 type Workspace struct {

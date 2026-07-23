@@ -1,3 +1,4 @@
+-- +goose Up
 create table data_sources (
   id varchar(64) primary key,
   workspace_id varchar(64) not null references workspaces(id),
@@ -16,7 +17,7 @@ create table source_configs (
   source_id varchar(64) primary key references data_sources(id) on delete cascade,
   connector_type varchar(64) not null,
   config_json jsonb not null default '{}',
-  credential_ciphertext bytea not null default decode('', 'hex'),
+  credential_ciphertext bytea not null default ''::bytea,
   last_tested_at timestamptz,
   last_test_status varchar(32) not null default '',
   last_error_message text,
@@ -125,3 +126,13 @@ create table audit_events (
 
 create index idx_audit_events_workspace on audit_events(workspace_id, created_at desc);
 create index idx_audit_events_resource on audit_events(resource_type, resource_id);
+
+-- +goose Down
+drop table if exists audit_events;
+drop table if exists semantic_assets;
+drop table if exists semantic_confirmations;
+drop table if exists semantic_profiles;
+drop table if exists session_source_bindings;
+drop table if exists source_snapshots;
+drop table if exists source_configs;
+drop table if exists data_sources;

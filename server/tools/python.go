@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/ifnodoraemon/openDataAnalysis/config"
 )
 
@@ -63,8 +64,10 @@ func (t *RunPythonTool) Parameters() json.RawMessage {
 }
 
 type pyExecRequest struct {
-	Code    string `json:"code"`
-	Timeout int    `json:"timeout"`
+	Code        string `json:"code"`
+	Timeout     int    `json:"timeout"`
+	SessionID   string `json:"session_id,omitempty"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
 }
 
 type pyExecResponse struct {
@@ -155,6 +158,9 @@ func (t *RunPythonTool) runHealthCheck(ctx context.Context, client *http.Client,
 		return err
 	}
 	execReq.Header.Set("Content-Type", "application/json")
+	if reqID := middleware.GetReqID(ctx); reqID != "" {
+		execReq.Header.Set("X-Request-ID", reqID)
+	}
 	execReq.Header.Set("X-Proxy-Token", proxyToken)
 	execResp, err := client.Do(execReq)
 	if err != nil {
@@ -191,25 +197,30 @@ func (t *RunPythonTool) Execute(args json.RawMessage) (string, error) {
 		params.Timeout = 30
 	}
 
-	endpoint := t.Endpoint()
-
-	reqBody, _ := json.Marshal(pyExecRequest{
-		Code:    params.Code,
-		Timeout: params.Timeout,
-	})
-
 	execCtx := t.childCtx
 	if execCtx == nil {
 		execCtx = context.Background()
 	}
+	meta := ExecutionMetadataFromContext(execCtx)
+
+	reqBody, _ := json.Marshal(pyExecRequest{
+		Code:        params.Code,
+		Timeout:     params.Timeout,
+		SessionID:   meta.SessionID,
+		WorkspaceID: meta.WorkspaceID,
+	})
 	ctx, cancel := context.WithTimeout(execCtx, time.Duration(params.Timeout+5)*time.Second)
 	defer cancel()
 
+	endpoint := t.Endpoint()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/execute", bytes.NewReader(reqBody))
 	if err != nil {
 		return "", fmt.Errorf("failed to build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if reqID := middleware.GetReqID(execCtx); reqID != "" {
+		req.Header.Set("X-Request-ID", reqID)
+	}
 	proxyToken := configuredProxyToken()
 	if proxyToken == "" {
 		return "", fmt.Errorf("PROXY_TOKEN is not configured")
@@ -233,7 +244,7 @@ func (t *RunPythonTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	apiBaseURL := configuredPublicAPIBaseURL()
-	meta := ExecutionMetadataFromContext(execCtx)
+	meta = ExecutionMetadataFromContext(execCtx)
 	for i, f := range result.Files {
 		result.Files[i] = buildPythonFileURL(apiBaseURL, f, meta)
 	}

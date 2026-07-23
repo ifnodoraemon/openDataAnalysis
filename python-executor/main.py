@@ -14,7 +14,6 @@ Python Executor MCP Server
 8. 文件系统隔离：open() 限制在工作目录内，路径使用 is_relative_to 校验
 """
 
-import ast
 import hmac
 import io
 import logging
@@ -30,6 +29,13 @@ import multiprocessing
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+
+from sandbox import (
+    SecurityViolation,
+    check_code,
+    create_sandboxed_builtins,
+    sanitize_error,
+)
 
 for _thread_env in (
     "OMP_NUM_THREADS",
@@ -110,9 +116,18 @@ plt.rcParams['axes.unicode_minus'] = False
     ns["WORK_DIR"] = work_dir
 
 
+def sanitize_path_component(val: str | None) -> str:
+    if not val:
+        return "common"
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]", "_", val.strip())
+    return cleaned or "common"
+
+
 class ExecuteRequest(BaseModel):
     code: str
     timeout: int = 30
+    session_id: str | None = None
+    workspace_id: str | None = None
 
     @field_validator("timeout")
     @classmethod
@@ -232,7 +247,9 @@ async def execute_tool(request: Request) -> dict:
     timeout = args.get("timeout", 30)
 
     req = ExecuteRequest(code=code, timeout=timeout)
-    return await execute_code(req, request)
+    trace_id = request.headers.get("X-Request-ID", "-")
+    async with _concurrency_semaphore:
+        return await asyncio.get_event_loop().run_in_executor(None, _execute_sync, req, trace_id)
 
 
 def _apply_resource_limits() -> None:
@@ -293,8 +310,20 @@ def run_in_process(code: str, req_dir_path: str, q: multiprocessing.Queue) -> No
 
     _apply_resource_limits()
 
+    try:
+        check_code(code)
+    except SecurityViolation as e:
+        q.put({
+            "success": False,
+            "stdout": "",
+            "stderr": "",
+            "error": f"Security violation: {e}",
+        })
+        return
+
     local_ns: dict = {}
     init_namespace(local_ns, str(req_dir))
+    local_ns["__builtins__"] = create_sandboxed_builtins(req_dir)
 
     stdout_buf = io.StringIO()
     stderr_buf = io.StringIO()
@@ -309,7 +338,9 @@ def run_in_process(code: str, req_dir_path: str, q: multiprocessing.Queue) -> No
             exec(code, local_ns)
     except Exception as e:
         success = False
-        error = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        error = sanitize_error(
+            f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        )
 
     try:
         import matplotlib.pyplot as plt
@@ -328,14 +359,15 @@ def run_in_process(code: str, req_dir_path: str, q: multiprocessing.Queue) -> No
     )
 
 
-def _collect_output_files(req_dir: Path, req_id: str) -> list[str]:
+def _collect_output_files(req_dir: Path, session_dir: Path, req_id: str) -> list[str]:
     if not req_dir.exists():
         return []
     new_files = []
+    session_dir.mkdir(parents=True, exist_ok=True)
     for f in req_dir.glob("*"):
         if f.is_file():
             dest_name = f"{req_id}_{f.name}"
-            shutil.move(str(f), str(WORK_DIR / dest_name))
+            shutil.move(str(f), str(session_dir / dest_name))
             new_files.append(dest_name)
     shutil.rmtree(req_dir, ignore_errors=True)
     return new_files
@@ -348,15 +380,21 @@ async def execute_code(req: ExecuteRequest, request: Request):
     if _concurrency_semaphore.locked():
         raise HTTPException(429, "Too many concurrent executions. Please retry later.")
 
+    trace_id = request.headers.get("X-Request-ID", "-")
     async with _concurrency_semaphore:
-        return await asyncio.get_event_loop().run_in_executor(None, _execute_sync, req, request)
+        return await asyncio.get_event_loop().run_in_executor(None, _execute_sync, req, trace_id)
 
 
-def _execute_sync(req: ExecuteRequest, request: Request) -> ExecuteResponse:
+def _execute_sync(req: ExecuteRequest, trace_id: str) -> ExecuteResponse:
     start = time.time()
 
+    ws_comp = sanitize_path_component(req.workspace_id)
+    sess_comp = sanitize_path_component(req.session_id)
+    session_dir = WORK_DIR / ws_comp / sess_comp
+    session_dir.mkdir(parents=True, exist_ok=True)
+
     req_id = f"req_{uuid.uuid4().hex[:8]}"
-    req_dir = WORK_DIR / req_id
+    req_dir = session_dir / req_id
     req_dir.mkdir(parents=True, exist_ok=True)
 
     q: multiprocessing.Queue = multiprocessing.Queue()
@@ -385,14 +423,16 @@ def _execute_sync(req: ExecuteRequest, request: Request) -> ExecuteResponse:
     except queue.Empty:
         result = CRASH_RESULT
 
-    new_files = _collect_output_files(req_dir, req_id)
+    new_files = _collect_output_files(req_dir, session_dir, req_id)
     duration_ms = int((time.time() - start) * 1000)
     raw_stdout = result["stdout"]
     raw_stderr = result["stderr"]
     truncated = len(raw_stdout) > STDOUT_LIMIT or len(raw_stderr) > STDERR_LIMIT
 
     logger.info(
-        "execute success=%s duration_ms=%d files=%d stdout_chars=%d stderr_chars=%d",
+        "execute trace_id=%s req_id=%s success=%s duration_ms=%d files=%d stdout_chars=%d stderr_chars=%d",
+        trace_id,
+        req_id,
         result["success"],
         duration_ms,
         len(new_files),

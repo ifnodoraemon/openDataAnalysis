@@ -100,7 +100,10 @@ export function useWebSocket() {
 
   async function bootstrap() {
     if (!store.token) throw new Error("未登录");
-    const res = await fetch("/api/bootstrap", { headers: authHeaders() });
+    const res = await fetch("/api/bootstrap", {
+      headers: authHeaders(),
+      credentials: "include",
+    });
     if (!res.ok) {
       if (res.status === 401) {
         disconnect();
@@ -116,13 +119,23 @@ export function useWebSocket() {
       const session = await createSession({ refreshSessions: true });
       latestRun = session?.latestRun || null;
     }
-    if (
-      !data.runtimeState?.report_html &&
-      (latestRun?.runKind === "report" ||
-        latestRun?.reportFileId ||
-        latestRun?.report)
-    ) {
-      await tryLoadRunReport(latestRun.id);
+    if (latestRun?.id) {
+      await openRun(latestRun.id);
+    }
+  }
+
+  async function loadRunReport(runId) {
+    if (!runId) return;
+    try {
+      const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/report`, {
+        headers: authHeaders(),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        store.updateReport(data.html || "");
+      }
+    } catch (err) {
+      console.error("Failed to load run report:", err);
     }
   }
 
@@ -153,7 +166,8 @@ export function useWebSocket() {
   async function createSession({ refreshSessions = true } = {}) {
     const res = await fetch("/api/sessions", {
       method: "POST",
-      headers: authHeaders(),
+      headers: { ...authHeaders() },
+      credentials: "include",
     });
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
@@ -185,7 +199,10 @@ export function useWebSocket() {
   }
 
   async function loadSessions() {
-    const res = await fetch("/api/sessions", { headers: authHeaders() });
+    const res = await fetch("/api/sessions", {
+      headers: authHeaders(),
+      credentials: "include",
+    });
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
     store.setSessions(data.sessions || []);
@@ -195,6 +212,7 @@ export function useWebSocket() {
   async function openSession(sessionId) {
     const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
       headers: authHeaders(),
+      credentials: "include",
     });
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
@@ -205,13 +223,8 @@ export function useWebSocket() {
       data.runtimeState,
     );
     try {
-      if (
-        !data.runtimeState?.report_html &&
-        (latestRun?.runKind === "report" ||
-          latestRun?.reportFileId ||
-          latestRun?.report)
-      ) {
-        await tryLoadRunReport(latestRun.id);
+      if (latestRun?.id) {
+        await openRun(latestRun.id);
       }
     } finally {
       await connect();
@@ -342,7 +355,7 @@ export function useWebSocket() {
     if (store.workspace?.id) params.set("workspace_id", store.workspace.id);
     const sessionQuery = params.toString() ? `?${params.toString()}` : "";
     const url = `${protocol}//${location.host}/ws${sessionQuery}`;
-    const socket = new WebSocket(url, ["mcp-token", `token-${store.token}`]);
+    const socket = new WebSocket(url);
     wsInstance = socket;
     store.setConnectionState("connecting");
     connected.value = false;
@@ -450,6 +463,7 @@ export function useWebSocket() {
     const res = await fetch("/api/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       body: JSON.stringify({ email, password, workspaceId }),
     });
     if (!res.ok) throw new Error(await res.text());
@@ -466,6 +480,7 @@ export function useWebSocket() {
     const res = await fetch("/api/auth/switch-workspace", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
+      credentials: "include",
       body: JSON.stringify({ workspaceId }),
     });
     if (!res.ok) throw new Error(await res.text());
