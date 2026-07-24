@@ -9,7 +9,14 @@
   </div>
   <LoginScreen v-else-if="!isAuthenticated" />
   <div v-else class="app">
-    <Sidebar v-if="isSidebarOpen" @toggle="toggleSidebar" />
+    <Sidebar
+      v-if="isSidebarOpen"
+      @toggle="toggleSidebar"
+      @open-data-sources="showSourcesDrawer = true"
+      @open-semantic="showSemanticModal = true"
+      @open-reports="handleOpenReports"
+      @open-workspace-settings="showWorkspaceModal = true"
+    />
     <div class="main-content">
       <div class="chat-area" :style="{ width: leftWidth + '%' }">
         <div class="top-bar-minimal">
@@ -21,7 +28,7 @@
           >
             <span class="icon">▤</span>
           </button>
-          <span class="logo">📊 数据分析智能体</span>
+          <span class="logo">📊 Open Data Analysis</span>
         </div>
         <AgentPanel class="panel-left" />
         <InputBar class="input-bar-container" />
@@ -43,6 +50,26 @@
         :style="{ width: 100 - leftWidth + '%' }"
       />
     </div>
+
+    <!-- Modals & Drawers -->
+    <DataSourceDrawer
+      :open="showSourcesDrawer"
+      :sessionId="store.sessionId"
+      :sessionSources="dataSourceStore.sessionSources"
+      :workspaceDataSources="dataSourceStore.workspaceDataSources"
+      :pendingProfiles="[]"
+      @close="showSourcesDrawer = false"
+    />
+
+    <WorkspaceSettingsModal
+      :open="showWorkspaceModal"
+      @close="showWorkspaceModal = false"
+    />
+
+    <SemanticProfilesModal
+      :open="showSemanticModal"
+      @close="showSemanticModal = false"
+    />
   </div>
 </template>
 
@@ -50,17 +77,29 @@
 import { computed, ref, onMounted, watch } from "vue";
 import { useWebSocket } from "./composables/useWebSocket.js";
 import { useAgentStore } from "./stores/agent.js";
+import { useDataSourceStore } from "./stores/datasource.js";
 import Sidebar from "./components/layout/Sidebar.vue";
 import AgentPanel from "./components/agent/AgentPanel.vue";
 import ReportPreview from "./components/report/ReportPreview.vue";
 import InputBar from "./components/layout/InputBar.vue";
 import LoginScreen from "./components/auth/LoginScreen.vue";
+import DataSourceDrawer from "./components/datasource/DataSourceDrawer.vue";
+import WorkspaceSettingsModal from "./components/layout/WorkspaceSettingsModal.vue";
+import SemanticProfilesModal from "./components/layout/SemanticProfilesModal.vue";
 
 const { initializeApp } = useWebSocket();
 const store = useAgentStore();
+const dataSourceStore = useDataSourceStore();
+
 const leftWidth = ref(50);
 const isDragging = ref(false);
 const isSidebarOpen = ref(true);
+
+// Modals state
+const showSourcesDrawer = ref(false);
+const showWorkspaceModal = ref(false);
+const showSemanticModal = ref(false);
+
 const isAuthenticated = computed(() => !!store.token && !!store.user);
 const isRestoring = computed(() => store.bootstrapState === "loading");
 const hasRestoreError = computed(
@@ -95,6 +134,13 @@ function retryInit() {
 
 function toggleSidebar() {
   isSidebarOpen.value = !isSidebarOpen.value;
+}
+
+function handleOpenReports() {
+  // If report preview pane is narrow, adjust width for report viewing
+  if (leftWidth.value > 50) {
+    leftWidth.value = 40;
+  }
 }
 
 function startDrag(e) {
@@ -239,7 +285,6 @@ function handleSplitterKey(e) {
   padding: 16px;
   background: var(--bg-primary);
   border-top: none;
-  /* Instead of a full-width border, we use background. Let AgentPanel handle its bottom padding. */
   max-width: 800px;
   margin: 0 auto;
   width: 100%;

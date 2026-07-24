@@ -11,12 +11,35 @@
     </div>
 
     <div class="sidebar-content">
+      <!-- Feature Navigation Section -->
+      <div class="nav-group">
+        <div class="group-title">核心功能</div>
+        <button class="nav-item" @click="$emit('open-data-sources')">
+          <span class="nav-icon">📁</span>
+          <span class="nav-text">数据源管理</span>
+          <span class="badge" v-if="sourceCount > 0">{{ sourceCount }}</span>
+        </button>
+        <button class="nav-item" @click="$emit('open-semantic')">
+          <span class="nav-icon">🧠</span>
+          <span class="nav-text">语义模型与指标</span>
+        </button>
+        <button class="nav-item" @click="$emit('open-reports')">
+          <span class="nav-icon">📜</span>
+          <span class="nav-text">分析报告库</span>
+        </button>
+        <button class="nav-item" @click="$emit('open-workspace-settings')">
+          <span class="nav-icon">⚙️</span>
+          <span class="nav-text">工作区与团队设置</span>
+        </button>
+      </div>
+
+      <!-- Session History Section -->
       <div v-if="sessions.length === 0" class="empty-sessions">
-        暂无对话记录
+        暂无历史对话
       </div>
       <div class="session-list" v-else>
         <div class="session-group">
-          <div class="group-title">历史记录</div>
+          <div class="group-title">历史分析对话</div>
           <div
             v-for="session in sessions"
             :key="session.id"
@@ -115,8 +138,15 @@
 import { computed, ref, nextTick } from "vue";
 import { useWebSocket } from "../../composables/useWebSocket.js";
 import { useAgentStore } from "../../stores/agent.js";
+import { useDataSourceStore } from "../../stores/datasource.js";
 
-defineEmits(["toggle"]);
+defineEmits([
+  "toggle",
+  "open-data-sources",
+  "open-semantic",
+  "open-reports",
+  "open-workspace-settings",
+]);
 
 const {
   connected,
@@ -128,7 +158,9 @@ const {
   deleteSession,
 } = useWebSocket();
 const store = useAgentStore();
+const dataSourceStore = useDataSourceStore();
 
+const sourceCount = computed(() => dataSourceStore.workspaceDataSources?.length || 0);
 const workspaceOptions = computed(() => store.workspaces || []);
 const workspaceId = computed(() => store.workspace?.id || "");
 const sessions = computed(() => store.sessions || []);
@@ -302,6 +334,55 @@ function logout() {
   text-align: center;
   color: var(--text-muted);
   font-size: 0.85rem;
+}
+
+.nav-group {
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.nav-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  font-size: 0.86rem;
+  font-weight: 500;
+  transition: all var(--transition);
+  margin-bottom: 2px;
+}
+
+.nav-item:hover {
+  background-color: var(--bg-hover);
+}
+
+.nav-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.nav-text {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.badge {
+  background: rgba(37, 99, 235, 0.12);
+  color: var(--accent-blue);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 999px;
 }
 
 .session-group {

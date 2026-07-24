@@ -476,6 +476,23 @@ export function useWebSocket() {
     store.setBootstrapState("idle");
   }
 
+  async function register(name, email, password, workspaceName = "") {
+    const res = await fetch("/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ name, email, password, workspaceName }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    store.setToken(data.token);
+    store.setIdentity(data.user, data.workspace);
+    store.setWorkspaces(data.workspaces || [data.workspace]);
+    store.resetAnalysis();
+    store.setSessions([]);
+    store.setBootstrapState("idle");
+  }
+
   async function switchWorkspace(workspaceId) {
     const res = await fetch("/api/auth/switch-workspace", {
       method: "POST",
@@ -613,6 +630,7 @@ export function useWebSocket() {
     initializeApp,
     connect,
     login,
+    register,
     switchWorkspace,
     loadSessions,
     openSession,
