@@ -51,7 +51,7 @@ func main() {
 		protected.Use(handler.AuthMiddleware)
 		protected.Use(handler.UserRateLimitMiddleware(120, 30))
 
-		protected.Get("/ws", handler.WSHandler)
+		protected.Get("/api/sse", handler.SSEHandler)
 
 		protected.Group(func(upload chi.Router) {
 			upload.Use(handler.MaxBodySizeMiddleware(100 << 20))
@@ -62,6 +62,9 @@ func main() {
 
 		protected.Group(func(api chi.Router) {
 			api.Use(handler.MaxBodySizeMiddleware(1 << 20))
+			api.Post("/api/sessions/{sessionID}/chat", handler.ChatHandler)
+			api.Post("/api/runs/{runID}/cancel", handler.CancelRunHandler)
+			api.Post("/api/runs/{runID}/input", handler.SubmitUserInputHandler)
 			api.Post("/api/auth/switch-workspace", handler.SwitchWorkspaceHandler)
 			api.Get("/api/bootstrap", handler.BootstrapHandler)
 			api.Post("/api/sessions", handler.CreateSessionHandler)

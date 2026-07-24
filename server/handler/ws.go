@@ -973,7 +973,10 @@ func sendSessionEvent(conn *websocket.Conn, mu *sync.Mutex, sessionID, runID str
 	if runID != "" && event.RunID == "" {
 		event.RunID = runID
 	}
-	sendEvent(conn, mu, event)
+	if conn != nil && mu != nil {
+		sendEvent(conn, mu, event)
+	}
+	GlobalSSEBroker.Broadcast(sessionID, event)
 }
 
 func sendEvent(conn *websocket.Conn, mu *sync.Mutex, event agent.WSEvent) {
