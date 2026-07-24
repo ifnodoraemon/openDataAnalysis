@@ -1,7 +1,7 @@
 <template>
   <div v-if="isRestoring" class="app-loading">
     <div class="loading-spinner"></div>
-    <span>正在恢复工作区环境...</span>
+    <span>正在初始化工作区...</span>
   </div>
   <div v-else-if="hasRestoreError" class="app-loading error-state">
     <div class="error-card">
@@ -12,31 +12,35 @@
     </div>
   </div>
   <LoginScreen v-else-if="!isAuthenticated" />
-  <div v-else class="app">
-    <!-- Left Navigation Rail -->
-    <Sidebar
-      v-if="isSidebarOpen"
-      @toggle="toggleSidebar"
+
+  <!-- 3-Column Studio Workspace -->
+  <div v-else class="app-workspace">
+    <!-- Col 1: Slim Feature Icon Rail (56px) -->
+    <IconRail
+      :isHistoryOpen="isHistoryOpen"
+      @toggle-history="isHistoryOpen = !isHistoryOpen"
       @open-data-sources="showSourcesDrawer = true"
       @open-semantic="showSemanticModal = true"
       @open-reports="handleOpenReports"
       @open-workspace-settings="showWorkspaceModal = true"
     />
 
-    <!-- Main Active Workspace -->
+    <!-- Col 2: Collapsible History Conversations Pane (250px) -->
+    <HistoryPanel v-if="isHistoryOpen" />
+
+    <!-- Col 3: Main Dual-Pane Workspace (Chat + Interactive Studio) -->
     <div class="main-content">
-      <!-- Center: AI Agent Chat & Reasoning Canvas -->
+      <!-- Center: AI Agent Chat & Reasoning Panel -->
       <div class="chat-area" :style="{ width: leftWidth + '%' }">
         <!-- Top Workspace Bar -->
         <header class="top-workspace-bar">
           <div class="bar-left">
             <button
-              v-if="!isSidebarOpen"
-              class="icon-btn"
-              @click="toggleSidebar"
-              title="展开侧边栏"
+              class="icon-toggle-btn"
+              @click="isHistoryOpen = !isHistoryOpen"
+              title="切换历史对话列"
             >
-              <span>▤</span>
+              <span>{{ isHistoryOpen ? '◀' : '▶' }}</span>
             </button>
             <div class="session-badge">
               <span class="session-dot"></span>
@@ -84,7 +88,7 @@
         <!-- Center Agent Messages Panel -->
         <AgentPanel class="panel-left" />
 
-        <!-- Input Box Area -->
+        <!-- Input Bar Container -->
         <InputBar class="input-bar-container" />
       </div>
 
@@ -104,7 +108,7 @@
         <div class="splitter-line"></div>
       </div>
 
-      <!-- Right Panel: Data & Report Preview Studio -->
+      <!-- Right Panel: Data & Report Studio Canvas -->
       <ReportPreview
         class="panel-right"
         :style="{ width: 100 - leftWidth + '%' }"
@@ -138,7 +142,8 @@ import { computed, ref, onMounted, watch } from "vue";
 import { useWebSocket } from "./composables/useWebSocket.js";
 import { useAgentStore } from "./stores/agent.js";
 import { useDataSourceStore } from "./stores/datasource.js";
-import Sidebar from "./components/layout/Sidebar.vue";
+import IconRail from "./components/layout/IconRail.vue";
+import HistoryPanel from "./components/layout/HistoryPanel.vue";
 import AgentPanel from "./components/agent/AgentPanel.vue";
 import ReportPreview from "./components/report/ReportPreview.vue";
 import InputBar from "./components/layout/InputBar.vue";
@@ -153,7 +158,7 @@ const dataSourceStore = useDataSourceStore();
 
 const leftWidth = ref(48);
 const isDragging = ref(false);
-const isSidebarOpen = ref(true);
+const isHistoryOpen = ref(true);
 
 const showSourcesDrawer = ref(false);
 const showWorkspaceModal = ref(false);
@@ -195,10 +200,6 @@ function initApp() {
 
 function retryInit() {
   void initApp();
-}
-
-function toggleSidebar() {
-  isSidebarOpen.value = !isSidebarOpen.value;
 }
 
 function handleOpenReports() {
@@ -247,16 +248,16 @@ function handleSplitterKey(e) {
   align-items: center;
   justify-content: center;
   gap: 16px;
-  background: var(--bg-primary);
-  color: var(--text-secondary);
+  background: var(--bg-app);
+  color: var(--text-sub);
   font-size: 0.9rem;
 }
 
 .loading-spinner {
   width: 32px;
   height: 32px;
-  border: 3px solid var(--border);
-  border-top-color: var(--accent-blue);
+  border: 3px solid var(--border-strong);
+  border-top-color: var(--primary-blue);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -268,9 +269,9 @@ function handleSplitterKey(e) {
 .error-card {
   max-width: 400px;
   padding: 24px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: 14px;
-  background: var(--bg-secondary);
+  background: var(--bg-card);
   text-align: center;
   display: flex;
   flex-direction: column;
@@ -285,11 +286,11 @@ function handleSplitterKey(e) {
 .error-card .title {
   font-size: 1rem;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--text-main);
 }
 
 .error-message {
-  color: var(--accent-red);
+  color: var(--accent-rose);
   font-size: 0.85rem;
 }
 
@@ -297,16 +298,17 @@ function handleSplitterKey(e) {
   padding: 8px 20px;
   border: none;
   border-radius: 8px;
-  background: var(--accent-blue);
+  background: var(--primary-blue);
   color: white;
   font-weight: 600;
   cursor: pointer;
 }
 
-.app {
+.app-workspace {
   height: 100vh;
+  width: 100vw;
   display: flex;
-  background: var(--bg-primary);
+  background: var(--bg-app);
   overflow: hidden;
 }
 
@@ -315,7 +317,7 @@ function handleSplitterKey(e) {
   display: flex;
   overflow: hidden;
   position: relative;
-  background: var(--bg-primary);
+  background: var(--bg-workspace);
 }
 
 .chat-area {
@@ -323,19 +325,18 @@ function handleSplitterKey(e) {
   flex-direction: column;
   height: 100%;
   min-width: 320px;
-  background: var(--bg-primary);
-  border-right: 1px solid var(--border);
+  background: var(--bg-workspace);
+  border-right: 1px solid var(--border-subtle);
 }
 
 .top-workspace-bar {
-  height: var(--nav-height);
+  height: var(--topbar-height);
   padding: 0 16px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid var(--border);
-  background: rgba(11, 15, 25, 0.9);
-  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-workspace);
   flex-shrink: 0;
   z-index: 5;
 }
@@ -343,32 +344,32 @@ function handleSplitterKey(e) {
 .bar-left {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 }
 
-.icon-btn {
+.icon-toggle-btn {
   background: transparent;
-  border: none;
-  color: var(--text-secondary);
-  font-size: 1.1rem;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-sub);
+  font-size: 0.75rem;
   cursor: pointer;
-  padding: 4px 6px;
+  padding: 3px 6px;
   border-radius: 6px;
-  transition: all var(--transition);
+  transition: all var(--transition-fast);
 }
 
-.icon-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
+.icon-toggle-btn:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-main);
 }
 
 .session-badge {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--border);
+  padding: 3px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
   border-radius: 20px;
 }
 
@@ -376,15 +377,15 @@ function handleSplitterKey(e) {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--accent-blue);
-  box-shadow: 0 0 6px var(--accent-blue);
+  background: var(--primary-blue);
+  box-shadow: 0 0 6px var(--primary-blue);
 }
 
 .session-title-text {
-  font-size: 0.83rem;
+  font-size: 0.82rem;
   font-weight: 600;
-  color: var(--text-primary);
-  max-width: 220px;
+  color: var(--text-main);
+  max-width: 200px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -399,10 +400,10 @@ function handleSplitterKey(e) {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 0.76rem;
+  font-size: 0.75rem;
   font-weight: 500;
-  color: var(--text-secondary);
-  padding: 4px 12px;
+  color: var(--text-sub);
+  padding: 3px 10px;
   background: rgba(59, 130, 246, 0.08);
   border: 1px solid rgba(59, 130, 246, 0.2);
   border-radius: 20px;
@@ -422,44 +423,44 @@ function handleSplitterKey(e) {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--text-secondary);
+  padding: 4px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  color: var(--text-sub);
   font-size: 0.78rem;
   font-weight: 500;
   cursor: pointer;
-  transition: all var(--transition);
+  transition: all var(--transition-fast);
 }
 
 .quick-tool-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-  border-color: var(--border-light);
+  background: var(--bg-card-hover);
+  color: var(--text-main);
+  border-color: var(--border-strong);
 }
 
 .tool-count {
-  background: var(--accent-blue);
+  background: var(--primary-blue);
   color: white;
-  font-size: 0.68rem;
+  font-size: 0.65rem;
   font-weight: 700;
   padding: 1px 5px;
-  border-radius: 10px;
+  border-radius: 8px;
 }
 
 .panel-left {
   flex: 1;
   overflow-y: auto;
-  padding: 16px 24px;
+  padding: 16px 20px;
   max-width: 880px;
   margin: 0 auto;
   width: 100%;
 }
 
 .input-bar-container {
-  padding: 16px 24px;
-  background: var(--bg-primary);
+  padding: 12px 20px;
+  background: var(--bg-workspace);
   max-width: 880px;
   margin: 0 auto;
   width: 100%;
@@ -471,12 +472,12 @@ function handleSplitterKey(e) {
 }
 
 .splitter {
-  width: 6px;
-  background: var(--bg-secondary);
-  border-left: 1px solid var(--border);
-  border-right: 1px solid var(--border);
+  width: 5px;
+  background: var(--bg-app);
+  border-left: 1px solid var(--border-subtle);
+  border-right: 1px solid var(--border-subtle);
   cursor: col-resize;
-  transition: background var(--transition);
+  transition: background var(--transition-fast);
   flex-shrink: 0;
   z-index: 10;
   display: flex;
@@ -489,13 +490,13 @@ function handleSplitterKey(e) {
   height: 24px;
   background: var(--text-muted);
   border-radius: 2px;
-  opacity: 0.5;
+  opacity: 0.4;
 }
 
 .splitter:hover,
 .splitter.dragging {
-  background: var(--accent-blue);
-  border-color: var(--accent-blue);
+  background: var(--primary-blue);
+  border-color: var(--primary-blue);
 }
 
 .splitter:hover .splitter-line,
