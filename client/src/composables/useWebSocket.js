@@ -351,6 +351,7 @@ export function useWebSocket() {
     clearReconnectTimer();
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const params = new URLSearchParams();
+    if (store.token) params.set("token", store.token);
     if (store.sessionId) params.set("session_id", store.sessionId);
     if (store.workspace?.id) params.set("workspace_id", store.workspace.id);
     const sessionQuery = params.toString() ? `?${params.toString()}` : "";

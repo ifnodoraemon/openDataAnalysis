@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
+import { useAgentStore } from "./agent.js";
 
 export const useDataSourceStore = defineStore("dataSource", () => {
   const sessionSources = ref([]);
@@ -206,6 +207,9 @@ export const useDataSourceStore = defineStore("dataSource", () => {
         headers: { ...getAuthHeaders(), ...headers },
       });
       if (!res.ok) {
+        if (res.status === 401) {
+          useAgentStore().logout();
+        }
         return { ok: false, error: await readResponseError(res, fallback) };
       }
       return { ok: true, data: await readResponseJSON(res) };
