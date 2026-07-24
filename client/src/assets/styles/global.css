@@ -1,28 +1,39 @@
 :root {
-  /* 颜色 (浅色主题) */
-  --bg-primary: #ffffff;
-  --bg-secondary: #f9f9f9;
-  --bg-tertiary: #f4f4f4;
-  --bg-card: #ffffff;
-  --bg-hover: #ececec;
-  --border: #e5e5e5;
-  --border-light: #f0f0f0;
-  --text-primary: #0d0d0d;
-  --text-secondary: #666666;
-  --text-muted: #999999;
-  --accent-blue: #2563eb;
-  --accent-green: #16a34a;
-  --accent-orange: #d97706;
-  --accent-red: #dc2626;
-  --accent-purple: #9333ea;
-  /* 研报面板 */
-  --report-bg: #ffffff;
-  --report-text: #1a202c;
-  /* 间距 */
-  --nav-height: 48px;
+  /* Modern Dark / Glassmorphic Theme Tokens */
+  --bg-primary: #0b0f19;
+  --bg-secondary: #111827;
+  --bg-tertiary: #1f2937;
+  --bg-card: rgba(17, 24, 39, 0.7);
+  --bg-card-hover: rgba(31, 41, 55, 0.8);
+  --bg-hover: rgba(255, 255, 255, 0.07);
+  --border: rgba(255, 255, 255, 0.09);
+  --border-light: rgba(255, 255, 255, 0.16);
+  --border-glow: rgba(59, 130, 246, 0.4);
+
+  --text-primary: #f9fafb;
+  --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+
+  --accent-blue: #3b82f6;
+  --accent-blue-glow: rgba(59, 130, 246, 0.25);
+  --accent-cyan: #06b6d4;
+  --accent-green: #10b981;
+  --accent-orange: #f59e0b;
+  --accent-red: #ef4444;
+  --accent-purple: #8b5cf6;
+
+  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6);
+  --shadow-glow: 0 0 24px rgba(59, 130, 246, 0.2);
+
+  --glass-bg: rgba(11, 15, 25, 0.8);
+  --glass-border: 1px solid rgba(255, 255, 255, 0.08);
+  --backdrop-blur: blur(16px);
+
+  --nav-height: 52px;
   --input-height: 72px;
-  /* 动画 */
-  --transition: 0.2s ease;
+  --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 * {
@@ -32,16 +43,12 @@
 }
 
 body {
-  font-family:
-    "Inter",
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   background: var(--bg-primary);
   color: var(--text-primary);
   overflow: hidden;
   height: 100vh;
+  -webkit-font-smoothing: antialiased;
 }
 
 #app {
@@ -50,26 +57,27 @@ body {
   flex-direction: column;
 }
 
-/* 滚动条 */
+/* 滚动条美化 */
 ::-webkit-scrollbar {
   width: 6px;
+  height: 6px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
+  background: rgba(255, 255, 255, 0.3);
 }
 
-/* 动画 */
-@keyframes slideIn {
+/* 动画效果 */
+@keyframes slideUp {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(12px);
   }
   to {
     opacity: 1;
@@ -77,13 +85,12 @@ body {
   }
 }
 
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 0.4;
+@keyframes pulseGlow {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(59, 130, 246, 0.3);
   }
   50% {
-    opacity: 1;
+    box-shadow: 0 0 20px rgba(59, 130, 246, 0.6);
   }
 }
 
@@ -94,10 +101,10 @@ body {
 }
 
 .fade-enter-active {
-  animation: slideIn 0.3s ease;
+  animation: slideUp 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .fade-leave-active {
-  transition: opacity 0.2s;
+  transition: opacity 0.15s ease;
 }
 .fade-leave-to {
   opacity: 0;

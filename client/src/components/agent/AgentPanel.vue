@@ -2,36 +2,78 @@
   <div class="agent-panel">
     <div v-if="activeRun || selectedRun" class="run-summary">
       <span v-if="activeRun" class="summary-pill live">
-        正在执行
-        {{
-          truncate(
-            activeRun.summary || activeRun.inputMessage || activeRun.id,
-            36,
-          )
-        }}
+        ⚡ 正在运行: {{ truncate(activeRun.summary || activeRun.inputMessage || activeRun.id, 32) }}
       </span>
-      <span
-        v-if="selectedRun && selectedRun.id !== activeRun?.id"
-        class="summary-pill history"
-      >
-        当前查看历史任务
-        {{
-          truncate(
-            selectedRun.summary || selectedRun.inputMessage || selectedRun.id,
-            36,
-          )
-        }}
+      <span v-if="selectedRun && selectedRun.id !== activeRun?.id" class="summary-pill history">
+        🔍 查看历史运行: {{ truncate(selectedRun.summary || selectedRun.inputMessage || selectedRun.id, 32) }}
       </span>
     </div>
+
+    <!-- Agent Execution Accordions -->
     <RunTree />
     <WorkingMemoryPanel />
     <SubgoalTree />
+
+    <!-- Chat Messages Stream -->
     <div class="messages" ref="messagesEl">
-      <div v-if="messages.length === 0" class="empty-state">
-        <div class="empty-icon">🔍</div>
-        <p>添加数据源，输入分析需求</p>
-        <p class="empty-hint">Agent 会基于目标与状态自主分析并组织输出</p>
+      <!-- Empty Hero Welcome Card Grid -->
+      <div v-if="messages.length === 0" class="hero-welcome">
+        <div class="hero-header">
+          <div class="hero-icon">✨</div>
+          <h2 class="hero-title">OpenDataAnalysis 数据智能助手</h2>
+          <p class="hero-subtitle">
+            自主执行数据关联、SQL / Python 分析、语义建模及可视化研报生成
+          </p>
+        </div>
+
+        <div class="quick-cards-grid">
+          <button
+            class="preset-card"
+            @click="sendPresetPrompt('请对当前工作区的数据源进行整体概览分析，输出关键数据特征与分布趋势。')"
+          >
+            <div class="card-icon blue">📊</div>
+            <div class="card-content">
+              <span class="card-label">全量数据特征探索</span>
+              <span class="card-desc">自动扫描数据集，概览行数、指标分布与核心特征</span>
+            </div>
+          </button>
+
+          <button
+            class="preset-card"
+            @click="sendPresetPrompt('自动检测当前数据集的语义指标，识别数据表主键、时间维度与计算口径。')"
+          >
+            <div class="card-icon purple">🧠</div>
+            <div class="card-content">
+              <span class="card-label">语义建模与指标提炼</span>
+              <span class="card-desc">构建符合企业口径的统一语义层与确认规则</span>
+            </div>
+          </button>
+
+          <button
+            class="preset-card"
+            @click="sendPresetPrompt('分析数据中的缺失值、离群点与异常波动，并给出数据质量评估报告。')"
+          >
+            <div class="card-icon orange">🔍</div>
+            <div class="card-content">
+              <span class="card-label">数据质量与异常诊断</span>
+              <span class="card-desc">深度发现数值断层、重复记录与清洗建议</span>
+            </div>
+          </button>
+
+          <button
+            class="preset-card"
+            @click="sendPresetPrompt('综合当前数据，生成包含图表的可视化分析研报，支持导出。')"
+          >
+            <div class="card-icon green">📈</div>
+            <div class="card-content">
+              <span class="card-label">生成交互式可视化研报</span>
+              <span class="card-desc">渲染 ECharts 图表，生成多维归因报告与业务策略</span>
+            </div>
+          </button>
+        </div>
       </div>
+
+      <!-- Messages Loop -->
       <TransitionGroup name="fade">
         <div
           v-for="msg in messages"
@@ -39,16 +81,18 @@
           class="message"
           :class="'msg-' + msg.type"
         >
-          <!-- 用户消息 -->
+          <!-- User Message -->
           <template v-if="msg.type === 'user'">
-            <div class="msg-icon">👤</div>
+            <div class="msg-avatar user-avatar">👤</div>
             <div class="msg-body">
-              <div class="msg-label">用户指令</div>
+              <div class="msg-header">
+                <span class="msg-sender">您的分析需求</span>
+              </div>
               <div v-if="msg.editContext?.selectionText" class="quote-preview">
-                <div class="quote-preview-title">
-                  引用报告：{{ editContextLabel(msg.editContext) }}
+                <div class="quote-title">
+                  📌 引用研报段落 ({{ editContextLabel(msg.editContext) }})
                 </div>
-                <p>{{ truncate(msg.editContext.selectionText, 220) }}</p>
+                <p>{{ truncate(msg.editContext.selectionText, 200) }}</p>
               </div>
               <div
                 class="msg-content markdown-body"
@@ -57,11 +101,13 @@
             </div>
           </template>
 
-          <!-- 状态说明 -->
+          <!-- Status Message -->
           <template v-else-if="msg.type === 'assistant_status'">
-            <div class="msg-icon">●</div>
+            <div class="msg-avatar status-avatar">🤖</div>
             <div class="msg-body">
-              <div class="msg-label">状态</div>
+              <div class="msg-header">
+                <span class="msg-sender">Agent 思考状态</span>
+              </div>
               <div
                 class="msg-content markdown-body assistant-status"
                 v-html="renderMarkdown(msg.content)"
@@ -69,32 +115,35 @@
             </div>
           </template>
 
-          <!-- 工具调用 -->
+          <!-- Tool Call -->
           <template v-else-if="msg.type === 'tool_call'">
-            <div class="msg-icon">🔧</div>
+            <div class="msg-avatar tool-avatar">⚙️</div>
             <div class="msg-body">
-              <div class="msg-label">
-                工具调用
-                <span class="tool-name">{{ msg.name }}</span>
+              <div class="msg-header">
+                <span class="msg-sender">调用执行工具</span>
+                <span class="tool-name-badge">{{ msg.name }}</span>
               </div>
-              <details class="tool-details">
-                <summary>查看参数</summary>
-                <pre class="tool-args">{{ formatJSON(msg.arguments) }}</pre>
+              <details class="tool-details-box">
+                <summary class="details-summary">查看输入参数</summary>
+                <pre class="code-block">{{ formatJSON(msg.arguments) }}</pre>
               </details>
             </div>
           </template>
 
+          <!-- Human-in-the-loop Input -->
           <template v-else-if="msg.type === 'user_request_input'">
             <UserRequestInput :msg="msg" :render-markdown="renderMarkdown" />
           </template>
 
-          <!-- 工具结果 -->
+          <!-- Tool Result -->
           <template v-else-if="msg.type === 'tool_result'">
-            <div class="msg-icon">{{ msg.success ? "✅" : "❌" }}</div>
+            <div class="msg-avatar result-avatar">
+              {{ msg.success ? '✅' : '❌' }}
+            </div>
             <div class="msg-body">
-              <div class="msg-label">
-                {{ msg.name }} 结果
-                <span class="duration">{{ msg.duration }}ms</span>
+              <div class="msg-header">
+                <span class="msg-sender">{{ msg.name }} 执行输出</span>
+                <span class="duration-badge" v-if="msg.duration">{{ msg.duration }}ms</span>
               </div>
               <div
                 v-if="toolResultSummary(msg)"
@@ -102,18 +151,20 @@
               >
                 {{ toolResultSummary(msg) }}
               </div>
-              <details class="tool-details">
-                <summary>查看结果</summary>
-                <pre class="tool-result">{{ truncate(msg.result, 2000) }}</pre>
+              <details class="tool-details-box">
+                <summary class="details-summary">查看详细数据</summary>
+                <pre class="code-block">{{ truncate(msg.result, 1500) }}</pre>
               </details>
             </div>
           </template>
 
-          <!-- 完成 -->
+          <!-- Completion -->
           <template v-else-if="msg.type === 'complete'">
-            <div class="msg-icon">🎉</div>
+            <div class="msg-avatar complete-avatar">🎉</div>
             <div class="msg-body">
-              <div class="msg-label complete-label">分析完成</div>
+              <div class="msg-header">
+                <span class="msg-sender complete-title">分析总结归因完成</span>
+              </div>
               <div
                 class="msg-content markdown-body"
                 v-html="renderMarkdown(msg.content)"
@@ -121,37 +172,32 @@
             </div>
           </template>
 
-          <template v-else-if="msg.type === 'cancelled'">
-            <div class="msg-icon">⏹</div>
-            <div class="msg-body">
-              <div class="msg-label">任务已停止</div>
-              <div
-                class="msg-content markdown-body"
-                v-html="renderMarkdown(msg.content)"
-              ></div>
-            </div>
-          </template>
-
-          <!-- 错误 -->
+          <!-- Error -->
           <template v-else-if="msg.type === 'error'">
-            <div class="msg-icon">❌</div>
+            <div class="msg-avatar error-avatar">⚠️</div>
             <div class="msg-body">
-              <div class="msg-label error-label">错误</div>
+              <div class="msg-header">
+                <span class="msg-sender error-title">异常反馈</span>
+              </div>
               <div
-                class="msg-content markdown-body error-content"
+                class="msg-content markdown-body error-text"
                 v-html="renderMarkdown(msg.content)"
               ></div>
             </div>
           </template>
 
-          <div class="msg-time">{{ msg.timestamp }}</div>
+          <span class="msg-timestamp">{{ msg.timestamp }}</span>
         </div>
       </TransitionGroup>
 
+      <!-- Running Progress Indicator -->
       <div v-if="isRunning" class="running-indicator">
-        <span class="dot"></span>
-        <span class="dot"></span>
-        <span class="dot"></span>
+        <div class="dot-flashing">
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+        </div>
+        <span class="running-text">Agent 正在分析中...</span>
       </div>
     </div>
   </div>
@@ -169,6 +215,7 @@ import plaintext from "highlight.js/lib/languages/plaintext";
 import python from "highlight.js/lib/languages/python";
 import sql from "highlight.js/lib/languages/sql";
 import xml from "highlight.js/lib/languages/xml";
+import { useWebSocket } from "../../composables/useWebSocket.js";
 import { useAgentStore } from "../../stores/agent.js";
 import { sanitizeMarkdownHTML } from "../../utils/sanitize.js";
 import RunTree from "./RunTree.vue";
@@ -176,7 +223,9 @@ import SubgoalTree from "./SubgoalTree.vue";
 import UserRequestInput from "./UserRequestInput.vue";
 import WorkingMemoryPanel from "./WorkingMemoryPanel.vue";
 
+const { sendMessage } = useWebSocket();
 const store = useAgentStore();
+
 const messages = computed(() => store.messages);
 const isRunning = computed(() => store.isRunning);
 const selectedRunId = computed(() => store.selectedRunId);
@@ -186,18 +235,13 @@ const activeRun = computed(() => store.getRun(activeRunId.value));
 const messagesEl = ref(null);
 
 hljs.registerLanguage("bash", bash);
-hljs.registerLanguage("sh", bash);
 hljs.registerLanguage("go", go);
 hljs.registerLanguage("javascript", javascript);
-hljs.registerLanguage("js", javascript);
 hljs.registerLanguage("json", json);
 hljs.registerLanguage("plaintext", plaintext);
-hljs.registerLanguage("text", plaintext);
 hljs.registerLanguage("python", python);
-hljs.registerLanguage("py", python);
 hljs.registerLanguage("sql", sql);
 hljs.registerLanguage("xml", xml);
-hljs.registerLanguage("html", xml);
 
 marked.setOptions({
   gfm: true,
@@ -206,28 +250,15 @@ marked.setOptions({
     if (language && hljs.getLanguage(language)) {
       return hljs.highlight(code, { language }).value;
     }
-    return hljs.highlightAuto(code, [
-      "python",
-      "sql",
-      "json",
-      "javascript",
-      "bash",
-    ]).value;
+    return hljs.highlightAuto(code, ["python", "sql", "json", "javascript", "bash"]).value;
   },
 });
 
 const markdownCache = new Map();
-const MARKDOWN_CACHE_MAX = 200;
-
 function renderMarkdown(content) {
-  const key = content;
-  if (markdownCache.has(key)) return markdownCache.get(key);
+  if (markdownCache.has(content)) return markdownCache.get(content);
   const result = sanitizeMarkdownHTML(marked.parse(String(content || "")));
-  if (markdownCache.size >= MARKDOWN_CACHE_MAX) {
-    const firstKey = markdownCache.keys().next().value;
-    markdownCache.delete(firstKey);
-  }
-  markdownCache.set(key, result);
+  markdownCache.set(content, result);
   return result;
 }
 
@@ -236,12 +267,14 @@ watch(
   async () => {
     await nextTick();
     if (messagesEl.value) {
-      const el = messagesEl.value;
-      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
-      if (nearBottom) el.scrollTop = el.scrollHeight;
+      messagesEl.value.scrollTop = messagesEl.value.scrollHeight;
     }
   },
 );
+
+function sendPresetPrompt(promptText) {
+  void sendMessage(promptText);
+}
 
 function formatJSON(obj) {
   try {
@@ -255,26 +288,17 @@ function formatJSON(obj) {
 
 function truncate(str, max) {
   if (!str) return "";
-  return str.length > max ? str.slice(0, max) + "\n... (已截断)" : str;
+  return str.length > max ? str.slice(0, max) + "..." : str;
 }
 
 function toolResultSummary(msg) {
   const payload = msg?.parsedResult;
   if (!payload || typeof payload !== "object") return "";
-  if (typeof payload.ui_summary === "string" && payload.ui_summary.trim())
-    return payload.ui_summary;
-  if (typeof payload.message === "string" && payload.message.trim())
-    return payload.message;
-  return "";
+  return payload.ui_summary || payload.message || "";
 }
 
 function editContextLabel(editContext) {
-  return (
-    editContext.blockLabel ||
-    editContext.blockId ||
-    editContext.targetBlockId ||
-    "选区"
-  );
+  return editContext.blockLabel || editContext.blockId || "选区";
 }
 </script>
 
@@ -289,234 +313,279 @@ function editContextLabel(editContext) {
 .run-summary {
   display: flex;
   gap: 8px;
-  padding: 10px 12px 0;
-  flex-wrap: wrap;
+  padding: 10px 16px 4px;
 }
 
 .summary-pill {
   display: inline-flex;
   align-items: center;
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: 0.7rem;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 500;
 }
 
 .summary-pill.live {
-  color: #d2e9ff;
-  background: rgba(47, 129, 247, 0.18);
-  border: 1px solid rgba(47, 129, 247, 0.35);
+  color: #60a5fa;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.3);
 }
 
 .summary-pill.history {
   color: var(--text-secondary);
-  background: rgba(139, 148, 158, 0.12);
-  border: 1px solid rgba(139, 148, 158, 0.2);
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
 }
 
 .messages {
   flex: 1;
   overflow-y: auto;
-  padding: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 
-.empty-state {
+.hero-welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 32px 16px;
   text-align: center;
-  padding: 4rem 2rem;
-  color: var(--text-muted);
+  gap: 24px;
+  margin: auto 0;
 }
 
-.empty-icon {
-  font-size: 3rem;
-  margin-bottom: 1rem;
+.hero-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
 }
-.empty-hint {
-  font-size: 0.8rem;
-  margin-top: 0.5rem;
+
+.hero-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  box-shadow: 0 0 24px rgba(59, 130, 246, 0.35);
+}
+
+.hero-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.hero-subtitle {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  max-width: 460px;
+  line-height: 1.5;
+}
+
+.quick-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  width: 100%;
+  max-width: 680px;
+}
+
+.preset-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: all var(--transition);
+}
+
+.preset-card:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-glow);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.preset-card .card-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.preset-card .card-content {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.preset-card .card-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.preset-card .card-desc {
+  font-size: 0.73rem;
+  color: var(--text-muted);
+  line-height: 1.4;
 }
 
 .message {
   display: flex;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  margin-bottom: 6px;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
   position: relative;
-  animation: slideIn 0.3s ease;
+  transition: all var(--transition);
 }
 
-.msg-icon {
-  font-size: 1.2rem;
+.msg-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.95rem;
   flex-shrink: 0;
-  margin-top: 2px;
+  background: var(--bg-tertiary);
 }
 
 .msg-body {
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   min-width: 0;
 }
 
-.msg-label {
-  font-size: 0.75rem;
+.msg-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.msg-sender {
+  font-size: 0.78rem;
+  font-weight: 600;
   color: var(--text-secondary);
-  margin-bottom: 4px;
-  font-weight: 500;
+}
+
+.tool-name-badge {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.duration-badge {
+  font-size: 0.7rem;
+  color: var(--text-muted);
 }
 
 .msg-content {
-  font-size: 0.85rem;
-  line-height: 1.5;
+  font-size: 0.88rem;
+  line-height: 1.6;
   color: var(--text-primary);
 }
 
 .quote-preview {
-  margin: 0 0 8px;
-  padding: 9px 10px;
+  padding: 8px 12px;
   border-left: 3px solid var(--accent-blue);
-  border-radius: 8px;
-  background: rgba(37, 99, 235, 0.07);
+  background: rgba(59, 130, 246, 0.08);
+  border-radius: 6px;
 }
 
-.quote-preview-title {
-  color: var(--accent-blue);
-  font-size: 0.72rem;
+.quote-title {
+  font-size: 0.73rem;
   font-weight: 700;
-  margin-bottom: 4px;
+  color: var(--accent-blue);
+  margin-bottom: 2px;
 }
 
-.quote-preview p {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: 0.78rem;
-  line-height: 1.45;
-}
-
-.tool-result-summary {
-  margin-bottom: 8px;
-}
-
-.markdown-body :deep(p),
-.markdown-body :deep(ul),
-.markdown-body :deep(ol),
-.markdown-body :deep(blockquote),
-.markdown-body :deep(pre) {
-  margin: 0 0 0.75rem;
-}
-
-.markdown-body :deep(p:last-child),
-.markdown-body :deep(ul:last-child),
-.markdown-body :deep(ol:last-child),
-.markdown-body :deep(blockquote:last-child),
-.markdown-body :deep(pre:last-child) {
-  margin-bottom: 0;
-}
-
-.markdown-body :deep(ul),
-.markdown-body :deep(ol) {
-  padding-left: 1.25rem;
-}
-
-.markdown-body :deep(li + li) {
-  margin-top: 0.2rem;
-}
-
-.markdown-body :deep(code) {
-  font-family: "SF Mono", "Fira Code", monospace;
-  font-size: 0.8em;
-  background: rgba(139, 148, 158, 0.14);
-  padding: 0.1rem 0.35rem;
-  border-radius: 4px;
-}
-
-.markdown-body :deep(pre) {
-  overflow-x: auto;
+.tool-details-box {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 0.85rem 1rem;
+  padding: 6px 10px;
+  margin-top: 4px;
 }
 
-.markdown-body :deep(pre code) {
-  background: transparent;
-  padding: 0;
+.details-summary {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-weight: 500;
 }
 
-.markdown-body :deep(blockquote) {
-  padding-left: 0.85rem;
-  border-left: 3px solid var(--border);
-  color: var(--text-secondary);
+.code-block {
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 0.78rem;
+  color: #e2e8f0;
+  padding: 8px;
+  margin-top: 6px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
-.markdown-body :deep(a) {
-  color: var(--accent-blue);
-}
-
-.markdown-body :deep(strong) {
-  font-weight: 700;
-}
-
-.msg-time {
+.msg-timestamp {
   position: absolute;
-  top: 10px;
-  right: 12px;
-  font-size: 0.65rem;
+  top: 14px;
+  right: 16px;
+  font-size: 0.68rem;
   color: var(--text-muted);
 }
 
 .msg-user {
-  background: var(--bg-secondary);
-  border-radius: 12px;
-  align-self: flex-end;
-  max-width: 85%;
-}
-
-.msg-assistant_status,
-.msg-tool_call,
-.msg-tool_result,
-.msg-complete,
-.msg-error {
-  background: transparent;
-  border-left: none;
-}
-
-.assistant-status {
-  color: var(--text-muted);
-  font-style: italic;
-}
-
-.tool-name {
-  background: var(--bg-hover);
-  color: var(--text-secondary);
-  padding: 2px 8px;
-  border-radius: 6px;
-  font-size: 0.7rem;
-  margin-left: 6px;
-  border: 1px solid var(--border);
+  background: rgba(59, 130, 246, 0.05);
+  border-color: rgba(59, 130, 246, 0.2);
 }
 
 .running-indicator {
   display: flex;
-  gap: 4px;
-  padding: 12px 16px;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
   justify-content: center;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
 }
 
-.running-indicator .dot {
+.dot-flashing {
+  display: flex;
+  gap: 4px;
+}
+
+.dot-flashing .dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: var(--accent-blue);
-  animation: pulse 1.4s infinite ease-in-out;
+  animation: pulseGlow 1.2s infinite ease-in-out;
 }
 
-.running-indicator .dot:nth-child(2) {
-  animation-delay: 0.2s;
-}
-.running-indicator .dot:nth-child(3) {
-  animation-delay: 0.4s;
-}
-
-.msg-user_request_input {
-  background: rgba(255, 152, 0, 0.08);
-  border: 1px solid rgba(255, 152, 0, 0.3);
-}
+.dot-flashing .dot:nth-child(2) { animation-delay: 0.2s; }
+.dot-flashing .dot:nth-child(3) { animation-delay: 0.4s; }
 </style>

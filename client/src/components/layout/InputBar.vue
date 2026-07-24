@@ -1,23 +1,23 @@
 <template>
   <div class="input-bar">
+    <!-- Active Data Sources Tag Bar -->
     <div class="upload-area" v-if="dataSourceStore.sessionSources.length > 0">
       <span
         v-for="src in dataSourceStore.sessionSources"
         :key="src.source_object_key || src.active_snapshot_id"
         class="source-tag"
       >
-        🔗 {{ src.analysis_table_name || src.source_name }}
-        <span class="source-meta" v-if="src.row_count"
-          >({{ src.row_count }} rows)</span
-        >
+        <span class="tag-icon">🔗</span>
+        <span class="tag-name">{{ src.analysis_table_name || src.source_name }}</span>
+        <span class="source-meta" v-if="src.row_count">({{ src.row_count }} 行)</span>
       </span>
     </div>
+
+    <!-- Report Quote Context Bar -->
     <div v-if="reportQuote && !isWaitingUserInput" class="quote-context">
       <div class="quote-main">
-        <span class="quote-kicker">引用报告选区</span>
-        <span class="quote-title">{{
-          reportQuote.blockLabel || reportQuote.blockId || "报告片段"
-        }}</span>
+        <span class="quote-kicker">📌 引用研报段落编辑</span>
+        <span class="quote-title">{{ reportQuote.blockLabel || reportQuote.blockId || "选区" }}</span>
         <p>{{ quotePreview }}</p>
       </div>
       <button
@@ -30,53 +30,70 @@
         ×
       </button>
     </div>
-    <div class="input-row">
-      <label
-        class="upload-btn"
-        :class="{ disabled: isUploading }"
-        title="上传数据"
-        aria-label="上传数据"
-      >
-        📁
-        <input
-          type="file"
-          accept=".csv,.xlsx,.xls"
-          multiple
-          @change="handleFile"
-          :disabled="isUploading"
-          hidden
-        />
-      </label>
-      <button
-        class="sources-btn"
-        @click="showSourcesDrawer = true"
-        title="数据源管理"
-        aria-label="数据源管理"
-      >
-        🔗
-      </button>
+
+    <!-- Input Box Card -->
+    <div class="input-box-card" :class="{ focused: isFocused, disabled: inputDisabled }">
       <textarea
         v-model="input"
         class="input-field"
         :placeholder="inputPlaceholder"
-        aria-label="消息输入框"
-        @keydown.enter.exact="handleSend"
-        rows="1"
+        @keydown.enter.exact.prevent="handleSend"
+        @focus="isFocused = true"
+        @blur="isFocused = false"
+        rows="2"
         :disabled="inputDisabled"
       ></textarea>
-      <button
-        v-if="!inputDisabled"
-        class="send-btn"
-        @click="handleSend"
-        :disabled="!input.trim()"
-      >
-        发送 ⏎
-      </button>
-      <button v-else-if="isRunning" class="stop-btn" @click="handleStop">
-        ■ 停止
-      </button>
-      <button v-else class="send-btn" disabled>等待确认</button>
+
+      <div class="input-actions-bar">
+        <div class="left-tools">
+          <label
+            class="action-icon-btn"
+            :class="{ disabled: isUploading }"
+            title="上传 CSV / Excel 数据表"
+          >
+            <span class="btn-icon">📁</span>
+            <span class="btn-label" v-if="!isUploading">上传文件</span>
+            <span class="btn-label" v-else>上传中...</span>
+            <input
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              multiple
+              @change="handleFile"
+              :disabled="isUploading"
+              hidden
+            />
+          </label>
+
+          <button
+            class="action-icon-btn"
+            @click="showSourcesDrawer = true"
+            title="关联数据源"
+          >
+            <span class="btn-icon">🔗</span>
+            <span class="btn-label">数据源</span>
+          </button>
+        </div>
+
+        <div class="right-tools">
+          <button
+            v-if="!inputDisabled"
+            class="send-submit-btn"
+            @click="handleSend"
+            :disabled="!input.trim()"
+          >
+            <span>发送分析</span>
+            <span class="shortcut-hint">⏎</span>
+          </button>
+          <button v-else-if="isRunning" class="stop-btn" @click="handleStop">
+            ■ 中断分析
+          </button>
+          <button v-else class="send-submit-btn" disabled>
+            等待交互确认
+          </button>
+        </div>
+      </div>
     </div>
+
     <DataSourceDrawer
       :open="showSourcesDrawer"
       :sessionId="store.sessionId"
@@ -98,10 +115,13 @@ import DataSourceDrawer from "../datasource/DataSourceDrawer.vue";
 const { sendMessage, stop, ensureSession } = useWebSocket();
 const store = useAgentStore();
 const dataSourceStore = useDataSourceStore();
+
 const input = ref("");
-const isRunning = computed(() => store.isRunning);
+const isFocused = ref(false);
 const isUploading = ref(false);
 const showSourcesDrawer = ref(false);
+
+const isRunning = computed(() => store.isRunning);
 const reportQuote = computed(() => store.reportQuote);
 const selectedRun = computed(() => store.getRun(store.selectedRunId) || null);
 const activeRun = computed(() => store.getRun(store.activeRunId) || null);
@@ -111,11 +131,13 @@ const isWaitingUserInput = computed(
 const inputDisabled = computed(
   () => isRunning.value || isWaitingUserInput.value,
 );
+
 const inputPlaceholder = computed(() => {
   if (isWaitingUserInput.value) return "请在上方确认卡片中回复...";
   if (reportQuote.value) return "说明希望如何修改引用区域...";
-  return "输入你的目标、问题或约束...";
+  return "输入分析目标、业务问题或筛选条件 (按 Enter 发送)...";
 });
+
 const quotePreview = computed(() => {
   const text = reportQuote.value?.selectionText || "";
   return text.length > 120 ? `${text.slice(0, 120)}...` : text;
@@ -248,180 +270,180 @@ function formatSize(bytes) {
 
 <style scoped>
 .input-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   background: transparent;
-  padding: 8px 16px;
   flex-shrink: 0;
 }
 
 .upload-area {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   flex-wrap: wrap;
-  margin-bottom: 6px;
 }
+
+.source-tag {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.76rem;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  padding: 4px 10px;
+  border-radius: 20px;
+  color: var(--text-secondary);
+}
+
+.tag-icon { font-size: 0.8rem; }
+.tag-name { font-weight: 600; color: var(--text-primary); }
+.source-meta { color: var(--text-muted); font-size: 0.7rem; }
 
 .quote-context {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  margin-bottom: 8px;
-  padding: 10px 12px;
-  border: 1px solid rgba(37, 99, 235, 0.22);
-  border-left: 3px solid var(--accent-blue);
-  border-radius: 12px;
-  background: rgba(37, 99, 235, 0.06);
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-left: 4px solid var(--accent-blue);
+  border-radius: 10px;
+  background: rgba(59, 130, 246, 0.08);
 }
 
-.quote-main {
-  min-width: 0;
-  flex: 1;
-}
-
-.quote-kicker {
-  display: block;
-  font-size: 0.72rem;
-  color: var(--accent-blue);
-  font-weight: 700;
-  margin-bottom: 2px;
-}
-
-.quote-title {
-  display: block;
-  font-size: 0.82rem;
-  color: var(--text-primary);
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.quote-context p {
-  margin: 4px 0 0;
-  color: var(--text-secondary);
-  font-size: 0.78rem;
-  line-height: 1.5;
-}
+.quote-main { flex: 1; min-width: 0; }
+.quote-kicker { font-size: 0.72rem; color: var(--accent-blue); font-weight: 700; }
+.quote-title { font-size: 0.82rem; color: var(--text-primary); font-weight: 600; }
+.quote-context p { margin-top: 2px; color: var(--text-secondary); font-size: 0.78rem; }
 
 .quote-clear {
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   border: none;
-  border-radius: 999px;
-  background: rgba(15, 23, 42, 0.08);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
   color: var(--text-secondary);
   cursor: pointer;
-  flex: 0 0 auto;
 }
 
-.quote-clear:hover {
-  background: rgba(15, 23, 42, 0.14);
-  color: var(--text-primary);
-}
+.quote-clear:hover { background: rgba(255, 255, 255, 0.2); color: white; }
 
-.source-tag {
-  font-size: 0.75rem;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  padding: 2px 8px;
-  border-radius: 4px;
-  color: var(--text-secondary);
-}
-
-.source-meta {
-  color: var(--text-muted);
-}
-
-.input-row {
+.input-box-card {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 8px 12px;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+  border-radius: 14px;
+  padding: 10px 14px;
+  transition: all var(--transition);
+  box-shadow: var(--shadow-md);
 }
 
-.upload-btn {
-  font-size: 1.2rem;
-  cursor: pointer;
-  padding: 4px;
-  border-radius: 6px;
-  transition: background var(--transition);
-  color: var(--text-secondary);
+.input-box-card.focused {
+  border-color: var(--border-glow);
+  box-shadow: var(--shadow-glow);
 }
 
-.sources-btn {
-  font-size: 1.2rem;
-  cursor: pointer;
-  padding: 4px;
-  border-radius: 6px;
-  transition: background var(--transition);
-  color: var(--text-secondary);
-  background: none;
-  border: none;
-}
-
-.sources-btn:hover {
-  background: var(--border-light);
-}
-
-.upload-btn:hover {
-  background: var(--border-light);
-}
-.upload-btn.disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.input-box-card.disabled {
+  opacity: 0.6;
 }
 
 .input-field {
-  flex: 1;
+  width: 100%;
   background: transparent;
   border: none;
-  padding: 4px 8px;
   color: var(--text-primary);
   font-size: 0.9rem;
   font-family: inherit;
   resize: none;
   outline: none;
+  line-height: 1.5;
 }
 
 .input-field::placeholder {
   color: var(--text-muted);
 }
 
-.send-btn,
-.stop-btn {
-  padding: 6px 14px;
-  border-radius: 12px;
-  font-size: 0.8rem;
+.input-actions-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.left-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.action-icon-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
   font-weight: 500;
   cursor: pointer;
-  border: none;
   transition: all var(--transition);
 }
 
-.send-btn {
-  background: var(--text-primary);
-  color: var(--bg-primary);
+.action-icon-btn:hover:not(.disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
-.send-btn:hover:not(:disabled) {
-  opacity: 0.85;
+.send-submit-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 16px;
+  background: linear-gradient(135deg, var(--accent-blue), #2563eb);
+  border: none;
+  border-radius: 8px;
+  color: white;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.3);
 }
-.send-btn:disabled {
-  opacity: 0.3;
+
+.send-submit-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.5);
+}
+
+.send-submit-btn:disabled {
+  opacity: 0.4;
   cursor: not-allowed;
-  background: var(--text-muted);
+  transform: none;
+  box-shadow: none;
+}
+
+.shortcut-hint {
+  font-size: 0.72rem;
+  opacity: 0.7;
 }
 
 .stop-btn {
-  background: var(--bg-primary);
+  padding: 7px 16px;
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: 8px;
   color: var(--accent-red);
-  border: 1px solid var(--border);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
 }
 
 .stop-btn:hover {
-  background: rgba(220, 38, 38, 0.05);
+  background: rgba(239, 68, 68, 0.25);
 }
 </style>
