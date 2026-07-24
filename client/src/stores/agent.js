@@ -7,7 +7,7 @@ export const useAgentStore = defineStore("agent", () => {
   const messages = shallowRef([]);
   const reportHTML = ref("");
   const isRunning = ref(false);
-  const token = ref("");
+  const token = ref(localStorage.getItem("oda_token") || "");
   const sessionId = ref("");
   const activeRunId = ref("");
   const selectedRunId = ref("");
@@ -204,6 +204,11 @@ export const useAgentStore = defineStore("agent", () => {
 
   function setToken(nextToken) {
     token.value = nextToken || "";
+    if (nextToken) {
+      localStorage.setItem("oda_token", nextToken);
+    } else {
+      localStorage.removeItem("oda_token");
+    }
   }
 
   function setWorkspaces(items) {
