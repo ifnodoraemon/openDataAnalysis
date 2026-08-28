@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
-	"github.com/ifnodoraemon/openDataAnalysis/data"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 )
 
@@ -128,92 +127,97 @@ func (s *SourceService) TestMySQLConnection(ctx context.Context, sourceID, authS
 	return SourceTestResult{Success: true, Objects: validated}
 }
 
-func (s *SourceService) streamMySQLImportToSQLite(ctx context.Context, mysqlDB *sql.DB, schema, object string, ingester *data.Ingester, tableName string, importRowLimit int) (rowCountResult, colCountResult, rowsSkippedResult int, importTruncatedResult bool, resultErr error) {
-	if err := data.ValidateSQLIdent(tableName); err != nil {
-		return 0, 0, 0, false, fmt.Errorf("invalid SQLite table name: %w", err)
-	}
-	quotedSchema, err := quoteMySQLIdentifier(schema)
+func (s *SourceService) FetchMySQLLiveObjectMetadata(ctx context.Context, sourceConfig *domain.SourceConfig, authSecret string, object SourceObjectRef) (*LiveObjectMetadata, error) {
+	mysqlDB, err := OpenMySQLConnection(ctx, sourceConfig, authSecret)
 	if err != nil {
-		return 0, 0, 0, false, err
+		return nil, err
 	}
-	quotedObject, err := quoteMySQLIdentifier(object)
+	defer mysqlDB.Close()
+
+	columnRows, err := mysqlDB.QueryContext(ctx,
+		`SELECT column_name, data_type FROM information_schema.columns
+		 WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position`,
+		object.Schema, object.Name)
 	if err != nil {
-		return 0, 0, 0, false, err
+		return nil, fmt.Errorf("failed to read upstream column metadata: %w", err)
 	}
-	query := fmt.Sprintf("SELECT * FROM %s.%s", quotedSchema, quotedObject)
-	if importRowLimit > 0 {
-		query = fmt.Sprintf("%s LIMIT %d", query, importRowLimit+1)
+	columns := make([]LiveColumn, 0, 16)
+	for columnRows.Next() {
+		var name, declaredType string
+		if err := columnRows.Scan(&name, &declaredType); err != nil {
+			columnRows.Close()
+			return nil, fmt.Errorf("failed to scan upstream column metadata: %w", err)
+		}
+		columns = append(columns, LiveColumn{Name: name, DeclaredType: declaredType})
 	}
-	rows, err := mysqlDB.QueryContext(ctx, query)
+	closeErr := columnRows.Close()
+	if err := columnRows.Err(); err != nil {
+		return nil, fmt.Errorf("failed while reading upstream column metadata: %w", err)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("failed to close upstream column metadata rows: %w", closeErr)
+	}
+	if len(columns) == 0 {
+		return nil, fmt.Errorf("upstream object %s.%s does not exist or exposes no columns", object.Schema, object.Name)
+	}
+
+	var estimate sql.NullInt64
+	estimateErr := mysqlDB.QueryRowContext(ctx,
+		`SELECT table_rows FROM information_schema.tables WHERE table_schema = ? AND table_name = ?`,
+		object.Schema, object.Name).Scan(&estimate)
+	if estimateErr != nil {
+		if errors.Is(estimateErr, sql.ErrNoRows) {
+			return nil, fmt.Errorf("upstream object %s.%s does not exist", object.Schema, object.Name)
+		}
+	}
+	if !estimate.Valid || estimate.Int64 < 0 {
+		estimate.Int64 = 0
+	}
+
+	return &LiveObjectMetadata{Columns: columns, RowCountEstimate: estimate.Int64}, nil
+}
+
+func (s *SourceService) ExecuteMySQLLiveQuery(ctx context.Context, sourceConfig *domain.SourceConfig, authSecret, sql string, timeoutSeconds, maxRows int) (*LiveQueryRows, error) {
+	if timeoutSeconds < 1 {
+		return nil, fmt.Errorf("timeout_seconds must be positive")
+	}
+	if maxRows < 1 {
+		return nil, fmt.Errorf("max_rows must be positive")
+	}
+	mysqlDB, err := OpenMySQLConnection(ctx, sourceConfig, authSecret)
 	if err != nil {
-		return 0, 0, 0, false, fmt.Errorf("failed to query upstream data: %w", err)
+		return nil, err
+	}
+	defer mysqlDB.Close()
+
+	queryCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+	defer cancel()
+
+	conn, err := mysqlDB.Conn(queryCtx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire upstream connection: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(queryCtx, fmt.Sprintf("SET SESSION max_execution_time=%d", timeoutSeconds*1000)); err != nil {
+		return nil, fmt.Errorf("failed to set statement timeout: %w", err)
+	}
+	if _, err := conn.ExecContext(queryCtx, "START TRANSACTION READ ONLY"); err != nil {
+		return nil, fmt.Errorf("failed to begin read-only transaction: %w", err)
 	}
 	defer func() {
-		if closeErr := rows.Close(); closeErr != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("close upstream rows: %w", closeErr))
-		}
+		rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer rollbackCancel()
+		_, _ = conn.ExecContext(rollbackCtx, "ROLLBACK")
 	}()
 
-	colTypes, err := rows.ColumnTypes()
+	wrapped := fmt.Sprintf("SELECT * FROM (%s) AS _oda_live_query LIMIT %d", sql, maxRows)
+	rows, err := conn.QueryContext(queryCtx, wrapped)
 	if err != nil {
-		return 0, 0, 0, false, fmt.Errorf("failed to read column types: %w", err)
+		return nil, fmt.Errorf("live query execution failed: %w", err)
 	}
-	colCount := len(colTypes)
-	colNames := make([]string, colCount)
-	for i, ct := range colTypes {
-		colNames[i] = ct.Name()
-	}
-
-	sqliteColTypes := make([]data.ColumnType, colCount)
-	for i := range colTypes {
-		sqliteColTypes[i] = data.TypePreserve
-	}
-
-	if err := ingester.CreateTypedTable(tableName, colNames, sqliteColTypes); err != nil {
-		return 0, 0, 0, false, fmt.Errorf("failed to create SQLite table: %w", err)
-	}
-
-	batchSize := 5000
-	batch := make([][]interface{}, 0, batchSize)
-	rowCount := 0
-	importTruncated := false
-	vals := make([]interface{}, colCount)
-	valPtrs := make([]interface{}, colCount)
-	for i := range vals {
-		valPtrs[i] = &vals[i]
-	}
-
-	for rows.Next() {
-		if importRowLimit > 0 && rowCount+len(batch) >= importRowLimit {
-			importTruncated = true
-			break
-		}
-		if err := rows.Scan(valPtrs...); err != nil {
-			return rowCount, colCount, 0, importTruncated, fmt.Errorf("failed to scan upstream row %d: %w", rowCount+len(batch)+1, err)
-		}
-		row := make([]interface{}, colCount)
-		for i := range vals {
-			row[i] = cloneSQLValue(vals[i])
-		}
-		batch = append(batch, row)
-		if len(batch) >= batchSize {
-			if err := ingester.InsertBatchValues(tableName, colNames, batch); err != nil {
-				return rowCount, colCount, 0, importTruncated, err
-			}
-			rowCount += len(batch)
-			batch = batch[:0]
-		}
-	}
-	if len(batch) > 0 {
-		if err := ingester.InsertBatchValues(tableName, colNames, batch); err != nil {
-			return rowCount, colCount, 0, importTruncated, err
-		}
-		rowCount += len(batch)
-	}
-	if err := rows.Err(); err != nil {
-		return rowCount, colCount, 0, importTruncated, fmt.Errorf("failed while reading upstream data: %w", err)
-	}
-	return rowCount, colCount, 0, importTruncated, nil
+	defer rows.Close()
+	return scanLiveQueryRows(queryCtx, rows, "mysql")
 }
 
 func quoteMySQLIdentifier(name string) (string, error) {
@@ -239,11 +243,4 @@ func (s *SourceService) checkMySQLObjectExists(ctx context.Context, db *sql.DB, 
 		return false, err
 	}
 	return count > 0, nil
-}
-
-func cloneSQLValue(v interface{}) interface{} {
-	if bytes, ok := v.([]byte); ok {
-		return append([]byte(nil), bytes...)
-	}
-	return v
 }

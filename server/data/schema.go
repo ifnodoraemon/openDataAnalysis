@@ -351,7 +351,7 @@ func normalizeReadOnlyQuery(query string) (string, error) {
 }
 
 // NormalizeReadOnlyQuery exposes the same parser used by the query executor so
-// action tools can safely materialize a user/model-selected SELECT.
+// live query paths can validate a model-selected SELECT.
 func NormalizeReadOnlyQuery(query string) (string, error) {
 	return normalizeReadOnlyQuery(query)
 }

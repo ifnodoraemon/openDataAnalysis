@@ -83,7 +83,7 @@ Development runtime data lives under `data/`:
 |---|---|
 | CSV | Streaming batch import; observed headers and cell text are preserved exactly |
 | Excel | Streaming batch import for a workbook with exactly one worksheet; observed headers and cell text are preserved exactly |
-| PostgreSQL / MySQL | Read-only workspace SQL source imported into session SQLite; default `SQL_IMPORT_ROW_LIMIT=1000000` |
+| PostgreSQL / MySQL | Read-only live connection; queries run directly against the upstream database (read-only transaction, statement timeout, 200-row cap); no data is imported |
 | Live upstream query | Not supported; should be designed as a separate capability |
 
 Every import is written to a snapshot-scoped analysis table. The current binding

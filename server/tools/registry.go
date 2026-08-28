@@ -69,31 +69,80 @@ type QueryLocker interface {
 	RUnlockQuery()
 }
 
-type QueryMutationLocker interface {
-	LockQuery()
-	UnlockQuery()
-}
-
 // ToolContext 提供给工具初始化时的上下文依赖
 type RegistryFactory func(allowed []string) *Registry
 
+type LiveQueryRequest struct {
+	SourceID       string
+	SQL            string
+	TimeoutSeconds int
+	MaxRows        int
+}
+
+type LiveQueryResult struct {
+	SourceID string
+	Dialect  string
+	Columns  []string
+	Rows     []map[string]interface{}
+	RowCount int
+}
+
+type LiveSourceTable struct {
+	Schema           string
+	Name             string
+	QualifiedName    string
+	Kind             string
+	RowCountEstimate int64
+	Estimated        bool
+	ProfileID        string
+	SnapshotID       string
+	Dialect          string
+}
+
+type LiveColumnFacts struct {
+	Name         string
+	DeclaredType string
+}
+
+type LiveTableDescription struct {
+	SourceID         string
+	Schema           string
+	Name             string
+	QualifiedName    string
+	Dialect          string
+	RowCountEstimate int64
+	Estimated        bool
+	ColumnCount      int
+	Columns          []LiveColumnFacts
+	Sample           *LiveQueryResult
+	SampleRows       int
+	Warnings         []string
+}
+
+type LiveQueryProvider func(ctx context.Context, req LiveQueryRequest) (*LiveQueryResult, error)
+type LiveTablesProvider func(ctx context.Context, sourceID string) ([]LiveSourceTable, error)
+type LiveTableDescribeProvider func(ctx context.Context, sourceID, schema, name string, sampleRows int) (*LiveTableDescription, error)
+
 type ToolContext struct {
-	Ingester                *data.Ingester
-	ReportState             *ReportState
-	EditState               *ReportEditState
-	Memory                  any            // Type: *agent.WorkingMemory
-	Subgoals                SubgoalChecker // Instead of any, we use an interface to avoid circular imports
-	DelegateRegistryFactory RegistryFactory
-	EmitFunc                func(any) // Type: func(agent.RuntimeEvent)
-	SessionID               string
-	WorkspaceID             string
-	SessionSourcesProvider  SessionSourcesProvider
-	ProfileDetailProvider   ProfileDetailProvider
-	GovernanceProvider      GovernanceProvider
-	QueryLocker             QueryLocker
-	ProfileConfirmer        ProfileConfirmer
-	Now                     func() time.Time
-	FileService             *service.FileService
+	Ingester                  *data.Ingester
+	ReportState               *ReportState
+	EditState                 *ReportEditState
+	Memory                    any            // Type: *agent.WorkingMemory
+	Subgoals                  SubgoalChecker // Instead of any, we use an interface to avoid circular imports
+	DelegateRegistryFactory   RegistryFactory
+	EmitFunc                  func(any) // Type: func(agent.RuntimeEvent)
+	SessionID                 string
+	WorkspaceID               string
+	SessionSourcesProvider    SessionSourcesProvider
+	ProfileDetailProvider     ProfileDetailProvider
+	GovernanceProvider        GovernanceProvider
+	QueryLocker               QueryLocker
+	ProfileConfirmer          ProfileConfirmer
+	LiveQueryProvider         LiveQueryProvider
+	LiveTablesProvider        LiveTablesProvider
+	LiveTableDescribeProvider LiveTableDescribeProvider
+	Now                       func() time.Time
+	FileService               *service.FileService
 }
 
 // ToolBuilder 是负责动态创建有状态工具的函数

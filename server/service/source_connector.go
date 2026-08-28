@@ -40,6 +40,10 @@ type SourceConnector interface {
 	PublicConfig(ctx context.Context, sourceID string) (map[string]interface{}, error)
 	Test(ctx context.Context, req SourceTestRequest) (SourceTestResult, error)
 	Catalog(ctx context.Context, sourceID string) ([]SourceCatalogObject, error)
+}
+
+type ImportingConnector interface {
+	SourceConnector
 	Import(ctx context.Context, req SourceImportRequest) (*SnapshotImportResult, error)
 }
 

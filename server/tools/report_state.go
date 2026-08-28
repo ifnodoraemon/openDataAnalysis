@@ -44,6 +44,8 @@ type AnalysisResult struct {
 	Columns   []string                 `json:"columns"`
 	Rows      []map[string]interface{} `json:"rows"`
 	RowCount  int                      `json:"row_count"`
+	SourceID  string                   `json:"source_id,omitempty"`
+	Dialect   string                   `json:"dialect,omitempty"`
 	CreatedAt string                   `json:"created_at"`
 }
 

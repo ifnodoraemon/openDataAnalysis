@@ -26,6 +26,9 @@ type SourceService struct {
 	SemanticConfirmationRepo repository.SemanticConfirmationRepository
 	SemanticAssetRepo        repository.SemanticAssetRepository
 	AuditEventRepo           repository.AuditEventRepository
+
+	credentialSecret      string
+	liveConnectorResolver func(domain.SourceType) (LiveQueryConnector, error)
 }
 
 func NewSourceService(
@@ -189,6 +192,8 @@ func (s *SourceService) GetSessionSources(ctx context.Context, sessionID string)
 			ProfileDurationMs:      snapshot.ProfileDurationMs,
 			SnapshotSizeBytes:      snapshot.SnapshotSizeBytes,
 			ProfileMode:            string(snapshot.ProfileMode),
+			Mode:                   string(snapshot.Mode),
+			RowCountEstimated:      snapshot.Mode == domain.SnapshotModeLive,
 			ErrorMessage: func() string {
 				if snapshot.ErrorMessage != nil {
 					return *snapshot.ErrorMessage
@@ -601,6 +606,8 @@ type SessionSourceSummary struct {
 	ProfileDurationMs      int       `json:"profile_duration_ms"`
 	SnapshotSizeBytes      int64     `json:"snapshot_size_bytes"`
 	ProfileMode            string    `json:"profile_mode"`
+	Mode                   string    `json:"mode"`
+	RowCountEstimated      bool      `json:"row_count_estimated"`
 	ErrorMessage           string    `json:"error_message,omitempty"`
 }
 

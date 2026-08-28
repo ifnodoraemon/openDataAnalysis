@@ -142,7 +142,7 @@ export const useDataSourceStore = defineStore("dataSource", () => {
 
   async function fetchSourceCatalog(sourceId) {
     return requestJSON(`/api/data-sources/${sourceId}/catalog`, {
-      defaultMessage: "加载可导入对象失败",
+      defaultMessage: "加载可绑定对象失败",
     });
   }
 

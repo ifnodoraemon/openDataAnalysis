@@ -63,7 +63,6 @@ type Config struct {
 	MetricsExpose      bool   // 是否公开 /metrics 端点，默认关闭（404）
 
 	// 数据源导入
-	SQLImportRowLimit int // SQL snapshot import row cap, 0 = unlimited
 
 	// PostgreSQL配置
 	PostgresDSN string
@@ -143,8 +142,6 @@ func Load() {
 		TempCleanupOnStart: getEnvBool("TEMP_CLEANUP_ON_START", false),
 		ReportEchartsUrl:   getEnv("REPORT_ECHARTS_URL", "/assets/echarts.min.js"),
 		MetricsExpose:      getEnvBool("METRICS_EXPOSE", false),
-
-		SQLImportRowLimit: getEnvInt("SQL_IMPORT_ROW_LIMIT", 1000000),
 
 		PostgresDSN:      getEnv("POSTGRES_DSN", ""),
 		S3Endpoint:       getEnv("S3_ENDPOINT", ""),

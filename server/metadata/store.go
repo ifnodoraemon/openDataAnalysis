@@ -226,6 +226,7 @@ func (s *Store) migrate() error {
 				profile_duration_ms INTEGER NOT NULL DEFAULT 0,
 			snapshot_size_bytes INTEGER NOT NULL DEFAULT 0,
 			profile_mode TEXT NOT NULL DEFAULT 'pending',
+			mode TEXT NOT NULL DEFAULT 'imported',
 			FOREIGN KEY (source_id) REFERENCES data_sources(id) ON DELETE CASCADE
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_source_snapshots_session ON source_snapshots(session_id)`,
@@ -323,7 +324,7 @@ func (s *Store) migrate() error {
 		{table: "analysis_runs", columns: []string{"summary", "parent_run_id", "run_kind", "delegate_role", "goal_id"}},
 		{table: "files", columns: []string{"purpose"}},
 		{table: "run_messages", columns: []string{"tool_call_id"}},
-		{table: "source_snapshots", columns: []string{"rows_skipped", "import_row_limit", "import_truncated"}},
+		{table: "source_snapshots", columns: []string{"rows_skipped", "import_row_limit", "import_truncated", "mode"}},
 		{table: "semantic_confirmations", columns: []string{"confirmation_receipt_id", "provenance"}},
 	} {
 		if err := validateRequiredColumns(s.DB, required.table, required.columns); err != nil {

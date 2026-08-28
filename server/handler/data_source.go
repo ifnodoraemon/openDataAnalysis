@@ -13,6 +13,7 @@ import (
 	"github.com/ifnodoraemon/openDataAnalysis/config"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 	"github.com/ifnodoraemon/openDataAnalysis/service"
+	"github.com/ifnodoraemon/openDataAnalysis/session"
 )
 
 func SessionSourcesHandler(w http.ResponseWriter, r *http.Request) {
@@ -644,19 +645,32 @@ func ImportDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess.LockUpload()
-	defer sess.UnlockUpload()
-	result, err := connector.Import(r.Context(), service.SourceImportRequest{
-		SourceID:       sourceID,
-		WorkspaceID:    identity.WorkspaceID,
-		SessionID:      req.SessionID,
-		Object:         service.SourceObjectRef{Schema: req.SchemaName, Name: req.ObjectName},
-		Ingester:       sess.Ingester,
-		AuthSecret:     config.Cfg.AuthSecret,
-		ImportRowLimit: config.Cfg.SQLImportRowLimit,
-	})
+	var result *service.SnapshotImportResult
+	var bindMode string
+	if connector.Spec().SupportsImport {
+		bindMode = string(domain.SnapshotModeImported)
+		result, err = importFileSourceObject(r.Context(), connector, sess, service.SourceImportRequest{
+			SourceID:    sourceID,
+			WorkspaceID: identity.WorkspaceID,
+			SessionID:   req.SessionID,
+			Object:      service.SourceObjectRef{Schema: req.SchemaName, Name: req.ObjectName},
+			AuthSecret:  config.Cfg.AuthSecret,
+		})
+	} else {
+		bindMode = string(domain.SnapshotModeLive)
+		result, err = sourceService.BindLiveSourceObject(r.Context(), service.LiveBindRequest{
+			SourceID:    sourceID,
+			WorkspaceID: identity.WorkspaceID,
+			SessionID:   req.SessionID,
+			Object:      service.SourceObjectRef{Schema: req.SchemaName, Name: req.ObjectName},
+		})
+	}
 	if err != nil {
-		writeHandlerError(w, http.StatusInternalServerError, "导入失败", err)
+		if bindMode == string(domain.SnapshotModeLive) {
+			writeHandlerError(w, http.StatusInternalServerError, "绑定数据源失败", err)
+		} else {
+			writeHandlerError(w, http.StatusInternalServerError, "导入失败", err)
+		}
 		return
 	}
 
@@ -665,6 +679,7 @@ func ImportDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		"snapshot_id":         result.SnapshotID,
 		"semantic_profile_id": result.ProfileID,
 		"analysis_table_name": result.TableName,
+		"mode":                bindMode,
 		"row_count":           result.RowCount,
 		"column_count":        result.ColCount,
 		"rows_imported":       result.RowsImported,
@@ -703,7 +718,7 @@ func ImportDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		WorkspaceID:  identity.WorkspaceID,
 		SessionID:    req.SessionID,
 		ActorUserID:  identity.UserID,
-		EventType:    "data_source_imported",
+		EventType:    auditEventTypeForBind(bindMode),
 		ResourceType: "source_snapshot",
 		ResourceID:   result.SnapshotID,
 		PayloadJSON:  auditPayload,
@@ -721,4 +736,22 @@ func serviceAuditPayload(payload map[string]interface{}) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+func auditEventTypeForBind(bindMode string) string {
+	if bindMode == string(domain.SnapshotModeLive) {
+		return "data_source_bound"
+	}
+	return "data_source_imported"
+}
+
+func importFileSourceObject(ctx context.Context, connector service.SourceConnector, sess *session.Session, req service.SourceImportRequest) (*service.SnapshotImportResult, error) {
+	importer, ok := connector.(service.ImportingConnector)
+	if !ok {
+		return nil, fmt.Errorf("source type %s does not support importing", connector.Type())
+	}
+	sess.LockUpload()
+	defer sess.UnlockUpload()
+	req.Ingester = sess.Ingester
+	return importer.Import(ctx, req)
 }

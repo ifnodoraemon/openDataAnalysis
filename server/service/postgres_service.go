@@ -15,14 +15,12 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/ifnodoraemon/openDataAnalysis/data"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 )
-
-type PGImportResult = SnapshotImportResult
 
 type PostgresSourceConfig struct {
 	Host         string           `json:"host"`
@@ -202,15 +200,98 @@ func (s *SourceService) TestPostgresConnection(ctx context.Context, sourceID, au
 	return SourceTestResult{Success: true, Objects: validated}
 }
 
-func (s *SourceService) ImportPostgresSnapshot(ctx context.Context, sourceID, sessionID, schemaName, objectName string, sessIngester *data.Ingester, authSecret string, importRowLimit int) (*PGImportResult, error) {
-	return NewPostgresConnector(s).Import(ctx, SourceImportRequest{
-		SourceID:       sourceID,
-		SessionID:      sessionID,
-		Object:         SourceObjectRef{Schema: schemaName, Name: objectName},
-		Ingester:       sessIngester,
-		AuthSecret:     authSecret,
-		ImportRowLimit: importRowLimit,
-	})
+func (s *SourceService) FetchPostgresLiveObjectMetadata(ctx context.Context, sourceConfig *domain.SourceConfig, authSecret string, object SourceObjectRef) (*LiveObjectMetadata, error) {
+	pgDB, err := OpenPostgresConnection(ctx, sourceConfig, authSecret)
+	if err != nil {
+		return nil, err
+	}
+	defer pgDB.Close()
+
+	columnRows, err := pgDB.QueryContext(ctx,
+		`SELECT column_name, data_type FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position`,
+		object.Schema, object.Name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read upstream column metadata: %w", err)
+	}
+	columns := make([]LiveColumn, 0, 16)
+	for columnRows.Next() {
+		var name, declaredType string
+		if err := columnRows.Scan(&name, &declaredType); err != nil {
+			columnRows.Close()
+			return nil, fmt.Errorf("failed to scan upstream column metadata: %w", err)
+		}
+		columns = append(columns, LiveColumn{Name: name, DeclaredType: declaredType})
+	}
+	closeErr := columnRows.Close()
+	if err := columnRows.Err(); err != nil {
+		return nil, fmt.Errorf("failed while reading upstream column metadata: %w", err)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("failed to close upstream column metadata rows: %w", closeErr)
+	}
+	if len(columns) == 0 {
+		return nil, fmt.Errorf("upstream object %s.%s does not exist or exposes no columns", object.Schema, object.Name)
+	}
+
+	var estimate int64
+	estimateErr := pgDB.QueryRowContext(ctx,
+		`SELECT GREATEST(c.reltuples, 0)::bigint
+		 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE n.nspname = $1 AND c.relname = $2`,
+		object.Schema, object.Name).Scan(&estimate)
+	if estimateErr != nil {
+		if errors.Is(estimateErr, sql.ErrNoRows) {
+			return nil, fmt.Errorf("upstream object %s.%s does not exist", object.Schema, object.Name)
+		}
+		estimate = 0
+	}
+
+	return &LiveObjectMetadata{Columns: columns, RowCountEstimate: estimate}, nil
+}
+
+func (s *SourceService) ExecutePostgresLiveQuery(ctx context.Context, sourceConfig *domain.SourceConfig, authSecret, sql string, timeoutSeconds, maxRows int) (*LiveQueryRows, error) {
+	if timeoutSeconds < 1 {
+		return nil, fmt.Errorf("timeout_seconds must be positive")
+	}
+	if maxRows < 1 {
+		return nil, fmt.Errorf("max_rows must be positive")
+	}
+	pgDB, err := OpenPostgresConnection(ctx, sourceConfig, authSecret)
+	if err != nil {
+		return nil, err
+	}
+	defer pgDB.Close()
+
+	queryCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+	defer cancel()
+
+	conn, err := pgDB.Conn(queryCtx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire upstream connection: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(queryCtx, "BEGIN TRANSACTION READ ONLY"); err != nil {
+		return nil, fmt.Errorf("failed to begin read-only transaction: %w", err)
+	}
+	defer func() {
+		rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer rollbackCancel()
+		_, _ = conn.ExecContext(rollbackCtx, "ROLLBACK")
+	}()
+
+	if _, err := conn.ExecContext(queryCtx, fmt.Sprintf("SET LOCAL statement_timeout = %d", timeoutSeconds*1000)); err != nil {
+		return nil, fmt.Errorf("failed to set statement timeout: %w", err)
+	}
+
+	wrapped := fmt.Sprintf("SELECT * FROM (%s) AS _oda_live_query LIMIT %d", sql, maxRows)
+	rows, err := conn.QueryContext(queryCtx, wrapped)
+	if err != nil {
+		return nil, fmt.Errorf("live query execution failed: %w", err)
+	}
+	defer rows.Close()
+	return scanLiveQueryRows(queryCtx, rows, "postgres")
 }
 
 func quotePGIdentifier(name string) (string, error) {
@@ -221,98 +302,6 @@ func quotePGIdentifier(name string) (string, error) {
 		return "", fmt.Errorf("PostgreSQL identifier contains NUL byte")
 	}
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`, nil
-}
-
-func (s *SourceService) streamImportToSQLite(ctx context.Context, pgDB *sql.DB, schema, object string, ingester *data.Ingester, tableName string, importRowLimit int) (rowCountResult, colCountResult, rowsSkippedResult int, importTruncatedResult bool, resultErr error) {
-	if err := data.ValidateSQLIdent(tableName); err != nil {
-		return 0, 0, 0, false, fmt.Errorf("invalid SQLite table name: %w", err)
-	}
-	quotedSchema, err := quotePGIdentifier(schema)
-	if err != nil {
-		return 0, 0, 0, false, err
-	}
-	quotedObject, err := quotePGIdentifier(object)
-	if err != nil {
-		return 0, 0, 0, false, err
-	}
-	qualifiedName := fmt.Sprintf("%s.%s", quotedSchema, quotedObject)
-
-	query := fmt.Sprintf("SELECT * FROM %s", qualifiedName)
-	if importRowLimit > 0 {
-		query = fmt.Sprintf("%s LIMIT %d", query, importRowLimit+1)
-	}
-	rows, err := pgDB.QueryContext(ctx, query)
-	if err != nil {
-		return 0, 0, 0, false, fmt.Errorf("failed to query upstream data: %w", err)
-	}
-	defer func() {
-		if closeErr := rows.Close(); closeErr != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("close upstream rows: %w", closeErr))
-		}
-	}()
-
-	colTypes, err := rows.ColumnTypes()
-	if err != nil {
-		return 0, 0, 0, false, fmt.Errorf("failed to read column types: %w", err)
-	}
-	colCount := len(colTypes)
-	colNames := make([]string, colCount)
-	for i, ct := range colTypes {
-		colNames[i] = ct.Name()
-	}
-
-	sqliteColTypes := make([]data.ColumnType, colCount)
-	for i := range colTypes {
-		sqliteColTypes[i] = data.TypePreserve
-	}
-
-	if err := ingester.CreateTypedTable(tableName, colNames, sqliteColTypes); err != nil {
-		return 0, 0, 0, false, fmt.Errorf("failed to create SQLite table: %w", err)
-	}
-
-	batchSize := 5000
-	batch := make([][]interface{}, 0, batchSize)
-	rowCount := 0
-	importTruncated := false
-
-	vals := make([]interface{}, colCount)
-	valPtrs := make([]interface{}, colCount)
-	for i := range vals {
-		valPtrs[i] = &vals[i]
-	}
-
-	for rows.Next() {
-		if importRowLimit > 0 && rowCount+len(batch) >= importRowLimit {
-			importTruncated = true
-			break
-		}
-		if err := rows.Scan(valPtrs...); err != nil {
-			return rowCount, colCount, 0, importTruncated, fmt.Errorf("failed to scan upstream row %d: %w", rowCount+len(batch)+1, err)
-		}
-		row := make([]interface{}, colCount)
-		for i := range vals {
-			row[i] = cloneSQLValue(vals[i])
-		}
-		batch = append(batch, row)
-		if len(batch) >= batchSize {
-			if err := ingester.InsertBatchValues(tableName, colNames, batch); err != nil {
-				return rowCount, colCount, 0, importTruncated, err
-			}
-			rowCount += len(batch)
-			batch = batch[:0]
-		}
-	}
-	if len(batch) > 0 {
-		if err := ingester.InsertBatchValues(tableName, colNames, batch); err != nil {
-			return rowCount, colCount, 0, importTruncated, err
-		}
-		rowCount += len(batch)
-	}
-	if err := rows.Err(); err != nil {
-		return rowCount, colCount, 0, importTruncated, fmt.Errorf("failed while reading upstream data: %w", err)
-	}
-
-	return rowCount, colCount, 0, importTruncated, nil
 }
 
 func (s *SourceService) findSourceConfig(ctx context.Context, sourceID string) (*domain.SourceConfig, error) {

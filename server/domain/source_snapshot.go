@@ -16,6 +16,14 @@ const (
 	ProfileModePending ProfileMode = "pending"
 	ProfileModeSampled ProfileMode = "sampled"
 	ProfileModeExact   ProfileMode = "exact"
+	ProfileModeLive    ProfileMode = "live"
+)
+
+type SnapshotMode string
+
+const (
+	SnapshotModeImported SnapshotMode = "imported"
+	SnapshotModeLive     SnapshotMode = "live"
 )
 
 type SourceSnapshot struct {
@@ -40,4 +48,5 @@ type SourceSnapshot struct {
 	ProfileDurationMs int
 	SnapshotSizeBytes int64
 	ProfileMode       ProfileMode
+	Mode              SnapshotMode
 }

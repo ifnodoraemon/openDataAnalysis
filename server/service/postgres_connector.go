@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -41,7 +40,7 @@ func (c *PostgresConnector) Spec() SourceConnectorSpec {
 		},
 		SupportsAllowlist: true,
 		SupportsCatalog:   true,
-		SupportsImport:    true,
+		SupportsImport:    false,
 	}
 }
 
@@ -139,23 +138,22 @@ func (c *PostgresConnector) Catalog(ctx context.Context, sourceID string) ([]Sou
 	return objects, nil
 }
 
-func (c *PostgresConnector) Import(ctx context.Context, req SourceImportRequest) (*SnapshotImportResult, error) {
+func (c *PostgresConnector) Dialect() string { return "postgres" }
+
+func (c *PostgresConnector) QualifyObject(schema, name string) string {
+	qualifiedSchema, schemaErr := quotePGIdentifier(schema)
+	qualifiedName, nameErr := quotePGIdentifier(name)
+	if schemaErr != nil || nameErr != nil {
+		return schema + "." + name
+	}
+	return qualifiedSchema + "." + qualifiedName
+}
+
+func (c *PostgresConnector) FetchLiveObjectMetadata(ctx context.Context, sourceID, authSecret string, object SourceObjectRef) (*LiveObjectMetadata, error) {
 	if c.Sources == nil {
 		return nil, fmt.Errorf("postgres connector is not initialized")
 	}
-	if req.Ingester == nil {
-		return nil, fmt.Errorf("analysis database is not initialized")
-	}
-
-	source, err := c.Sources.DataSourceRepo.GetByID(ctx, req.SourceID)
-	if err != nil {
-		return nil, err
-	}
-	if source.SourceType != domain.SourceTypePostgresConnection {
-		return nil, fmt.Errorf("source %s is not a postgres connection", req.SourceID)
-	}
-
-	sourceConfig, err := c.Sources.findSourceConfig(ctx, req.SourceID)
+	sourceConfig, err := c.Sources.findSourceConfig(ctx, sourceID)
 	if err != nil {
 		return nil, err
 	}
@@ -163,71 +161,27 @@ func (c *PostgresConnector) Import(ctx context.Context, req SourceImportRequest)
 	if err != nil {
 		return nil, err
 	}
-	importRowLimit := req.ImportRowLimit
-	if importRowLimit < 0 {
-		return nil, fmt.Errorf("import_row_limit cannot be negative")
-	}
-
-	objectName := req.Object.Name
-	if err := validateExactConfigText("object_name", objectName); err != nil {
-		return nil, fmt.Errorf("object_name is required")
-	}
-	resolvedSchema := req.Object.Schema
-	if err := validateExactConfigText("schema_name", resolvedSchema); err != nil {
+	if err := validateExactConfigText("schema_name", object.Schema); err != nil {
 		return nil, err
 	}
-
-	if !isInAllowlist(cfg.Allowlist, resolvedSchema, objectName) {
-		return nil, fmt.Errorf("object %s.%s is not in the data source allowlist", resolvedSchema, objectName)
+	if err := validateExactConfigText("object_name", object.Name); err != nil {
+		return nil, err
 	}
+	if !isInAllowlist(cfg.Allowlist, object.Schema, object.Name) {
+		return nil, fmt.Errorf("object %s.%s is not in the data source allowlist", object.Schema, object.Name)
+	}
+	return c.Sources.FetchPostgresLiveObjectMetadata(ctx, sourceConfig, authSecret, object)
+}
 
-	pgDB, err := OpenPostgresConnection(ctx, sourceConfig, req.AuthSecret)
+func (c *PostgresConnector) ExecuteLiveQuery(ctx context.Context, sourceID, authSecret, sql string, timeoutSeconds, maxRows int) (*LiveQueryRows, error) {
+	if c.Sources == nil {
+		return nil, fmt.Errorf("postgres connector is not initialized")
+	}
+	sourceConfig, err := c.Sources.findSourceConfig(ctx, sourceID)
 	if err != nil {
 		return nil, err
 	}
-	defer pgDB.Close()
-
-	preSnapshot, err := c.Sources.BeginSnapshotImport(
-		ctx, req.SessionID, req.SourceID,
-		string(domain.SourceTypePostgresConnection), resolvedSchema, objectName,
-	)
-	if err != nil {
-		return nil, err
-	}
-	tableName := preSnapshot.AnalysisTableName
-
-	importStart := time.Now()
-	rowCount, colCount, rowsSkipped, importTruncated, err := c.Sources.streamImportToSQLite(ctx, pgDB, resolvedSchema, objectName, req.Ingester, tableName, importRowLimit)
-	importDuration := time.Since(importStart)
-	if err != nil {
-		errMsg := err.Error()
-		statusErr := c.Sources.SnapshotRepo.UpdateStatus(ctx, preSnapshot.ID, domain.SnapshotStatusFailed, &errMsg)
-		return nil, errors.Join(fmt.Errorf("import failed: %w", err), statusErr)
-	}
-
-	var warnings []string
-	if rowsSkipped > 0 {
-		warnings = append(warnings, fmt.Sprintf("%d upstream rows were skipped during import because they could not be scanned", rowsSkipped))
-	}
-
-	return c.Sources.FinalizeSnapshotImport(ctx, SnapshotImportCompletion{
-		SnapshotID:        preSnapshot.ID,
-		SessionID:         req.SessionID,
-		SourceID:          req.SourceID,
-		UpstreamKind:      string(domain.SourceTypePostgresConnection),
-		UpstreamSchema:    resolvedSchema,
-		UpstreamObject:    objectName,
-		AnalysisTableName: tableName,
-		RowCount:          rowCount,
-		ColCount:          colCount,
-		RowsImported:      rowCount,
-		RowsSkipped:       rowsSkipped,
-		ImportRowLimit:    importRowLimit,
-		ImportTruncated:   importTruncated,
-		ImportDuration:    importDuration,
-		ExtraWarnings:     warnings,
-		Ingester:          req.Ingester,
-	})
+	return c.Sources.ExecutePostgresLiveQuery(ctx, sourceConfig, authSecret, sql, timeoutSeconds, maxRows)
 }
 
 func normalizePostgresConfigJSON(raw json.RawMessage, provided bool, existing *domain.SourceConfig) (PostgresSourceConfig, error) {

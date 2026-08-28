@@ -6,34 +6,28 @@
 
 ## 当前状态
 
-已支持 PostgreSQL 和 MySQL workspace data source，并以 snapshot import 方式导入到当前 session 的 SQLite 分析库。
+PostgreSQL 和 MySQL workspace data source 以只读实时直连方式支持：分析查询直接在源库执行。上传文件（CSV/XLSX）仍导入到当前 session 的 SQLite 分析库。
 
-后端已引入 `SourceConnector` 抽象：
+后端通过 `SourceConnector` 抽象支撑：
 
-- `file_upload`、`postgres_connection` 和 `mysql_connection` 都通过 connector 执行 catalog/test/import 等运行时能力。
-- connector 负责 config 规范化、credential 加密、公开配置序列化和运行时导入。
-- 导入后的 schema 提取、snapshot completion、structural profile 创建、截断/估计 warning 写入走统一收尾管线。
-- 每次导入使用独立分析表；成功完成后才切换 active binding，随后清理旧版本。失败导入不会覆盖或删除旧的 active snapshot。
-- SQL 配置已从专用 `database_connections` 升级为通用 `source_configs`，后续新增商业数据源不再需要新增专用配置表。
+- `file_upload`、`postgres_connection` 和 `mysql_connection` 都通过 connector 执行 catalog/test/绑定（文件为导入）等运行时能力。
+- connector 负责 config 规范化、credential 加密、公开配置序列化和各自的运行时能力。
+- 文件导入走统一收尾管线（schema 提取、snapshot completion、structural profile、截断/估计 warning）；live 绑定走统一收尾管线（catalog 元数据、profile 创建、激活）。
+- 每个导入文件使用独立分析表；成功完成后才切换 active binding，随后清理旧版本。失败的绑定不会覆盖或删除旧的 active snapshot。
+- SQL 配置使用通用 `source_configs`，后续新增商业数据源不再需要新增专用配置表。
 
 当前不支持：
 
-- live upstream query
 - 写回数据库
 - 任意数据库类型
-- 跨数据库实时 join
+- 跨源实时 join
 - 自动修改上游 schema
 
-## 为什么先做 Snapshot Import
+每条实时查询都是单条只读语句，只触碰一个已绑定数据源。
 
-当前分析执行层是 session-scoped SQLite。SQL 表/视图先导入成固定 snapshot，再由 agent 使用同一套 `data_query_sql`、图表和报告工具分析。
+## 为什么数据库走实时直连
 
-这样做的原因：
-
-- 分析可复现，报告能追溯到导入时刻。
-- 权限、超时、行数上限和资源消耗更容易控制。
-- 文件上传和数据库导入在 agent 观察面中保持同质。
-- 不把上游数据库暴露为任意 SQL 执行面。
+导入行数有上限，大表会被截断，恰好在大规模数据上产生错误结论。只读直连把聚合和过滤下推给源库引擎，并保证数据实时。补偿机制是只读事务、语句超时、行数上限，以及"单条查询只触碰一个源"的显式事实。实时数据源的可复现性作为 live 属性向模型和用户披露，而不是靠复制数据来保证。
 
 ## 领域模型
 
@@ -41,7 +35,7 @@
 |---|---|
 | `DataSource` | 工作区级数据源；当前包括 `file_upload`、`postgres_connection` 和 `mysql_connection` |
 | `SourceConfig` | connector 类型、公开配置 JSON、加密 credential、测试状态 |
-| `SourceSnapshot` | 某个 source 在某个 session 中导入到 SQLite 的固定快照 |
+| `SourceSnapshot` | source 在某个 session 中绑定的对象：`mode=imported`（文件行已入 session SQLite）或 `mode=live`（上游对象，不复制行） |
 | `SessionSourceBinding` | session 当前绑定的 source/object -> active snapshot |
 | `SemanticProfile` | schema、采样方式、列统计和 warning 等观测事实 |
 | `SemanticConfirmation` | 用户明确提交的 session/workspace 级 JSON patch 与授权来源 |
@@ -54,29 +48,33 @@
 - MySQL 使用 `go-sql-driver/mysql`，运行时只生成 allowlist 对象的 `SELECT *` import 查询。
 - PostgreSQL 的 `ssl_mode` 和 MySQL 的 `tls_mode` 都必须显式提供；运行时不根据 host、端口或环境猜测传输模式。
 - 创建 SQL 数据源时要求 `AUTH_SECRET` 长度至少 32，用于 AES-GCM 加密密码。
-- 只允许导入 allowlist 中的 schema/table/view。
+- 只有 allowlist 中的 schema/table/view 可以绑定到会话做实时查询。
 - catalog API 只返回 allowlist 对象，不扫描整库暴露元数据。
 
-## 导入边界
+## 导入与直连的边界
 
-默认配置：
+两类数据源采用不同模型：
 
-```env
-SQL_IMPORT_ROW_LIMIT=1000000
-```
+- `file_upload`（CSV/XLSX）导入到会话本地 SQLite 分析库，profile 从导入行做精确结构统计。
+- `postgres_connection` 和 `mysql_connection` 不导入任何数据行。绑定一个 allowlist 对象会创建 live 快照记录（`mode=live`）、一份来自上游 catalog 的结构 profile，以及一条会话绑定；分析查询直接在源库执行。
 
-行为：
+文件导入默认不做行数上限；`SQL_IMPORT_ROW_LIMIT` 环境变量已移除。
 
-- `0` 表示不限制导入行数。
-- 大于 `0` 时，导入查询使用 `LIMIT row_limit + 1` 探测是否被截断。
-- 如果超过上限，snapshot 保存 `import_truncated=true` 和 `import_row_limit`。
-- profile 和 UI 会明确显示截断状态，报告不应把受限快照包装成全量事实。
+## 实时查询边界
 
-持久化 profile 对已导入 snapshot 做精确结构观察。`data_describe_table` 的调用方必须显式提供 `sample_rows`：`0` 表示精确统计，正数表示有界结构采样；工具会原样返回 source rows、sample rows、method 和 estimated 状态。运行时不按数据规模替模型选择该参数。
+`data_query_sql` 携带 `source_id` 时，在源库直接执行一条经过校验的只读语句：
+
+- 只接受单条 `SELECT`/`WITH`；DML 与 DDL 一律拒绝。
+- PostgreSQL 在 `BEGIN TRANSACTION READ ONLY` 中执行并设置 `statement_timeout`，连接池同时设置 `default_transaction_read_only=on`；MySQL 在 `START TRANSACTION READ ONLY` 中执行并设置 `max_execution_time`。
+- 结果上限 200 行；超限直接报错，不做静默截断。
+- 查询使用源库方言的 schema 限定表名；单条查询只触碰一个数据源，跨源 join 不受支持，会返回事实性错误。
+- 查询以所配置数据库账号的权限执行；该账号应当只读且最小授权。
+
+`data_list_tables` 携带 `source_id` 时列出已绑定的实时对象及引擎行数估算。`data_describe_table` 携带 `source_id` 时从 live profile 返回结构列事实；正数 `sample_rows` 会取一次有界的上游采样，`0` 不发起上游查询——对实时源不做精确全表统计。
 
 ## 语义画像和确认
 
-导入完成后会生成 `SemanticProfile`。它只保存结构观测：schema、声明类型、行列数、非空率、distinct/sample values、采样方法和操作性 warning。runtime 不从列名或值格式推断数值含义、时间列、业务别名、指标、单位、join 或主时间列，也不把未确认解释写回 profile。
+导入完成后会生成 `SemanticProfile`。它只保存结构观测：schema、声明类型、行列数、非空率、distinct/sample values、采样方法和操作性 warning。live 绑定生成 catalog 型 profile：来自上游 catalog 的列名与声明类型、引擎行数估算，以及 `live` 画像模式；由于不复制数据行，不包含逐列值统计。runtime 不从列名或值格式推断数值含义、时间列、业务别名、指标、单位、join 或主时间列，也不把未确认解释写回 profile。
 
 用户确认通过 `SemanticConfirmation` 保存：
 
@@ -92,7 +90,7 @@ workspace 范围的确认还会沉淀为 `SemanticAsset`：
 
 关键事件会写入 `AuditEvent`：
 
-- 数据源导入完成后记录 source、snapshot、目标分析表、行列数、截断状态和 profile ID。
+- 数据源绑定/导入完成后记录 source、snapshot、目标分析表（导入）或上游对象（实时）、行列数、截断状态（导入）和 profile ID。
 - profile 确认和语义资产 upsert 会记录 actor、scope、schema signature 和资产键。
 
 ## API
@@ -103,7 +101,7 @@ workspace 范围的确认还会沉淀为 `SemanticAsset`：
 - `DELETE /api/data-sources/{sourceID}`：删除 workspace source，并移除相关 snapshot/profile。
 - `POST /api/data-sources/{sourceID}/test`：测试连接和 allowlist。
 - `GET /api/data-sources/{sourceID}/catalog`：返回 allowlist 对象。
-- `POST /api/data-sources/{sourceID}/import`：导入 allowlist 对象到 session snapshot。
+- `POST /api/data-sources/{sourceID}/import`：将一个 allowlist 对象绑定到会话。SQL 数据源创建实时绑定；文件数据源导入快照。
 - `GET /api/sessions/{sessionID}/sources`：查看当前 session source/snapshot/profile 摘要。
 - `GET /api/semantic-profiles/{profileID}`：查看 profile 详情。
 - `POST /api/semantic-profiles/{profileID}/confirm`：保存确认或覆盖。
@@ -115,10 +113,11 @@ Connector 负责数据源类型相关的运行时能力：
 - `NormalizeConfig`：校验并规范化 connector 配置，必要时加密 credential。
 - `PublicConfig`：返回不含 secret 的配置摘要和最近测试状态。
 - `Test`：验证文件、连接或外部系统对象是否可访问。
-- `Catalog`：返回当前 source 可导入对象，且只暴露允许范围。
-- `Import`：把指定对象物化到 session analysis SQLite。
+- `Catalog`：返回当前 source 可绑定对象，且只暴露允许范围。
+- SQL connector 另实现 live 能力：`FetchLiveObjectMetadata`（catalog 列结构 + 行数估算）与 `ExecuteLiveQuery`（只读事务 + 超时 + 行数上限的直连执行）。
+- 文件 connector 另实现 `Import`：把指定对象物化到 session analysis SQLite。
 
-Connector 不负责 agent 决策、不直接生成报告，也不把上游 live query 暴露给 agent。所有 connector import 成功后都必须产出 `SourceSnapshot` 和尽可能完整的 `SemanticProfile`。
+Connector 不负责 agent 决策、不直接生成报告。所有绑定成功后都必须产出 `SourceSnapshot`（`mode=imported` 或 `mode=live`）和结构 `SemanticProfile`。
 
 ## Agent 工具面
 
@@ -129,21 +128,14 @@ Connector 不负责 agent 决策、不直接生成报告，也不把上游 live 
 - `state_governance_inspect`
 - `state_source_confirm_profile`
 
-分析工具仍只面向 session SQLite snapshot：
+分析工具默认面向 session SQLite（导入文件），并支持通过显式 `source_id` 路由到一个已绑定的实时数据源：
 
-- `data_list_tables`
-- `data_describe_table`
-- `data_query_sql`
-
-Agent 不直接生成上游数据库 SQL。
+- `data_list_tables`：无 `source_id` 列出本地表；携带 `source_id` 列出该源已绑定的实时对象。
+- `data_describe_table`：无 `source_id` 做本地结构统计；携带 `source_id` 返回 live 结构事实，正数 `sample_rows` 触发有界上游采样。
+- `data_query_sql`：无 `source_id` 执行 SQLite 方言查询；携带 `source_id` 在源库方言下直连执行（只读事务、语句超时、200 行上限）。单条查询只触碰一个数据源。
 
 `state_governance_inspect` 只返回通用数据治理事实，例如 snapshot 状态、导入截断、profile warning、授权补丁和可复用资产数量；它不返回 `next_action`，也不按固定行业或工作流触发行为。
 
 ## 后续方向
 
-后续如果要支持 live query 或更多 SaaS/API connector，应作为独立执行层或 connector 能力设计，并单独处理：
-
-- 上游 SQL 权限和超时。
-- pushdown 与 session snapshot 的一致性。
-- 报告复现和数据期间标注。
-- 大表筛选、分区、增量导入或 DuckDB/ClickHouse 等执行引擎选择。
+后续新增 connector 类型（例如 Hive、ClickHouse 等引擎）沿用同一 live 只读 connector 契约：显式配置、allowlist 绑定、方言级只读执行（语句超时 + 行数上限）。这些能力不从现有 connector 类型猜测。针对变化的实时数据的报告可复现性是模型与用户的显式责任，并通过报告事实披露。

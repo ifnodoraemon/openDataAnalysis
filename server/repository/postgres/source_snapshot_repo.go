@@ -16,31 +16,32 @@ func NewSourceSnapshotRepository(db DBTX) *SourceSnapshotRepository {
 	return &SourceSnapshotRepository{db: db}
 }
 
-const snapshotCols = `id, session_id, source_id, upstream_kind, upstream_schema, upstream_object, analysis_table_name, row_count, column_count, status, error_message, schema_signature, imported_at, rows_imported, rows_skipped, import_row_limit, import_truncated, import_duration_ms, profile_duration_ms, snapshot_size_bytes, profile_mode`
+const snapshotCols = `id, session_id, source_id, upstream_kind, upstream_schema, upstream_object, analysis_table_name, row_count, column_count, status, error_message, schema_signature, imported_at, rows_imported, rows_skipped, import_row_limit, import_truncated, import_duration_ms, profile_duration_ms, snapshot_size_bytes, profile_mode, mode`
 
 func scanSnapshot(row pgx.Row) (*domain.SourceSnapshot, error) {
 	var s domain.SourceSnapshot
-	var status, profileMode string
+	var status, profileMode, mode string
 	if err := row.Scan(
 		&s.ID, &s.SessionID, &s.SourceID, &s.UpstreamKind, &s.UpstreamSchema, &s.UpstreamObject,
 		&s.AnalysisTableName, &s.RowCount, &s.ColumnCount, &status, &s.ErrorMessage,
 		&s.SchemaSignature, &s.ImportedAt, &s.RowsImported, &s.RowsSkipped, &s.ImportRowLimit,
-		&s.ImportTruncated, &s.ImportDurationMs, &s.ProfileDurationMs, &s.SnapshotSizeBytes, &profileMode,
+		&s.ImportTruncated, &s.ImportDurationMs, &s.ProfileDurationMs, &s.SnapshotSizeBytes, &profileMode, &s.Mode,
 	); err != nil {
 		return nil, err
 	}
 	s.Status = domain.SnapshotStatus(status)
 	s.ProfileMode = domain.ProfileMode(profileMode)
+	s.Mode = domain.SnapshotMode(mode)
 	return &s, nil
 }
 
 func (r *SourceSnapshotRepository) Create(ctx context.Context, snapshot *domain.SourceSnapshot) error {
 	_, err := r.db.Exec(ctx,
-		`INSERT INTO source_snapshots (`+snapshotCols+`) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`,
+		`INSERT INTO source_snapshots (`+snapshotCols+`) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
 		snapshot.ID, snapshot.SessionID, snapshot.SourceID, snapshot.UpstreamKind, snapshot.UpstreamSchema, snapshot.UpstreamObject,
 		snapshot.AnalysisTableName, snapshot.RowCount, snapshot.ColumnCount, string(snapshot.Status), snapshot.ErrorMessage,
 		snapshot.SchemaSignature, snapshot.ImportedAt, snapshot.RowsImported, snapshot.RowsSkipped, snapshot.ImportRowLimit,
-		snapshot.ImportTruncated, snapshot.ImportDurationMs, snapshot.ProfileDurationMs, snapshot.SnapshotSizeBytes, string(snapshot.ProfileMode),
+		snapshot.ImportTruncated, snapshot.ImportDurationMs, snapshot.ProfileDurationMs, snapshot.SnapshotSizeBytes, string(snapshot.ProfileMode), string(snapshot.Mode),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create source snapshot: %w", err)

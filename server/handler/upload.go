@@ -164,12 +164,19 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runtimeSession.LockUpload()
-	ingestResult, ingestErr := connector.Import(r.Context(), service.SourceImportRequest{
-		SourceID:    source.ID,
-		WorkspaceID: sess.WorkspaceID,
-		SessionID:   sess.ID,
-		Ingester:    runtimeSession.Ingester,
-	})
+	importer, importerOK := connector.(service.ImportingConnector)
+	var ingestResult *service.SnapshotImportResult
+	var ingestErr error
+	if !importerOK {
+		ingestErr = fmt.Errorf("source type %s does not support importing", source.SourceType)
+	} else {
+		ingestResult, ingestErr = importer.Import(r.Context(), service.SourceImportRequest{
+			SourceID:    source.ID,
+			WorkspaceID: sess.WorkspaceID,
+			SessionID:   sess.ID,
+			Ingester:    runtimeSession.Ingester,
+		})
+	}
 	runtimeSession.UnlockUpload()
 	if ingestErr != nil {
 		log.Printf("upload: materialize failed file_id=%s err=%v", uploaded.ID, ingestErr)

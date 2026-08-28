@@ -49,7 +49,7 @@
 
             <div v-if="sessionSources.length === 0" class="empty-state">
               <div class="empty-icon">📭</div>
-              <p>当前会话暂无数据源，请从工作区导入或上传文件。</p>
+              <p>当前会话暂无数据源，请从工作区绑定数据库或上传文件。</p>
             </div>
 
             <div class="grid-list">
@@ -71,8 +71,11 @@
                   <span class="type-badge">{{
                     sourceTypeLabel(source.source_type)
                   }}</span>
+                  <span v-if="source.mode === 'live'" class="meta-item live-badge"
+                    >实时直连</span
+                  >
                   <span v-if="source.row_count" class="meta-item"
-                    >{{ source.row_count.toLocaleString() }} 行</span
+                    >{{ source.row_count.toLocaleString() }}{{ source.mode === 'live' ? ' 行（估算）' : ' 行' }}</span
                   >
                   <span :class="['status-badge', source.snapshot_status]">{{
                     snapshotStatusLabel(source.snapshot_status)
@@ -161,7 +164,7 @@
               </div>
 
               <div class="allowlist-box">
-                <h5>白名单配置（需要导入的表）</h5>
+                <h5>白名单配置（可绑定的表）</h5>
                 <div
                   v-for="(entry, idx) in newSource.allowlist"
                   :key="idx"
@@ -238,7 +241,7 @@
                       测试连接
                     </button>
                     <button class="btn-text" @click="openImportFor(ds)">
-                      导入到会话
+                      绑定到会话
                     </button>
                     <button
                       class="btn-text danger"
@@ -254,7 +257,7 @@
             <!-- Import Catalog View -->
             <div v-if="importingSource" class="import-overlay">
               <div class="import-dialog">
-                <h4>导入表到当前会话 - {{ importingSource.name }}</h4>
+                <h4>绑定表到当前会话（实时只读直连）- {{ importingSource.name }}</h4>
                 <div v-if="importError" class="error-banner">
                   {{ importError }}
                 </div>
@@ -274,7 +277,7 @@
                       "
                       :disabled="isImporting"
                     >
-                      导入分析
+                      实时绑定
                     </button>
                   </div>
                 </div>
@@ -467,7 +470,7 @@ async function openImportFor(ds) {
   importError.value = "";
   const result = await store.fetchSourceCatalog(ds.id);
   if (result?.ok === false) {
-    importError.value = result.error || "加载可导入对象失败";
+    importError.value = result.error || "加载可绑定对象失败";
   } else {
     importCatalog.value = result.data || [];
   }
@@ -483,12 +486,12 @@ async function handleImport(sourceId, schema, name) {
       name,
     );
     if (result?.ok === false) {
-      throw new Error(result.error || "导入失败");
+      throw new Error(result.error || "绑定失败");
     }
     importingSource.value = null;
     emit("close");
   } catch (err) {
-    importError.value = "导入失败：" + err.message;
+    importError.value = "绑定失败：" + err.message;
   } finally {
     isImporting.value = false;
   }
@@ -801,6 +804,14 @@ async function handleFileUpload(e) {
   border-radius: 12px;
   font-size: 0.75rem;
   color: var(--text-sub);
+}
+
+.live-badge {
+  background: rgba(34, 197, 94, 0.12);
+  color: #16a34a;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.75rem;
 }
 
 .status-badge {

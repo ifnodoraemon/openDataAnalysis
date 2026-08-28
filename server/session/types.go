@@ -131,6 +131,86 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 			})
 			return auditErrors, err
 		}
+		ctx.LiveQueryProvider = func(ctx context.Context, req tools.LiveQueryRequest) (*tools.LiveQueryResult, error) {
+			rows, err := sourceService.ExecuteSessionLiveQuery(ctx, service.LiveQueryCall{
+				SourceID:       req.SourceID,
+				SessionID:      id,
+				WorkspaceID:    workspaceID,
+				SQL:            req.SQL,
+				TimeoutSeconds: req.TimeoutSeconds,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return &tools.LiveQueryResult{
+				SourceID: req.SourceID,
+				Dialect:  rows.Dialect,
+				Columns:  rows.Columns,
+				Rows:     rows.Rows,
+				RowCount: len(rows.Rows),
+			}, nil
+		}
+		ctx.LiveTablesProvider = func(ctx context.Context, sourceID string) ([]tools.LiveSourceTable, error) {
+			facts, err := sourceService.ListSessionLiveTables(ctx, id, workspaceID, sourceID)
+			if err != nil {
+				return nil, err
+			}
+			tables := make([]tools.LiveSourceTable, 0, len(facts))
+			for _, fact := range facts {
+				tables = append(tables, tools.LiveSourceTable{
+					Schema:           fact.Schema,
+					Name:             fact.Name,
+					QualifiedName:    fact.QualifiedName,
+					Kind:             fact.Kind,
+					RowCountEstimate: fact.RowCountEstimate,
+					Estimated:        fact.Estimated,
+					ProfileID:        fact.ProfileID,
+					SnapshotID:       fact.SnapshotID,
+					Dialect:          fact.Dialect,
+				})
+			}
+			return tables, nil
+		}
+		ctx.LiveTableDescribeProvider = func(ctx context.Context, sourceID, schema, name string, sampleRows int) (*tools.LiveTableDescription, error) {
+			description, err := sourceService.DescribeSessionLiveTable(ctx, service.LiveDescribeCall{
+				SourceID:    sourceID,
+				SessionID:   id,
+				WorkspaceID: workspaceID,
+				Schema:      schema,
+				Name:        name,
+				SampleRows:  sampleRows,
+			})
+			if err != nil {
+				return nil, err
+			}
+			columns := make([]tools.LiveColumnFacts, 0, len(description.Columns))
+			for _, column := range description.Columns {
+				columns = append(columns, tools.LiveColumnFacts{Name: column.Name, DeclaredType: column.DeclaredType})
+			}
+			result := &tools.LiveTableDescription{
+				SourceID:         description.SourceID,
+				Schema:           description.Schema,
+				Name:             description.Name,
+				QualifiedName:    description.QualifiedName,
+				Dialect:          description.Dialect,
+				RowCountEstimate: description.RowCountEstimate,
+				Estimated:        description.Estimated,
+				ColumnCount:      description.ColumnCount,
+				Columns:          columns,
+				SampleRows:       description.SampleRows,
+				Warnings:         description.Warnings,
+			}
+			if description.Sample != nil {
+				result.Sample = &tools.LiveQueryResult{
+					SourceID: description.SourceID,
+					Dialect:  description.Sample.Dialect,
+					Columns:  description.Sample.Columns,
+					Rows:     description.Sample.Rows,
+					RowCount: len(description.Sample.Rows),
+				}
+			}
+			return result, nil
+		}
 	}
 	buildRuntimeRegistry = func(allowed []string) *tools.Registry {
 		reg := tools.NewRegistry()
@@ -264,14 +344,6 @@ func (s *Session) RLockQuery() {
 
 func (s *Session) RUnlockQuery() {
 	s.uploadMu.RUnlock()
-}
-
-func (s *Session) LockQuery() {
-	s.uploadMu.Lock()
-}
-
-func (s *Session) UnlockQuery() {
-	s.uploadMu.Unlock()
 }
 
 func (s *Session) SuspendRun(runID string) bool {

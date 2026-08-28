@@ -82,7 +82,7 @@ MaaS 目标架构契约见 [`docs/maas-production-architecture.md`](docs/maas-pr
 |---|---|
 | CSV | 流式批量导入，原样保留观测到的表头和单元格文本 |
 | Excel | 只接受恰好一个 worksheet 的工作簿，流式导入并原样保留表头和单元格文本 |
-| PostgreSQL / MySQL | 工作区级只读 SQL 连接，导入为 session SQLite snapshot；默认受 `SQL_IMPORT_ROW_LIMIT=1000000` 限制 |
+| PostgreSQL / MySQL | 只读实时直连：查询直接在源库执行（只读事务 + 语句超时 + 200 行上限），不导入数据 |
 | Live upstream query | 暂不支持；后续应作为独立能力设计 |
 
 每次导入都会写入 snapshot-scoped 分析表。只有 schema 事实和 profile 状态均已持久化后，当前 binding 才会切换；替换导入失败时，旧快照仍然可读。持久化 profile 对导入快照做精确结构观察；`data_describe_table` 是否使用 bounded sample 由模型通过 `sample_rows` 显式指定，运行时不按规模替模型选择。

@@ -101,6 +101,19 @@ func Initialize() {
 	sourceConnectors.Register(service.NewMySQLConnector(sourceService))
 	sourceConnectors.Register(service.NewFileUploadConnector(sourceService, fileService))
 
+	sourceService.SetCredentialSecret(config.Cfg.AuthSecret)
+	sourceService.SetLiveConnectorResolver(func(sourceType domain.SourceType) (service.LiveQueryConnector, error) {
+		connector, err := sourceConnectors.Get(sourceType)
+		if err != nil {
+			return nil, err
+		}
+		live, ok := connector.(service.LiveQueryConnector)
+		if !ok {
+			return nil, fmt.Errorf("source type %s does not support live read-only queries", sourceType)
+		}
+		return live, nil
+	})
+
 	sessionManager = session.NewManager(config.Cfg.CacheRoot, fileService, sourceService)
 	sessionManager.SetSessionRepository(sessionRepo)
 
