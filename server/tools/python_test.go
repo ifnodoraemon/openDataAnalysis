@@ -3,16 +3,20 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ifnodoraemon/openDataAnalysis/config"
+	"github.com/ifnodoraemon/openDataAnalysis/domain"
+	memoryrepo "github.com/ifnodoraemon/openDataAnalysis/repository/memory"
+	"github.com/ifnodoraemon/openDataAnalysis/service"
+	localstorage "github.com/ifnodoraemon/openDataAnalysis/storage/local"
 )
 
 func resetPythonHealthCacheForTest(t *testing.T) {
@@ -72,61 +76,81 @@ func TestFormatPythonResultReturnsStructuredFailure(t *testing.T) {
 	}
 }
 
-func TestRunPythonToolSignsGeneratedFileURLs(t *testing.T) {
+func TestRunPythonToolPersistsGeneratedFilesAsArtifacts(t *testing.T) {
 	prevCfg := config.Cfg
-	config.Cfg = &config.Config{AuthSecret: "abcdefghijklmnopqrstuvwxyz123456"}
+	config.Cfg = &config.Config{ProxyToken: "proxy-token"}
 	t.Cleanup(func() { config.Cfg = prevCfg })
-	t.Setenv("API_BASE_URL", "http://api.test")
-	t.Setenv("PROXY_TOKEN", "proxy-token")
 
 	const filename = "req_12345678_plot.png"
 	meta := ExecutionMetadata{
+		UserID:      "u_1",
 		WorkspaceID: "w_1",
 		SessionID:   "s_1",
 		RunID:       "r_1",
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/execute" {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/execute":
+			_ = json.NewEncoder(w).Encode(pyExecResponse{Success: true, Files: []string{filename}, DurationMs: 10})
+		case "/files/" + filename:
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("artifact-body"))
+		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(pyExecResponse{
-			Success:    true,
-			Files:      []string{filename},
-			DurationMs: 10,
-		})
-	}))
+	})
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("network namespace does not permit a loopback test server: %v", err)
+	}
+	server := httptest.NewUnstartedServer(handler)
+	server.Listener = listener
+	server.Start()
 	t.Cleanup(server.Close)
 
-	tool := &RunPythonTool{MCPEndpoint: server.URL}
+	workspaceRepo := memoryrepo.NewWorkspaceRepository()
+	if err := workspaceRepo.CreateWorkspace(context.Background(), &domain.Workspace{ID: meta.WorkspaceID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspaceRepo.AddMember(context.Background(), &domain.WorkspaceMember{WorkspaceID: meta.WorkspaceID, UserID: meta.UserID, Role: domain.WorkspaceRoleOwner}); err != nil {
+		t.Fatal(err)
+	}
+	fileRepo := memoryrepo.NewFileRepository()
+	fileService := &service.FileService{Storage: localstorage.New(t.TempDir(), ""), FileRepo: fileRepo, WorkspaceRepo: workspaceRepo}
+	reportState := &ReportState{}
+	tool := &RunPythonTool{MCPEndpoint: server.URL, FileService: fileService, ReportState: reportState}
 	tool.SetExecutionContext(WithExecutionMetadata(context.Background(), meta))
-	result, err := tool.Execute(json.RawMessage(`{"code":"print(1)","timeout":1}`))
+	result, err := tool.Execute(json.RawMessage(`{"code":"print(1)","timeout":5}`))
 	if err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
 
 	var payload struct {
-		OK    bool     `json:"ok"`
-		Files []string `json:"files"`
+		OK        bool             `json:"ok"`
+		Files     []string         `json:"files"`
+		Artifacts []ArtifactRecord `json:"artifacts"`
 	}
 	if err := json.Unmarshal([]byte(result), &payload); err != nil {
 		t.Fatalf("expected json payload: %v", err)
 	}
-	if !payload.OK || len(payload.Files) != 1 {
+	if !payload.OK || len(payload.Files) != 1 || len(payload.Artifacts) != 1 {
 		t.Fatalf("unexpected payload: %#v", payload)
 	}
-	parsed, err := url.Parse(payload.Files[0])
+	artifact := payload.Artifacts[0]
+	if !strings.HasPrefix(artifact.ID, "art_") || payload.Files[0] != "/api/files/"+artifact.ID {
+		t.Fatalf("expected durable artifact URL, got %#v", payload)
+	}
+	reader, _, err := fileService.OpenForDownload(context.Background(), meta.UserID, meta.WorkspaceID, artifact.ID)
 	if err != nil {
-		t.Fatalf("parse file url: %v", err)
+		t.Fatalf("open persisted artifact: %v", err)
 	}
-	if parsed.Path != "/api/python-files/"+filename {
-		t.Fatalf("unexpected file path: %s", parsed.Path)
+	defer reader.Close()
+	body, err := io.ReadAll(reader)
+	if err != nil || string(body) != "artifact-body" {
+		t.Fatalf("unexpected artifact body %q err=%v", body, err)
 	}
-	query := parsed.Query()
-	if query.Get("session_id") != meta.SessionID || query.Get("run_id") != meta.RunID {
-		t.Fatalf("missing run scope in query: %s", parsed.RawQuery)
-	}
-	if !VerifyPythonFileAccessSignature(filename, meta, config.Cfg.AuthSecret, query.Get("sig")) {
-		t.Fatalf("invalid file access signature in URL: %s", payload.Files[0])
+	if _, ok := reportState.Artifacts[artifact.ID]; !ok {
+		t.Fatalf("expected artifact in report-state ledger: %#v", reportState.Artifacts)
 	}
 }
 
@@ -137,17 +161,20 @@ func TestRunPythonToolRequiresProxyTokenBeforeExecute(t *testing.T) {
 	t.Setenv("PROXY_TOKEN", "")
 
 	tool := &RunPythonTool{MCPEndpoint: "http://127.0.0.1:1"}
-	_, err := tool.Execute(json.RawMessage(`{"code":"print(1)","timeout":1}`))
+	tool.SetExecutionContext(WithExecutionMetadata(context.Background(), ExecutionMetadata{UserID: "u_1", WorkspaceID: "w_1", SessionID: "s_1", RunID: "r_1"}))
+	_, err := tool.Execute(json.RawMessage(`{"code":"print(1)","timeout":5}`))
 	if err == nil || !strings.Contains(err.Error(), "PROXY_TOKEN is not configured") {
 		t.Fatalf("expected missing proxy token error, got %v", err)
 	}
 }
 
 func TestRunPythonToolExecutionTimeout(t *testing.T) {
-	t.Setenv("PROXY_TOKEN", "proxy-token")
+	prevCfg := config.Cfg
+	config.Cfg = &config.Config{ProxyToken: "proxy-token"}
+	t.Cleanup(func() { config.Cfg = prevCfg })
 
 	fakeHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(7 * time.Second) // wait longer than the client timeout (1 + 5 = 6s)
+		time.Sleep(11 * time.Second) // wait longer than the client timeout (5 + 5 = 10s)
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -164,9 +191,10 @@ func TestRunPythonToolExecutionTimeout(t *testing.T) {
 	tool := &RunPythonTool{
 		MCPEndpoint: server.URL,
 	}
+	tool.SetExecutionContext(WithExecutionMetadata(context.Background(), ExecutionMetadata{UserID: "u_1", WorkspaceID: "w_1", SessionID: "s_1", RunID: "r_1"}))
 
 	start := time.Now()
-	_, err = tool.Execute(json.RawMessage(`{"code": "import time; time.sleep(10)", "timeout": 1}`))
+	_, err = tool.Execute(json.RawMessage(`{"code": "import time; time.sleep(20)", "timeout": 5}`))
 	dur := time.Since(start)
 
 	if err == nil {
@@ -175,40 +203,16 @@ func TestRunPythonToolExecutionTimeout(t *testing.T) {
 	if !strings.Contains(err.Error(), "Python MCP") {
 		t.Fatalf("expected MCP unavailable error, got %v", err)
 	}
-	if dur > 8*time.Second {
-		t.Fatalf("expected tool to time out at around 6s, but it took %v", dur)
-	}
-}
-
-func TestBuildPythonFileURLDefaultsToRelativeAPIPath(t *testing.T) {
-	prevCfg := config.Cfg
-	config.Cfg = &config.Config{AuthSecret: "abcdefghijklmnopqrstuvwxyz123456"}
-	t.Cleanup(func() { config.Cfg = prevCfg })
-
-	meta := ExecutionMetadata{
-		WorkspaceID: "w_1",
-		SessionID:   "s_1",
-		RunID:       "r_1",
-	}
-	got := buildPythonFileURL("", "plot 1.png", meta)
-	parsed, err := url.Parse(got)
-	if err != nil {
-		t.Fatalf("parse file url: %v", err)
-	}
-	if parsed.Scheme != "" || parsed.Host != "" {
-		t.Fatalf("expected relative API path, got %s", got)
-	}
-	if parsed.EscapedPath() != "/api/python-files/plot%201.png" {
-		t.Fatalf("unexpected relative path: %s", parsed.EscapedPath())
-	}
-	if parsed.Query().Get("session_id") != meta.SessionID || parsed.Query().Get("run_id") != meta.RunID {
-		t.Fatalf("missing run scope query: %s", parsed.RawQuery)
+	if dur > 12*time.Second {
+		t.Fatalf("expected tool to time out at around 10s, but it took %v", dur)
 	}
 }
 
 func TestRunPythonToolHealthCheckCachesProbe(t *testing.T) {
 	resetPythonHealthCacheForTest(t)
-	t.Setenv("PROXY_TOKEN", "proxy-token")
+	prevCfg := config.Cfg
+	config.Cfg = &config.Config{ProxyToken: "proxy-token"}
+	t.Cleanup(func() { config.Cfg = prevCfg })
 
 	var executeCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -241,7 +245,9 @@ func TestRunPythonToolHealthCheckCachesProbe(t *testing.T) {
 
 func TestRunPythonToolHealthCheckFailureCacheExpiresQuickly(t *testing.T) {
 	resetPythonHealthCacheForTest(t)
-	t.Setenv("PROXY_TOKEN", "proxy-token")
+	prevCfg := config.Cfg
+	config.Cfg = &config.Config{ProxyToken: "proxy-token"}
+	t.Cleanup(func() { config.Cfg = prevCfg })
 
 	var executeCalls atomic.Int32
 	failExecute := true

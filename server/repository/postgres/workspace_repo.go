@@ -2,13 +2,10 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 type WorkspaceRepository struct {
@@ -27,11 +24,8 @@ func (r *WorkspaceRepository) GetByID(ctx context.Context, workspaceID string) (
 	var workspace domain.Workspace
 	var status string
 	err := row.Scan(&workspace.ID, &workspace.Name, &workspace.Slug, &workspace.OwnerUserID, &status, &workspace.CreatedAt, &workspace.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, sql.ErrNoRows
-	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get workspace by id: %w", err)
+		return nil, fmt.Errorf("failed to get workspace by id: %w", normalizeLookupError(err))
 	}
 	workspace.Status = domain.WorkspaceStatus(status)
 	return &workspace, nil

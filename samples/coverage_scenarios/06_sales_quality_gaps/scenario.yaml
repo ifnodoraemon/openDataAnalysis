@@ -4,13 +4,9 @@ task_length: medium
 prompt: 请对这份销售数据做全面分析，并指出会影响可信度的数据质量问题。
 files:
   - sales_detail_quality_gaps.csv
-expected:
-  should_inspect_schema: true
-  should_auto_map: true
-  should_ask_user: false
-  expected_coverage: partial
-  required_mentions:
-    - data quality issue
-    - confidence limit
-  forbidden_claims:
-    - all conclusions are highly reliable
+acceptance:
+  terminal_types: [run_completed, user_request_input]
+  no_error: true
+manual_review:
+  - 数据质量事实及其对结论的影响被清楚说明。
+  - 不把所有结论描述为高可靠。

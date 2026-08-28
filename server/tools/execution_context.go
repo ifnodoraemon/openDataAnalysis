@@ -4,6 +4,7 @@ import "context"
 
 // ExecutionMetadata carries the persistence scope for side effects created by tools.
 type ExecutionMetadata struct {
+	UserID      string
 	WorkspaceID string
 	SessionID   string
 	RunID       string

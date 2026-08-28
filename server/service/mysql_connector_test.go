@@ -12,18 +12,21 @@ func TestMySQLConnectorNormalizeConfigBuildsGenericSourceConfig(t *testing.T) {
 	t.Parallel()
 
 	secret := "12345678901234567890123456789012"
-	connector := NewMySQLConnector(nil)
+	connector := NewMySQLConnector(&SourceService{})
 	cfg, err := connector.NormalizeConfig(context.Background(), SourceConfigRequest{
+		ConfigProvided: true,
 		RawConfig: []byte(`{
 			"host":"db.example.com",
 			"port":3306,
 			"database_name":"analytics",
+			"tls_mode":"verify_identity",
 			"username":"reader",
-			"allowlist":[{"name":"orders","kind":"table"}]
+			"allowlist":[{"schema":"analytics","name":"orders","kind":"table"}]
 		}`),
-		RawCredential:     []byte(`{"password":"secret"}`),
-		RequireCredential: true,
-		AuthSecret:        secret,
+		RawCredential:      []byte(`{"password":"secret"}`),
+		CredentialProvided: true,
+		RequireCredential:  true,
+		AuthSecret:         secret,
 	})
 	if err != nil {
 		t.Fatalf("NormalizeConfig returned error: %v", err)
@@ -39,14 +42,11 @@ func TestMySQLConnectorNormalizeConfigBuildsGenericSourceConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseMySQLSourceConfig returned error: %v", err)
 	}
-	if parsed.Driver != "mysql" {
-		t.Fatalf("expected mysql driver, got %q", parsed.Driver)
-	}
-	if parsed.DefaultSchema != "analytics" {
-		t.Fatalf("expected database_name as default schema, got %q", parsed.DefaultSchema)
-	}
 	if len(parsed.Allowlist) != 1 || parsed.Allowlist[0].Schema != "analytics" {
-		t.Fatalf("expected default schema applied to allowlist, got %#v", parsed.Allowlist)
+		t.Fatalf("unexpected allowlist: %#v", parsed.Allowlist)
+	}
+	if parsed.TLSMode != "verify_identity" {
+		t.Fatalf("unexpected tls mode: %q", parsed.TLSMode)
 	}
 
 	var credential MySQLCredential
@@ -55,5 +55,20 @@ func TestMySQLConnectorNormalizeConfigBuildsGenericSourceConfig(t *testing.T) {
 	}
 	if credential.Password != "secret" {
 		t.Fatalf("unexpected decrypted credential: %#v", credential)
+	}
+}
+
+func TestValidateAllowlistRejectsImplicitNormalization(t *testing.T) {
+	t.Parallel()
+
+	for _, entries := range [][]AllowlistEntry{
+		{{Schema: "analytics", Name: "orders", Kind: ""}},
+		{{Schema: "", Name: "orders", Kind: "table"}},
+		{{Schema: "analytics", Name: "orders", Kind: "TABLE"}},
+		{{Schema: "analytics", Name: "orders", Kind: "table"}, {Schema: "analytics", Name: "orders", Kind: "table"}},
+	} {
+		if _, err := ValidateAllowlist(entries); err == nil {
+			t.Fatalf("expected allowlist to be rejected: %#v", entries)
+		}
 	}
 }

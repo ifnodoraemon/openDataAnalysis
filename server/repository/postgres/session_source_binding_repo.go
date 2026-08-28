@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
@@ -57,10 +56,7 @@ func (r *SessionSourceBindingRepository) GetBySessionSourceObject(ctx context.Co
 	row := r.db.QueryRow(ctx, query, sessionID, sourceID, sourceObjectKey)
 	var b domain.SessionSourceBinding
 	if err := row.Scan(&b.SessionID, &b.SourceID, &b.SourceObjectKey, &b.ActiveSnapshotID, &b.CreatedAt, &b.UpdatedAt); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("failed to get session source binding: %w", err)
+		return nil, fmt.Errorf("failed to get session source binding: %w", normalizeLookupError(err))
 	}
 	return &b, nil
 }

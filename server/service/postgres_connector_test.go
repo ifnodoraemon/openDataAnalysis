@@ -12,19 +12,21 @@ func TestPostgresConnectorNormalizeConfigBuildsGenericSourceConfig(t *testing.T)
 	t.Parallel()
 
 	secret := "12345678901234567890123456789012"
-	connector := NewPostgresConnector(nil)
+	connector := NewPostgresConnector(&SourceService{})
 	cfg, err := connector.NormalizeConfig(context.Background(), SourceConfigRequest{
+		ConfigProvided: true,
 		RawConfig: []byte(`{
 			"host":"db.example.com",
 			"port":5432,
 			"database_name":"analytics",
-			"default_schema":"public",
+			"ssl_mode":"disable",
 			"username":"reader",
-			"allowlist":[{"name":"orders","kind":"table"}]
+			"allowlist":[{"schema":"public","name":"orders","kind":"table"}]
 		}`),
-		RawCredential:     []byte(`{"password":"secret"}`),
-		RequireCredential: true,
-		AuthSecret:        secret,
+		RawCredential:      []byte(`{"password":"secret"}`),
+		CredentialProvided: true,
+		RequireCredential:  true,
+		AuthSecret:         secret,
 	})
 	if err != nil {
 		t.Fatalf("NormalizeConfig returned error: %v", err)
@@ -40,11 +42,11 @@ func TestPostgresConnectorNormalizeConfigBuildsGenericSourceConfig(t *testing.T)
 	if err != nil {
 		t.Fatalf("ParsePostgresSourceConfig returned error: %v", err)
 	}
-	if parsed.Driver != "postgres" || parsed.SSLMode != "disable" {
-		t.Fatalf("expected postgres defaults, got driver=%q ssl=%q", parsed.Driver, parsed.SSLMode)
+	if parsed.SSLMode != "disable" {
+		t.Fatalf("unexpected ssl mode: %q", parsed.SSLMode)
 	}
 	if len(parsed.Allowlist) != 1 || parsed.Allowlist[0].Schema != "public" {
-		t.Fatalf("expected default schema applied to allowlist, got %#v", parsed.Allowlist)
+		t.Fatalf("unexpected allowlist: %#v", parsed.Allowlist)
 	}
 
 	var credential PostgresCredential
@@ -53,5 +55,29 @@ func TestPostgresConnectorNormalizeConfigBuildsGenericSourceConfig(t *testing.T)
 	}
 	if credential.Password != "secret" {
 		t.Fatalf("unexpected decrypted credential: %#v", credential)
+	}
+}
+
+func TestPostgresConnectorRejectsImplicitOrUnknownConfig(t *testing.T) {
+	t.Parallel()
+
+	connector := NewPostgresConnector(&SourceService{})
+	base := SourceConfigRequest{
+		ConfigProvided:     true,
+		RawCredential:      []byte(`{"password":"secret"}`),
+		CredentialProvided: true,
+		RequireCredential:  true,
+		AuthSecret:         "12345678901234567890123456789012",
+	}
+	for _, raw := range []string{
+		`{"host":"db.example.com","port":5432,"database_name":"analytics","username":"reader","allowlist":[{"schema":"public","name":"orders","kind":"table"}]}`,
+		`{"driver":"postgres","host":"db.example.com","port":5432,"database_name":"analytics","ssl_mode":"disable","username":"reader","allowlist":[{"schema":"public","name":"orders","kind":"table"}]}`,
+		`{"host":"db.example.com","port":5432,"database_name":"analytics","ssl_mode":"disable","username":"reader","allowlist":[{"schema":"","name":"orders","kind":"table"}]}`,
+	} {
+		request := base
+		request.RawConfig = []byte(raw)
+		if _, err := connector.NormalizeConfig(context.Background(), request); err == nil {
+			t.Fatalf("expected config to be rejected: %s", raw)
+		}
 	}
 }

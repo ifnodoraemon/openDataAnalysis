@@ -39,7 +39,8 @@ func (r *SourceSnapshotRepository) Create(ctx context.Context, snapshot *domain.
 
 func (r *SourceSnapshotRepository) GetByID(ctx context.Context, id string) (*domain.SourceSnapshot, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT `+snapshotCols+` FROM source_snapshots WHERE id = ?`, id)
-	return scanSnapshot(row)
+	snapshot, err := scanSnapshot(row)
+	return snapshot, normalizeLookupError(err)
 }
 
 func (r *SourceSnapshotRepository) ListBySession(ctx context.Context, sessionID string) ([]domain.SourceSnapshot, error) {

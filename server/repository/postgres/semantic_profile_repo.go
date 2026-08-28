@@ -2,8 +2,6 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
@@ -37,10 +35,7 @@ func (r *SemanticProfileRepository) GetByID(ctx context.Context, id string) (*do
 	var p domain.SemanticProfile
 	var profileStatus string
 	if err := row.Scan(&p.ID, &p.SessionID, &p.SourceID, &p.SnapshotID, &p.AnalysisTableName, &p.SchemaSignature, &profileStatus, &p.ProfileJSON, &p.CreatedAt, &p.UpdatedAt); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, sql.ErrNoRows
-		}
-		return nil, fmt.Errorf("failed to get semantic profile by id: %w", err)
+		return nil, fmt.Errorf("failed to get semantic profile by id: %w", normalizeLookupError(err))
 	}
 	p.ProfileStatus = domain.ProfileStatus(profileStatus)
 	return &p, nil
@@ -94,27 +89,6 @@ func (r *SemanticProfileRepository) UpdateProfileJSON(ctx context.Context, id st
 		return fmt.Errorf("failed to update semantic profile json: %w", err)
 	}
 	return nil
-}
-
-func (r *SemanticProfileRepository) FindWorkspaceConfirmation(ctx context.Context, workspaceID, schemaSignature string) (*domain.SemanticConfirmation, error) {
-	query := `SELECT sc.id, sc.profile_id, sc.workspace_id, sc.session_id, sc.confirmed_by, sc.scope, sc.overrides_json, sc.created_at
-		FROM semantic_confirmations sc
-		JOIN semantic_profiles sp ON sp.id = sc.profile_id
-		JOIN data_sources ds ON ds.id = sp.source_id
-		WHERE ds.workspace_id = $1 AND sp.schema_signature = $2 AND sc.scope = 'workspace'
-		ORDER BY sc.created_at DESC LIMIT 1`
-
-	row := r.db.QueryRow(ctx, query, workspaceID, schemaSignature)
-	var c domain.SemanticConfirmation
-	var scope string
-	if err := row.Scan(&c.ID, &c.ProfileID, &c.WorkspaceID, &c.SessionID, &c.ConfirmedBy, &scope, &c.OverridesJSON, &c.CreatedAt); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("failed to find workspace confirmation: %w", err)
-	}
-	c.Scope = domain.ConfirmationScope(scope)
-	return &c, nil
 }
 
 func (r *SemanticProfileRepository) Delete(ctx context.Context, id string) error {

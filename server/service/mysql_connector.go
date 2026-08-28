@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -15,6 +16,9 @@ type MySQLConnector struct {
 }
 
 func NewMySQLConnector(sources *SourceService) *MySQLConnector {
+	if sources == nil {
+		panic("mysql connector requires a source service")
+	}
 	return &MySQLConnector{Sources: sources}
 }
 
@@ -26,7 +30,13 @@ func (c *MySQLConnector) Spec() SourceConnectorSpec {
 		Label:             "MySQL",
 		Category:          "sql",
 		Configurable:      true,
-		DefaultPort:       3306,
+		SecurityModeField: "tls_mode",
+		SecurityModeOptions: []SourceConnectorEnumOption{
+			{Value: "disabled", Label: "不使用加密"},
+			{Value: "preferred", Label: "优先加密"},
+			{Value: "verify_identity", Label: "验证证书与主机身份"},
+			{Value: "skip_verify", Label: "加密但不验证证书"},
+		},
 		SupportsAllowlist: true,
 		SupportsCatalog:   true,
 		SupportsImport:    true,
@@ -37,7 +47,7 @@ func (c *MySQLConnector) NormalizeConfig(ctx context.Context, req SourceConfigRe
 	if strings.TrimSpace(req.AuthSecret) == "" || len(req.AuthSecret) < 32 {
 		return nil, fmt.Errorf("AUTH_SECRET too short, cannot store source credentials")
 	}
-	cfg, err := normalizeMySQLConfigJSON(req.RawConfig, req.Existing)
+	cfg, err := normalizeMySQLConfigJSON(req.RawConfig, req.ConfigProvided, req.Existing)
 	if err != nil {
 		return nil, err
 	}
@@ -50,10 +60,9 @@ func (c *MySQLConnector) NormalizeConfig(ctx context.Context, req SourceConfigRe
 	if req.Existing != nil {
 		credentialCiphertext = req.Existing.CredentialCiphertext
 	}
-	credentialProvided := len(req.RawCredential) > 0 && strings.TrimSpace(string(req.RawCredential)) != "" && strings.TrimSpace(string(req.RawCredential)) != "null"
-	if credentialProvided {
+	if req.CredentialProvided {
 		var credential MySQLCredential
-		if err := json.Unmarshal(req.RawCredential, &credential); err != nil {
+		if err := decodeStrictJSON(req.RawCredential, &credential); err != nil {
 			return nil, fmt.Errorf("invalid mysql credential: %w", err)
 		}
 		if strings.TrimSpace(credential.Password) == "" {
@@ -90,11 +99,10 @@ func (c *MySQLConnector) PublicConfig(ctx context.Context, sourceID string) (map
 		return nil, err
 	}
 	return map[string]interface{}{
-		"driver":             cfg.Driver,
 		"host":               cfg.Host,
 		"port":               cfg.Port,
 		"database_name":      cfg.DatabaseName,
-		"default_schema":     cfg.DefaultSchema,
+		"tls_mode":           cfg.TLSMode,
 		"username":           cfg.Username,
 		"allowlist":          cfg.Allowlist,
 		"last_tested_at":     sourceConfig.LastTestedAt,
@@ -103,7 +111,7 @@ func (c *MySQLConnector) PublicConfig(ctx context.Context, sourceID string) (map
 	}, nil
 }
 
-func (c *MySQLConnector) Test(ctx context.Context, req SourceTestRequest) (map[string]interface{}, error) {
+func (c *MySQLConnector) Test(ctx context.Context, req SourceTestRequest) (SourceTestResult, error) {
 	return c.Sources.TestMySQLConnection(ctx, req.SourceID, req.AuthSecret), nil
 }
 
@@ -153,18 +161,15 @@ func (c *MySQLConnector) Import(ctx context.Context, req SourceImportRequest) (*
 
 	importRowLimit := req.ImportRowLimit
 	if importRowLimit < 0 {
-		importRowLimit = 0
+		return nil, fmt.Errorf("import_row_limit cannot be negative")
 	}
-	objectName := strings.TrimSpace(req.Object.Name)
-	if objectName == "" {
-		return nil, fmt.Errorf("object_name is required")
+	objectName := req.Object.Name
+	if err := validateExactConfigText("object_name", objectName); err != nil {
+		return nil, err
 	}
-	resolvedSchema := strings.TrimSpace(req.Object.Schema)
-	if resolvedSchema == "" {
-		resolvedSchema = cfg.DefaultSchema
-	}
-	if strings.TrimSpace(resolvedSchema) == "" {
-		return nil, fmt.Errorf("schema_name or connection default_schema is required")
+	resolvedSchema := req.Object.Schema
+	if err := validateExactConfigText("schema_name", resolvedSchema); err != nil {
+		return nil, err
 	}
 	if !isInAllowlist(cfg.Allowlist, resolvedSchema, objectName) {
 		return nil, fmt.Errorf("object %s.%s is not in the data source allowlist", resolvedSchema, objectName)
@@ -176,22 +181,22 @@ func (c *MySQLConnector) Import(ctx context.Context, req SourceImportRequest) (*
 	}
 	defer mysqlDB.Close()
 
-	tableName := sourceScopedMySQLTableName(resolvedSchema, objectName, req.SourceID)
 	preSnapshot, err := c.Sources.BeginSnapshotImport(
 		ctx, req.SessionID, req.SourceID,
-		string(domain.SourceTypeMySQLConnection), resolvedSchema, objectName, tableName,
+		string(domain.SourceTypeMySQLConnection), resolvedSchema, objectName,
 	)
 	if err != nil {
 		return nil, err
 	}
+	tableName := preSnapshot.AnalysisTableName
 
 	importStart := time.Now()
 	rowCount, colCount, rowsSkipped, importTruncated, err := c.Sources.streamMySQLImportToSQLite(ctx, mysqlDB, resolvedSchema, objectName, req.Ingester, tableName, importRowLimit)
 	importDuration := time.Since(importStart)
 	if err != nil {
 		errMsg := err.Error()
-		_ = c.Sources.SnapshotRepo.UpdateStatus(ctx, preSnapshot.ID, domain.SnapshotStatusFailed, &errMsg)
-		return nil, fmt.Errorf("import failed: %w", err)
+		statusErr := c.Sources.SnapshotRepo.UpdateStatus(ctx, preSnapshot.ID, domain.SnapshotStatusFailed, &errMsg)
+		return nil, errors.Join(fmt.Errorf("import failed: %w", err), statusErr)
 	}
 
 	var warnings []string
@@ -199,15 +204,9 @@ func (c *MySQLConnector) Import(ctx context.Context, req SourceImportRequest) (*
 		warnings = append(warnings, fmt.Sprintf("%d upstream rows were skipped during import because they could not be scanned", rowsSkipped))
 	}
 
-	workspaceID := req.WorkspaceID
-	if workspaceID == "" {
-		workspaceID = source.WorkspaceID
-	}
-
 	return c.Sources.FinalizeSnapshotImport(ctx, SnapshotImportCompletion{
 		SnapshotID:        preSnapshot.ID,
 		SessionID:         req.SessionID,
-		WorkspaceID:       workspaceID,
 		SourceID:          req.SourceID,
 		UpstreamKind:      string(domain.SourceTypeMySQLConnection),
 		UpstreamSchema:    resolvedSchema,
@@ -220,48 +219,48 @@ func (c *MySQLConnector) Import(ctx context.Context, req SourceImportRequest) (*
 		ImportRowLimit:    importRowLimit,
 		ImportTruncated:   importTruncated,
 		ImportDuration:    importDuration,
-		AnalyzeSemantics:  true,
 		ExtraWarnings:     warnings,
 		Ingester:          req.Ingester,
 	})
 }
 
-func normalizeMySQLConfigJSON(raw json.RawMessage, existing *domain.SourceConfig) (MySQLSourceConfig, error) {
-	rawText := strings.TrimSpace(string(raw))
-	if rawText == "" || rawText == "null" {
+func normalizeMySQLConfigJSON(raw json.RawMessage, provided bool, existing *domain.SourceConfig) (MySQLSourceConfig, error) {
+	if !provided {
 		if existing == nil {
 			return MySQLSourceConfig{}, fmt.Errorf("mysql config is required")
 		}
 		return ParseMySQLSourceConfig(existing)
 	}
 	var cfg MySQLSourceConfig
-	if err := json.Unmarshal(raw, &cfg); err != nil {
+	if err := decodeStrictJSON(raw, &cfg); err != nil {
 		return MySQLSourceConfig{}, fmt.Errorf("invalid mysql config: %w", err)
 	}
-	cfg.Driver = strings.TrimSpace(cfg.Driver)
-	if cfg.Driver == "" {
-		cfg.Driver = "mysql"
+	if err := validateMySQLConfig(cfg); err != nil {
+		return MySQLSourceConfig{}, err
 	}
-	if cfg.Driver != "mysql" {
-		return MySQLSourceConfig{}, fmt.Errorf("mysql config driver must be mysql")
-	}
-	cfg.Host = strings.TrimSpace(cfg.Host)
-	cfg.DatabaseName = strings.TrimSpace(cfg.DatabaseName)
-	cfg.DefaultSchema = strings.TrimSpace(cfg.DefaultSchema)
-	cfg.Username = strings.TrimSpace(cfg.Username)
-	if cfg.DefaultSchema == "" {
-		cfg.DefaultSchema = cfg.DatabaseName
-	}
-	if cfg.Host == "" || cfg.DatabaseName == "" || cfg.Username == "" {
-		return MySQLSourceConfig{}, fmt.Errorf("host, database_name and username are required")
-	}
-	if cfg.Port <= 0 || cfg.Port > 65535 {
-		return MySQLSourceConfig{}, fmt.Errorf("port must be between 1 and 65535")
-	}
-	allowlist, err := NormalizeAllowlist(cfg.Allowlist, cfg.DefaultSchema)
+	allowlist, err := ValidateAllowlist(cfg.Allowlist)
 	if err != nil {
 		return MySQLSourceConfig{}, err
 	}
 	cfg.Allowlist = allowlist
 	return cfg, nil
+}
+
+func validateMySQLConfig(cfg MySQLSourceConfig) error {
+	for _, item := range []struct{ field, value string }{
+		{"host", cfg.Host}, {"database_name", cfg.DatabaseName}, {"tls_mode", cfg.TLSMode}, {"username", cfg.Username},
+	} {
+		if err := validateExactConfigText(item.field, item.value); err != nil {
+			return err
+		}
+	}
+	if cfg.Port <= 0 || cfg.Port > 65535 {
+		return fmt.Errorf("port must be between 1 and 65535")
+	}
+	switch cfg.TLSMode {
+	case "disabled", "preferred", "verify_identity", "skip_verify":
+	default:
+		return fmt.Errorf("unsupported tls_mode: %s", cfg.TLSMode)
+	}
+	return nil
 }

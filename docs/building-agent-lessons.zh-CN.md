@@ -60,5 +60,5 @@ Guardrail 应保护边界，例如非法 SQL、缺失 chart 引用、结构损�
 
 ## 参考
 
-- `docs/agentic-principles.md`
+- `docs/agentic-principles.zh-CN.md`
 - `AGENTS.md`

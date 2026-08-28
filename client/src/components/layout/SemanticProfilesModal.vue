@@ -2,33 +2,33 @@
   <div v-if="open" class="modal-overlay" @click.self="$emit('close')">
     <div class="modal-card">
       <div class="modal-header">
-        <h2>🧠 语义模型与工作区知识库</h2>
+        <h2>🧠 数据事实与用户补丁</h2>
         <button class="close-btn" @click="$emit('close')">✕</button>
       </div>
 
       <div class="modal-body">
         <p class="description">
-          Open Data Analysis Agent 在分析过程中会自动理解并沉淀工作区的列语义、业务指标口径与数据签名。
+          这里展示运行时采集的结构事实，以及用户明确授权的可复用补丁。运行时不会依据字段名或预设场景补写含义。
         </p>
 
         <div class="knowledge-cards">
           <div class="k-card">
             <div class="k-header">
               <span class="icon">📊</span>
-              <span class="title">自动推导语义 Profile</span>
+              <span class="title">结构与测量事实</span>
             </div>
             <p class="text">
-              自动探测数值分布、时间粒度、主外键关联与空值占比，为 LLM 生成精确定制 SQL / Python 描述。
+              展示列类型、空值率、去重计数、采样方式和值格式覆盖。它们是观测结果，不是字段含义或分析结论。
             </p>
           </div>
 
           <div class="k-card">
             <div class="k-header">
               <span class="icon">✅</span>
-              <span class="title">指标与口径确认机制</span>
+              <span class="title">用户确认与可复用补丁</span>
             </div>
             <p class="text">
-              在遇到歧义指标或重名维度时，智能体会发起主动确认询问（Confirmation），确认后的计算公式将沉淀为企业全局知识。
+              模型可在缺少必要定义时请求澄清。只有经认证用户批准的精确变更才会写入；工作区补丁按数据结构签名复用，运行时不猜测其业务含义。
             </p>
           </div>
         </div>
@@ -63,7 +63,7 @@ defineEmits(["close"]);
 .modal-card {
   width: min(540px, 100%);
   background: var(--bg-card);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: 16px;
   padding: 24px;
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.15);
@@ -81,7 +81,7 @@ defineEmits(["close"]);
 .modal-header h2 {
   font-size: 1.2rem;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--text-main);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -97,7 +97,7 @@ defineEmits(["close"]);
 
 .description {
   font-size: 0.88rem;
-  color: var(--text-secondary);
+  color: var(--text-sub);
   line-height: 1.5;
 }
 
@@ -110,8 +110,8 @@ defineEmits(["close"]);
 
 .k-card {
   padding: 14px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
   border-radius: 12px;
 }
 
@@ -121,7 +121,7 @@ defineEmits(["close"]);
   gap: 8px;
   font-size: 0.92rem;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--text-main);
   margin-bottom: 6px;
 }
 
@@ -138,7 +138,7 @@ defineEmits(["close"]);
 
 .btn-primary {
   padding: 8px 18px;
-  background: var(--accent-blue);
+  background: var(--primary-blue);
   color: white;
   border: none;
   border-radius: 8px;

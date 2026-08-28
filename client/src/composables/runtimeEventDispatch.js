@@ -30,18 +30,18 @@ export function summarizeEventForPreview(event) {
     case "assistant_status":
       return clipPreviewText(event.data?.content);
     case "tool_call":
-      return event.data?.name || "tool_call";
+      return event.data?.name || "工具调用";
     case "tool_result": {
       const raw = event.data?.result || "";
       try {
         const parsed = JSON.parse(raw);
         return clipPreviewText(
-          parsed.ui_summary ||
-            parsed.message ||
-            `${event.data?.name || "tool_result"}: ${raw}`,
+          parsed.ui_summary || `${event.data?.name || "工具"}已返回结果`,
         );
       } catch {
-        return clipPreviewText(`${event.data?.name || "tool_result"}: ${raw}`);
+        return clipPreviewText(
+          `${event.data?.name || "工具"}已返回非结构化结果`,
+        );
       }
     }
     case "run_completed":
@@ -70,12 +70,41 @@ export function appendRunPreview(event, store) {
 
 export function applyRuntimeState(runtimeState, store) {
   store.setSubgoals(runtimeState?.subgoals || []);
-  store.setMemoryFacts(runtimeState?.memory || {});
+  store.setMemoryEntries(runtimeState?.memory_entries || {});
   store.updateReport(runtimeState?.report_html || "");
   store.setReportEditState(runtimeState?.edit_state || null);
 }
 
-export function handleEvent(event, store, dataSourceStore) {
+export function deserializeRunMessages(messages) {
+  return (messages || []).map((message) => {
+    const item = {
+      id: message.id,
+      type: message.type,
+      name: message.name,
+      content: message.content,
+      tool_call_id: message.toolCallId,
+      duration: message.duration,
+      success: message.success,
+      timestamp: message.createdAt
+        ? new Date(message.createdAt).toLocaleTimeString()
+        : "",
+    };
+    if (message.type === "tool_call") {
+      item.arguments = message.content;
+    }
+    if (message.type === "tool_result") {
+      item.result = message.content;
+      try {
+        item.parsedResult = JSON.parse(message.content);
+      } catch {
+        item.parsedResult = null;
+      }
+    }
+    return item;
+  });
+}
+
+export function handleEvent(event, store) {
   if (event.sessionId && store.sessionId && event.sessionId !== store.sessionId)
     return;
   const relevantRunIds = [store.activeRunId, store.selectedRunId].filter(
@@ -96,28 +125,6 @@ export function handleEvent(event, store, dataSourceStore) {
     return;
 
   switch (event.type) {
-    case "session_ready": {
-      store.setSession(event.data.sessionId);
-      applyRuntimeState(event.data, store);
-      if (event.data.sessionId) {
-        dataSourceStore.fetchSessionSources(event.data.sessionId);
-      }
-      const existingSession = store.sessions.find(
-        (s) => s.id === event.data.sessionId,
-      );
-      store.upsertSession({
-        id: event.data.sessionId,
-        title: event.data.title || existingSession?.title || "未命名分析",
-        lastSeenAt: new Date().toISOString(),
-      });
-      break;
-    }
-    case "session_reset":
-      store.resetAnalysis();
-      if (store.sessionId) {
-        dataSourceStore.fetchSessionSources(store.sessionId);
-      }
-      break;
     case "run_started":
       store.startRun(event.data.runId);
       store.upsertRun({
@@ -174,7 +181,7 @@ export function handleEvent(event, store, dataSourceStore) {
       }
       break;
     case "report_final":
-      if (!store.selectedRunId || store.selectedRunId === event.runId) {
+      if (shouldApplyReportEvent(event.runId, store)) {
         store.setSelectedRun(event.runId);
         store.updateReport(event.data.html);
       }
@@ -263,17 +270,18 @@ export function handleEvent(event, store, dataSourceStore) {
         scope: event.data.scope,
         context_ref: event.data.context_ref,
         input_hint: event.data.input_hint,
-        required: event.data.required || false,
-        selection_mode: event.data.selection_mode || "single",
-        allow_custom: event.data.allow_custom !== false,
+        required: event.data.required,
+        selection_mode: event.data.selection_mode,
+        allow_custom: event.data.allow_custom,
         options: event.data.options || [],
+        authorization: event.data.authorization || null,
       });
       break;
     case "state_subgoals_updated":
       if (event.data?.goals) store.setSubgoals(event.data.goals);
       break;
     case "state_memory_updated":
-      if (event.data?.facts) store.setMemoryFacts(event.data.facts);
+      if (event.data?.entries) store.setMemoryEntries(event.data.entries);
       break;
     case "state_report_edit_updated":
       store.setReportEditState(event.data || null);
@@ -281,6 +289,9 @@ export function handleEvent(event, store, dataSourceStore) {
     case "state_child_runs_updated":
       if (event.data?.childRuns)
         store.setRunChildren(event.data.parentRunId, event.data.childRuns);
+      break;
+    default:
+      console.debug("收到未知的运行事件类型", event.type);
       break;
   }
 }

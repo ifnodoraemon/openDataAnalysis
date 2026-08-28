@@ -2,12 +2,9 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 type ReportRepository struct {
@@ -42,11 +39,8 @@ func (r *ReportRepository) GetByRunID(ctx context.Context, runID string) (*domai
 		&report.ID, &report.RunID, &report.WorkspaceID, &report.Title, &report.Author,
 		&report.HTMLStorageProvider, &report.HTMLBucket, &report.HTMLStorageKey, &report.SnapshotJSON, &report.CreatedAt,
 	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, sql.ErrNoRows
-	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get report by run id: %w", err)
+		return nil, fmt.Errorf("failed to get report by run id: %w", normalizeLookupError(err))
 	}
 	return &report, nil
 }

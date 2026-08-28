@@ -5,11 +5,7 @@ import "time"
 type SemanticAssetKind string
 
 const (
-	SemanticAssetKindTimeColumn       SemanticAssetKind = "time_column"
-	SemanticAssetKindMetricDefinition SemanticAssetKind = "metric_definition"
-	SemanticAssetKindUnitAnnotation   SemanticAssetKind = "unit_annotation"
-	SemanticAssetKindJoinCandidate    SemanticAssetKind = "join_candidate"
-	SemanticAssetKindOverride         SemanticAssetKind = "override"
+	SemanticAssetKindPatch SemanticAssetKind = "patch"
 )
 
 type SemanticAsset struct {

@@ -6,230 +6,117 @@ import (
 	"testing"
 )
 
-func TestCreateChartToolReturnsStructuredValidationFeedback(t *testing.T) {
+func TestCreateChartToolRequiresExplicitOption(t *testing.T) {
 	t.Parallel()
 
 	tool := &CreateChartTool{ReportState: &ReportState{}}
-	result, err := tool.Execute(json.RawMessage(`{"chart_id":"chart_sales","title":"销售趋势","chart_type":"line","series":[{"data":[100,120]}]}`))
+	result, err := tool.Execute(json.RawMessage(`{"chart_id":"chart_1","title":"Observed values"}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if strings.Contains(result, "请重新调用 report_create_chart") {
-		t.Fatalf("expected structured feedback instead of retry prompt, got %q", result)
+	if strings.Contains(result, "call report_create_chart again") {
+		t.Fatalf("expected factual validation feedback, got %q", result)
 	}
-
 	var payload map[string]interface{}
 	if err := json.Unmarshal([]byte(result), &payload); err != nil {
-		t.Fatalf("expected json feedback, got %v", err)
+		t.Fatalf("expected JSON feedback: %v", err)
 	}
-	if payload["ok"] != false {
-		t.Fatalf("expected ok=false, got %#v", payload["ok"])
-	}
-	if payload["error_code"] != "invalid_chart_spec" {
-		t.Fatalf("unexpected error_code: %#v", payload["error_code"])
+	if payload["ok"] != false || payload["error_code"] != "invalid_chart_spec" {
+		t.Fatalf("unexpected validation payload: %#v", payload)
 	}
 }
 
-func TestCreateChartToolRejectsUnknownChartType(t *testing.T) {
+func TestCreateChartToolRejectsNonObjectOption(t *testing.T) {
 	t.Parallel()
 
 	tool := &CreateChartTool{ReportState: &ReportState{}}
-	result, err := tool.Execute(json.RawMessage(`{"chart_id":"chart_sales","title":"销售趋势","chart_type":"scatter","categories":["1月"],"series":[{"data":[100]}]}`))
+	result, err := tool.Execute(json.RawMessage(`{"chart_id":"chart_1","option":[{"type":"line"}]}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	var payload map[string]interface{}
 	if err := json.Unmarshal([]byte(result), &payload); err != nil {
-		t.Fatalf("expected json feedback, got %v", err)
+		t.Fatalf("expected JSON feedback: %v", err)
 	}
-	if payload["error_code"] != "invalid_chart_spec" {
-		t.Fatalf("unexpected error_code: %#v", payload["error_code"])
-	}
-	if payload["detail"] == "" {
-		t.Fatalf("expected validation detail in payload: %#v", payload)
+	if payload["error_code"] != "invalid_chart_spec" || payload["detail"] == "" {
+		t.Fatalf("unexpected validation payload: %#v", payload)
 	}
 }
 
-func TestCreateChartToolReturnsStructuredSuccess(t *testing.T) {
-	t.Parallel()
-
-	tool := &CreateChartTool{ReportState: &ReportState{}}
-	result, err := tool.Execute(json.RawMessage(`{
-		"chart_id":"chart_sales",
-		"title":"销售趋势",
-		"chart_type":"bar",
-		"categories":["1月"],
-		"series":[{"data":[100]}]
-	}`))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	var payload map[string]interface{}
-	if err := json.Unmarshal([]byte(result), &payload); err != nil {
-		t.Fatalf("expected json feedback, got %v", err)
-	}
-	if payload["ok"] != true {
-		t.Fatalf("expected ok=true, got %#v", payload["ok"])
-	}
-	if payload["chart_ref"] != "{{chart:chart_sales}}" {
-		t.Fatalf("unexpected chart_ref: %#v", payload["chart_ref"])
-	}
-	if payload["needs_finalize"] != true {
-		t.Fatalf("expected draft marker after chart creation, got %#v", payload["needs_finalize"])
-	}
-}
-
-func TestCreateChartToolBuildsOptionFromDSL(t *testing.T) {
-	t.Parallel()
-
-	tool := &CreateChartTool{ReportState: &ReportState{}}
-	result, err := tool.Execute(json.RawMessage(`{
-		"chart_id":"chart_sales",
-		"title":"销售趋势",
-		"chart_type":"line",
-		"categories":["1月","2月","3月"],
-		"series":[{"name":"销售额","data":[100,120,140],"smooth":true}]
-	}`))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	var payload map[string]interface{}
-	if err := json.Unmarshal([]byte(result), &payload); err != nil {
-		t.Fatalf("expected json feedback, got %v", err)
-	}
-	if payload["ok"] != true {
-		t.Fatalf("expected ok=true, got %#v", payload["ok"])
-	}
-	if len(tool.ReportState.Charts) != 1 {
-		t.Fatalf("expected 1 chart, got %d", len(tool.ReportState.Charts))
-	}
-	if !tool.ReportState.NeedsFinalize {
-		t.Fatal("expected report state to require finalize after chart mutation")
-	}
-
-	var option map[string]interface{}
-	if err := json.Unmarshal(tool.ReportState.Charts[0].Option, &option); err != nil {
-		t.Fatalf("unmarshal option: %v", err)
-	}
-	if option["tooltip"] == nil {
-		t.Fatalf("expected default tooltip in option: %#v", option)
-	}
-	title := option["title"].(map[string]interface{})
-	if title["top"] == nil || title["left"] != "center" {
-		t.Fatalf("expected chart title to reserve top space, got %#v", title)
-	}
-	legend := option["legend"].(map[string]interface{})
-	if legend["top"] == nil || legend["left"] != "center" {
-		t.Fatalf("expected chart legend to sit below title, got %#v", legend)
-	}
-	grid := option["grid"].(map[string]interface{})
-	if grid["top"] == nil {
-		t.Fatalf("expected grid top padding for title/legend, got %#v", grid)
-	}
-}
-
-func TestCreateChartToolAcceptsStringifiedDSLFields(t *testing.T) {
-	t.Parallel()
-
-	tool := &CreateChartTool{ReportState: &ReportState{}}
-	result, err := tool.Execute(json.RawMessage(`{
-		"chart_id":"chart_channel",
-		"title":"渠道对比",
-		"chart_type":"bar",
-		"categories":"[\"Search\",\"Social\"]",
-		"series":"[{\"name\":\"收入\",\"type\":\"bar\",\"data\":[100,80]}]"
-	}`))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	var payload map[string]interface{}
-	if err := json.Unmarshal([]byte(result), &payload); err != nil {
-		t.Fatalf("expected json feedback, got %v", err)
-	}
-	if payload["ok"] != true {
-		t.Fatalf("expected ok=true, got %#v", payload["ok"])
-	}
-
-	var option map[string]interface{}
-	if err := json.Unmarshal(tool.ReportState.Charts[0].Option, &option); err != nil {
-		t.Fatalf("unmarshal option: %v", err)
-	}
-	if option["xAxis"] == nil || option["series"] == nil {
-		t.Fatalf("expected normalized DSL option, got %#v", option)
-	}
-}
-
-func TestCreateChartToolAcceptsRawOption(t *testing.T) {
+func TestCreateChartToolPreservesExplicitOptionAndDimensions(t *testing.T) {
 	t.Parallel()
 
 	tool := &CreateChartTool{ReportState: &ReportState{}}
 	result, err := tool.Execute(json.RawMessage(`{
 		"chart_id":"chart_custom",
-		"title":"自定义图",
-		"option":{
-			"tooltip":{"trigger":"item"},
-			"xAxis":{"type":"category","data":["A","B"]},
-			"yAxis":{"type":"value"},
-			"series":[{"type":"line","data":[1,2]}]
-		}
+		"title":"Observed values",
+		"width":"90%",
+		"height":"360px",
+		"option":{"xAxis":{"data":["A","B"]},"series":[{"type":"scatter","data":[1,2]}]}
 	}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	var payload map[string]interface{}
 	if err := json.Unmarshal([]byte(result), &payload); err != nil {
-		t.Fatalf("expected json feedback, got %v", err)
+		t.Fatalf("expected JSON feedback: %v", err)
 	}
-	if payload["ok"] != true {
-		t.Fatalf("expected ok=true, got %#v", payload["ok"])
+	if payload["ok"] != true || payload["chart_ref"] != "{{chart:chart_custom}}" {
+		t.Fatalf("unexpected success payload: %#v", payload)
 	}
-	if len(tool.ReportState.Charts) != 1 {
-		t.Fatalf("expected 1 chart, got %d", len(tool.ReportState.Charts))
+	if len(tool.ReportState.Charts) != 1 || !tool.ReportState.NeedsFinalize {
+		t.Fatalf("unexpected report state: %#v", tool.ReportState)
 	}
-	if !tool.ReportState.NeedsFinalize {
-		t.Fatal("expected report state to require finalize after raw option mutation")
+	chart := tool.ReportState.Charts[0]
+	if chart.Width != "90%" || chart.Height != "360px" {
+		t.Fatalf("explicit dimensions were not preserved: %#v", chart)
 	}
-
 	var option map[string]interface{}
-	if err := json.Unmarshal(tool.ReportState.Charts[0].Option, &option); err != nil {
+	if err := json.Unmarshal(chart.Option, &option); err != nil {
 		t.Fatalf("unmarshal option: %v", err)
 	}
-	if option["tooltip"] == nil || option["xAxis"] == nil {
-		t.Fatalf("expected raw option to be preserved: %#v", option)
+	if option["tooltip"] != nil || option["legend"] != nil || option["title"] != nil {
+		t.Fatalf("runtime injected presentation defaults: %#v", option)
+	}
+	series := option["series"].([]interface{})[0].(map[string]interface{})
+	if series["type"] != "scatter" {
+		t.Fatalf("runtime rewrote chart type: %#v", option)
 	}
 }
 
-func TestCreateChartToolAcceptsStringifiedRawOption(t *testing.T) {
+func TestCreateChartToolRejectsStringifiedOption(t *testing.T) {
 	t.Parallel()
 
 	tool := &CreateChartTool{ReportState: &ReportState{}}
-	result, err := tool.Execute(json.RawMessage(`{
-		"chart_id":"chart_custom",
-		"title":"自定义图",
-		"option":"{\"xAxis\":{\"type\":\"category\",\"data\":[\"A\"]},\"yAxis\":{\"type\":\"value\"},\"series\":[{\"type\":\"bar\",\"data\":[1]}]}"
-	}`))
+	result, err := tool.Execute(json.RawMessage(`{"chart_id":"chart_1","option":"{\"series\":[]}"}`))
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("expected structured validation failure, got %v", err)
 	}
-
 	var payload map[string]interface{}
 	if err := json.Unmarshal([]byte(result), &payload); err != nil {
-		t.Fatalf("expected json feedback, got %v", err)
+		t.Fatalf("parse validation payload: %v", err)
 	}
-	if payload["ok"] != true {
-		t.Fatalf("expected ok=true, got %#v", payload["ok"])
+	if payload["ok"] != false || payload["error_code"] != "invalid_chart_spec" {
+		t.Fatalf("expected exact object contract to reject stringified JSON: %#v", payload)
 	}
+}
 
-	var option map[string]interface{}
-	if err := json.Unmarshal(tool.ReportState.Charts[0].Option, &option); err != nil {
-		t.Fatalf("unmarshal option: %v", err)
+func TestCreateChartPreservesGeneralIdentifierAndDimensions(t *testing.T) {
+	t.Parallel()
+
+	state := &ReportState{}
+	result, err := applyReportChartMutation(state, nil, createChartParams{
+		ChartID: "chart.revenue-1", Option: json.RawMessage(`{"series":[]}`), Width: "75%", Height: "24rem",
+	})
+	if err != nil {
+		t.Fatalf("apply chart mutation: %v", err)
 	}
-	if option["xAxis"] == nil || option["series"] == nil {
-		t.Fatalf("expected stringified raw option to be expanded: %#v", option)
+	if result.ChartRef != "{{chart:chart.revenue-1}}" || len(state.Charts) != 1 || state.Charts[0].Width != "75%" || state.Charts[0].Height != "24rem" {
+		t.Fatalf("chart facts were rewritten: result=%#v state=%#v", result, state.Charts)
+	}
+	state.Blocks = []ReportBlock{{ID: "analysis", Kind: "markdown", Content: result.ChartRef}}
+	html := RenderReportHTML("Report", "", state)
+	if !strings.Contains(html, `data-chart-id="chart.revenue-1"`) || !strings.Contains(html, `style="width:75%;height:24rem;"`) {
+		t.Fatalf("general chart reference was not rendered exactly: %s", html)
 	}
 }

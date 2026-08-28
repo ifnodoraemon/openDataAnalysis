@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -15,6 +16,9 @@ type PostgresConnector struct {
 }
 
 func NewPostgresConnector(sources *SourceService) *PostgresConnector {
+	if sources == nil {
+		panic("postgres connector requires a source service")
+	}
 	return &PostgresConnector{Sources: sources}
 }
 
@@ -26,9 +30,15 @@ func (c *PostgresConnector) Spec() SourceConnectorSpec {
 		Label:             "PostgreSQL",
 		Category:          "sql",
 		Configurable:      true,
-		DefaultPort:       5432,
-		DefaultSchema:     "public",
-		SSLModeOptions:    []string{"disable", "allow", "prefer", "require", "verify-ca", "verify-full"},
+		SecurityModeField: "ssl_mode",
+		SecurityModeOptions: []SourceConnectorEnumOption{
+			{Value: "disable", Label: "不使用加密"},
+			{Value: "allow", Label: "允许加密"},
+			{Value: "prefer", Label: "优先加密"},
+			{Value: "require", Label: "必须加密"},
+			{Value: "verify-ca", Label: "验证证书颁发机构"},
+			{Value: "verify-full", Label: "完整验证证书与主机名"},
+		},
 		SupportsAllowlist: true,
 		SupportsCatalog:   true,
 		SupportsImport:    true,
@@ -40,7 +50,7 @@ func (c *PostgresConnector) NormalizeConfig(ctx context.Context, req SourceConfi
 		return nil, fmt.Errorf("AUTH_SECRET too short, cannot store source credentials")
 	}
 
-	cfg, err := normalizePostgresConfigJSON(req.RawConfig, req.Existing)
+	cfg, err := normalizePostgresConfigJSON(req.RawConfig, req.ConfigProvided, req.Existing)
 	if err != nil {
 		return nil, err
 	}
@@ -53,10 +63,9 @@ func (c *PostgresConnector) NormalizeConfig(ctx context.Context, req SourceConfi
 	if req.Existing != nil {
 		credentialCiphertext = req.Existing.CredentialCiphertext
 	}
-	credentialProvided := len(req.RawCredential) > 0 && strings.TrimSpace(string(req.RawCredential)) != "" && strings.TrimSpace(string(req.RawCredential)) != "null"
-	if credentialProvided {
+	if req.CredentialProvided {
 		var credential PostgresCredential
-		if err := json.Unmarshal(req.RawCredential, &credential); err != nil {
+		if err := decodeStrictJSON(req.RawCredential, &credential); err != nil {
 			return nil, fmt.Errorf("invalid postgres credential: %w", err)
 		}
 		if strings.TrimSpace(credential.Password) == "" {
@@ -93,11 +102,9 @@ func (c *PostgresConnector) PublicConfig(ctx context.Context, sourceID string) (
 		return nil, err
 	}
 	return map[string]interface{}{
-		"driver":             cfg.Driver,
 		"host":               cfg.Host,
 		"port":               cfg.Port,
 		"database_name":      cfg.DatabaseName,
-		"default_schema":     cfg.DefaultSchema,
 		"ssl_mode":           cfg.SSLMode,
 		"username":           cfg.Username,
 		"allowlist":          cfg.Allowlist,
@@ -107,7 +114,7 @@ func (c *PostgresConnector) PublicConfig(ctx context.Context, sourceID string) (
 	}, nil
 }
 
-func (c *PostgresConnector) Test(ctx context.Context, req SourceTestRequest) (map[string]interface{}, error) {
+func (c *PostgresConnector) Test(ctx context.Context, req SourceTestRequest) (SourceTestResult, error) {
 	return c.Sources.TestPostgresConnection(ctx, req.SourceID, req.AuthSecret), nil
 }
 
@@ -158,19 +165,16 @@ func (c *PostgresConnector) Import(ctx context.Context, req SourceImportRequest)
 	}
 	importRowLimit := req.ImportRowLimit
 	if importRowLimit < 0 {
-		importRowLimit = 0
+		return nil, fmt.Errorf("import_row_limit cannot be negative")
 	}
 
-	objectName := strings.TrimSpace(req.Object.Name)
-	if objectName == "" {
+	objectName := req.Object.Name
+	if err := validateExactConfigText("object_name", objectName); err != nil {
 		return nil, fmt.Errorf("object_name is required")
 	}
-	resolvedSchema := strings.TrimSpace(req.Object.Schema)
-	if resolvedSchema == "" {
-		resolvedSchema = cfg.DefaultSchema
-	}
-	if strings.TrimSpace(resolvedSchema) == "" {
-		return nil, fmt.Errorf("schema_name or connection default_schema is required")
+	resolvedSchema := req.Object.Schema
+	if err := validateExactConfigText("schema_name", resolvedSchema); err != nil {
+		return nil, err
 	}
 
 	if !isInAllowlist(cfg.Allowlist, resolvedSchema, objectName) {
@@ -183,22 +187,22 @@ func (c *PostgresConnector) Import(ctx context.Context, req SourceImportRequest)
 	}
 	defer pgDB.Close()
 
-	tableName := sourceScopedPGTableName(resolvedSchema, objectName, req.SourceID)
 	preSnapshot, err := c.Sources.BeginSnapshotImport(
 		ctx, req.SessionID, req.SourceID,
-		string(domain.SourceTypePostgresConnection), resolvedSchema, objectName, tableName,
+		string(domain.SourceTypePostgresConnection), resolvedSchema, objectName,
 	)
 	if err != nil {
 		return nil, err
 	}
+	tableName := preSnapshot.AnalysisTableName
 
 	importStart := time.Now()
 	rowCount, colCount, rowsSkipped, importTruncated, err := c.Sources.streamImportToSQLite(ctx, pgDB, resolvedSchema, objectName, req.Ingester, tableName, importRowLimit)
 	importDuration := time.Since(importStart)
 	if err != nil {
 		errMsg := err.Error()
-		_ = c.Sources.SnapshotRepo.UpdateStatus(ctx, preSnapshot.ID, domain.SnapshotStatusFailed, &errMsg)
-		return nil, fmt.Errorf("import failed: %w", err)
+		statusErr := c.Sources.SnapshotRepo.UpdateStatus(ctx, preSnapshot.ID, domain.SnapshotStatusFailed, &errMsg)
+		return nil, errors.Join(fmt.Errorf("import failed: %w", err), statusErr)
 	}
 
 	var warnings []string
@@ -206,15 +210,9 @@ func (c *PostgresConnector) Import(ctx context.Context, req SourceImportRequest)
 		warnings = append(warnings, fmt.Sprintf("%d upstream rows were skipped during import because they could not be scanned", rowsSkipped))
 	}
 
-	workspaceID := req.WorkspaceID
-	if workspaceID == "" {
-		workspaceID = source.WorkspaceID
-	}
-
 	return c.Sources.FinalizeSnapshotImport(ctx, SnapshotImportCompletion{
 		SnapshotID:        preSnapshot.ID,
 		SessionID:         req.SessionID,
-		WorkspaceID:       workspaceID,
 		SourceID:          req.SourceID,
 		UpstreamKind:      string(domain.SourceTypePostgresConnection),
 		UpstreamSchema:    resolvedSchema,
@@ -227,51 +225,26 @@ func (c *PostgresConnector) Import(ctx context.Context, req SourceImportRequest)
 		ImportRowLimit:    importRowLimit,
 		ImportTruncated:   importTruncated,
 		ImportDuration:    importDuration,
-		AnalyzeSemantics:  true,
 		ExtraWarnings:     warnings,
 		Ingester:          req.Ingester,
 	})
 }
 
-func normalizePostgresConfigJSON(raw json.RawMessage, existing *domain.SourceConfig) (PostgresSourceConfig, error) {
-	rawText := strings.TrimSpace(string(raw))
-	if rawText == "" || rawText == "null" {
+func normalizePostgresConfigJSON(raw json.RawMessage, provided bool, existing *domain.SourceConfig) (PostgresSourceConfig, error) {
+	if !provided {
 		if existing == nil {
 			return PostgresSourceConfig{}, fmt.Errorf("postgres config is required")
 		}
 		return ParsePostgresSourceConfig(existing)
 	}
 	var cfg PostgresSourceConfig
-	if err := json.Unmarshal(raw, &cfg); err != nil {
+	if err := decodeStrictJSON(raw, &cfg); err != nil {
 		return PostgresSourceConfig{}, fmt.Errorf("invalid postgres config: %w", err)
 	}
-	cfg.Driver = strings.TrimSpace(cfg.Driver)
-	if cfg.Driver == "" {
-		cfg.Driver = "postgres"
+	if err := validatePostgresConfig(cfg); err != nil {
+		return PostgresSourceConfig{}, err
 	}
-	if cfg.Driver != "postgres" {
-		return PostgresSourceConfig{}, fmt.Errorf("postgres config driver must be postgres")
-	}
-	cfg.Host = strings.TrimSpace(cfg.Host)
-	cfg.DatabaseName = strings.TrimSpace(cfg.DatabaseName)
-	cfg.DefaultSchema = strings.TrimSpace(cfg.DefaultSchema)
-	cfg.SSLMode = strings.TrimSpace(cfg.SSLMode)
-	cfg.Username = strings.TrimSpace(cfg.Username)
-	if cfg.Host == "" || cfg.DatabaseName == "" || cfg.Username == "" {
-		return PostgresSourceConfig{}, fmt.Errorf("host, database_name and username are required")
-	}
-	if cfg.Port <= 0 || cfg.Port > 65535 {
-		return PostgresSourceConfig{}, fmt.Errorf("port must be between 1 and 65535")
-	}
-	if cfg.SSLMode == "" {
-		cfg.SSLMode = "disable"
-	}
-	switch cfg.SSLMode {
-	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
-	default:
-		return PostgresSourceConfig{}, fmt.Errorf("unsupported ssl_mode: %s", cfg.SSLMode)
-	}
-	allowlist, err := NormalizeAllowlist(cfg.Allowlist, cfg.DefaultSchema)
+	allowlist, err := ValidateAllowlist(cfg.Allowlist)
 	if err != nil {
 		return PostgresSourceConfig{}, err
 	}
@@ -279,34 +252,48 @@ func normalizePostgresConfigJSON(raw json.RawMessage, existing *domain.SourceCon
 	return cfg, nil
 }
 
-func NormalizeAllowlist(entries []AllowlistEntry, defaultSchema string) ([]AllowlistEntry, error) {
+func validatePostgresConfig(cfg PostgresSourceConfig) error {
+	for _, item := range []struct{ field, value string }{
+		{"host", cfg.Host}, {"database_name", cfg.DatabaseName}, {"username", cfg.Username}, {"ssl_mode", cfg.SSLMode},
+	} {
+		if err := validateExactConfigText(item.field, item.value); err != nil {
+			return err
+		}
+	}
+	if cfg.Port <= 0 || cfg.Port > 65535 {
+		return fmt.Errorf("port must be between 1 and 65535")
+	}
+	switch cfg.SSLMode {
+	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
+		return nil
+	default:
+		return fmt.Errorf("unsupported ssl_mode: %s", cfg.SSLMode)
+	}
+}
+
+func ValidateAllowlist(entries []AllowlistEntry) ([]AllowlistEntry, error) {
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("allowlist must include at least one table or view")
 	}
-	normalized := make([]AllowlistEntry, 0, len(entries))
-	seen := map[string]struct{}{}
+	validated := make([]AllowlistEntry, 0, len(entries))
+	type allowlistKey struct{ schema, name, kind string }
+	seen := map[allowlistKey]struct{}{}
 	for _, entry := range entries {
-		schema := strings.TrimSpace(entry.Schema)
-		if schema == "" {
-			schema = strings.TrimSpace(defaultSchema)
+		if err := validateExactConfigText("allowlist schema", entry.Schema); err != nil {
+			return nil, err
 		}
-		name := strings.TrimSpace(entry.Name)
-		kind := strings.ToLower(strings.TrimSpace(entry.Kind))
-		if kind == "" {
-			kind = "table"
+		if err := validateExactConfigText("allowlist name", entry.Name); err != nil {
+			return nil, err
 		}
-		if schema == "" || name == "" {
-			return nil, fmt.Errorf("allowlist entries require schema and name")
-		}
-		if kind != "table" && kind != "view" {
+		if entry.Kind != "table" && entry.Kind != "view" {
 			return nil, fmt.Errorf("allowlist kind must be table or view")
 		}
-		key := strings.ToLower(schema + "." + name + "." + kind)
+		key := allowlistKey{schema: entry.Schema, name: entry.Name, kind: entry.Kind}
 		if _, ok := seen[key]; ok {
-			continue
+			return nil, fmt.Errorf("duplicate allowlist entry: %s.%s (%s)", entry.Schema, entry.Name, entry.Kind)
 		}
 		seen[key] = struct{}{}
-		normalized = append(normalized, AllowlistEntry{Schema: schema, Name: name, Kind: kind})
+		validated = append(validated, entry)
 	}
-	return normalized, nil
+	return validated, nil
 }

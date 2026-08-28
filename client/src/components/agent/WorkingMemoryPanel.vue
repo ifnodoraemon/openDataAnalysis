@@ -13,7 +13,11 @@
     <div v-show="!isCollapsed" class="memory-content">
       <div v-for="[key, value] in entries" :key="key" class="memory-item">
         <div class="memory-key">{{ key }}</div>
-        <div class="memory-value">{{ value }}</div>
+        <div class="memory-value">{{ value.statement }}</div>
+        <div class="memory-meta">
+          {{ memoryStatusLabel(value.status) }} ·
+          {{ memoryCreatorLabel(value.created_by) }}
+        </div>
       </div>
     </div>
   </div>
@@ -25,14 +29,28 @@ import { useAgentStore } from "../../stores/agent.js";
 
 const store = useAgentStore();
 const isCollapsed = ref(false);
-const entries = computed(() => Object.entries(store.memoryFacts || {}));
+const entries = computed(() => Object.entries(store.memoryEntries || {}));
+
+function memoryStatusLabel(status) {
+  return (
+    {
+      observed: "已观测",
+      inferred: "推断",
+      assumed: "假设",
+    }[status] || "未标注"
+  );
+}
+
+function memoryCreatorLabel(createdBy) {
+  return createdBy === "agent" ? "智能体" : createdBy || "来源未知";
+}
 </script>
 
 <style scoped>
 .memory-panel {
   margin: 12px 12px 0 12px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
   overflow: hidden;
 }
@@ -44,7 +62,7 @@ const entries = computed(() => Object.entries(store.memoryFacts || {}));
   align-items: center;
   cursor: pointer;
   background: var(--bg-card);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .header-title {
@@ -53,7 +71,7 @@ const entries = computed(() => Object.entries(store.memoryFacts || {}));
   display: flex;
   align-items: center;
   gap: 8px;
-  color: var(--text-primary);
+  color: var(--text-main);
 }
 
 .memory-content {
@@ -65,7 +83,7 @@ const entries = computed(() => Object.entries(store.memoryFacts || {}));
 
 .memory-item {
   padding: 8px 10px;
-  background: var(--bg-primary);
+  background: var(--bg-app);
   border-radius: 6px;
   border-left: 3px solid var(--accent-green);
 }
@@ -73,21 +91,27 @@ const entries = computed(() => Object.entries(store.memoryFacts || {}));
 .memory-key {
   font-size: 0.75rem;
   font-weight: 700;
-  color: var(--text-secondary);
+  color: var(--text-sub);
   margin-bottom: 4px;
 }
 
 .memory-value {
   font-size: 0.85rem;
-  color: var(--text-primary);
+  color: var(--text-main);
   line-height: 1.4;
   word-break: break-word;
+}
+
+.memory-meta {
+  margin-top: 4px;
+  font-size: 0.7rem;
+  color: var(--text-sub);
 }
 
 .toggle-btn {
   background: transparent;
   border: none;
-  color: var(--text-secondary);
+  color: var(--text-sub);
   cursor: pointer;
 }
 

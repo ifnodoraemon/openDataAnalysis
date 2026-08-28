@@ -2,17 +2,22 @@ package metadata
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strings"
 
 	_ "modernc.org/sqlite"
 )
 
+const (
+	DialectSQLite   = "sqlite"
+	DialectPostgres = "postgres"
+)
+
 type Store struct {
-	DB *sql.DB
+	DB      *sql.DB
+	Dialect string
 }
 
 func Open(path string) (*Store, error) {
@@ -25,14 +30,12 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("failed to open metadata database: %w", err)
 	}
 	if err := configureSQLite(db); err != nil {
-		_ = db.Close()
-		return nil, err
+		return nil, errors.Join(err, db.Close())
 	}
 
-	store := &Store{DB: db}
+	store := &Store{DB: db, Dialect: DialectSQLite}
 	if err := store.migrate(); err != nil {
-		_ = db.Close()
-		return nil, err
+		return nil, errors.Join(err, db.Close())
 	}
 
 	return store, nil
@@ -222,7 +225,7 @@ func (s *Store) migrate() error {
 				import_duration_ms INTEGER NOT NULL DEFAULT 0,
 				profile_duration_ms INTEGER NOT NULL DEFAULT 0,
 			snapshot_size_bytes INTEGER NOT NULL DEFAULT 0,
-			profile_mode TEXT NOT NULL DEFAULT 'sampled',
+			profile_mode TEXT NOT NULL DEFAULT 'pending',
 			FOREIGN KEY (source_id) REFERENCES data_sources(id) ON DELETE CASCADE
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_source_snapshots_session ON source_snapshots(session_id)`,
@@ -247,7 +250,7 @@ func (s *Store) migrate() error {
 			snapshot_id TEXT NOT NULL,
 			analysis_table_name TEXT NOT NULL,
 			schema_signature TEXT NOT NULL DEFAULT '',
-			profile_status TEXT NOT NULL DEFAULT 'draft',
+			profile_status TEXT NOT NULL DEFAULT 'profiled',
 			profile_json TEXT NOT NULL DEFAULT '{}',
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
@@ -263,6 +266,8 @@ func (s *Store) migrate() error {
 			workspace_id TEXT NOT NULL,
 			session_id TEXT NOT NULL,
 			confirmed_by TEXT NOT NULL,
+			confirmation_receipt_id TEXT NOT NULL DEFAULT '',
+			provenance TEXT NOT NULL DEFAULT 'authenticated_request',
 			scope TEXT NOT NULL DEFAULT 'session',
 			overrides_json TEXT NOT NULL DEFAULT '{}',
 			created_at DATETIME NOT NULL,
@@ -311,68 +316,31 @@ func (s *Store) migrate() error {
 		}
 	}
 
-	if err := ensureColumn(s.DB, "analysis_runs", "summary", "TEXT NOT NULL DEFAULT ''"); err != nil {
+	for _, required := range []struct {
+		table   string
+		columns []string
+	}{
+		{table: "analysis_runs", columns: []string{"summary", "parent_run_id", "run_kind", "delegate_role", "goal_id"}},
+		{table: "files", columns: []string{"purpose"}},
+		{table: "run_messages", columns: []string{"tool_call_id"}},
+		{table: "source_snapshots", columns: []string{"rows_skipped", "import_row_limit", "import_truncated"}},
+		{table: "semantic_confirmations", columns: []string{"confirmation_receipt_id", "provenance"}},
+	} {
+		if err := validateRequiredColumns(s.DB, required.table, required.columns); err != nil {
+			return err
+		}
+	}
+	if _, err := s.DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_semantic_confirmations_receipt ON semantic_confirmations(confirmation_receipt_id) WHERE confirmation_receipt_id <> ''`); err != nil {
+		return fmt.Errorf("failed to create semantic confirmation receipt index: %w", err)
+	}
+	if err := validateSessionSourceBindingsShape(s.DB); err != nil {
 		return err
-	}
-	if err := ensureColumn(s.DB, "analysis_runs", "parent_run_id", "TEXT"); err != nil {
-		return err
-	}
-	if err := ensureColumn(s.DB, "analysis_runs", "run_kind", "TEXT NOT NULL DEFAULT 'root'"); err != nil {
-		return err
-	}
-	if err := ensureColumn(s.DB, "analysis_runs", "delegate_role", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := ensureColumn(s.DB, "analysis_runs", "goal_id", "TEXT"); err != nil {
-		return err
-	}
-	if err := ensureColumn(s.DB, "files", "purpose", "TEXT NOT NULL DEFAULT 'source'"); err != nil {
-		return err
-	}
-	if err := ensureColumn(s.DB, "run_messages", "tool_call_id", "TEXT"); err != nil {
-		return err
-	}
-	if err := ensureColumn(s.DB, "source_snapshots", "rows_skipped", "INTEGER NOT NULL DEFAULT 0"); err != nil {
-		return err
-	}
-	if err := ensureColumn(s.DB, "source_snapshots", "import_row_limit", "INTEGER NOT NULL DEFAULT 0"); err != nil {
-		return err
-	}
-	if err := ensureColumn(s.DB, "source_snapshots", "import_truncated", "BOOLEAN NOT NULL DEFAULT 0"); err != nil {
-		return err
-	}
-	if err := ensureSessionSourceBindingsShape(s.DB); err != nil {
-		return err
-	}
-	if _, err := s.DB.Exec(`UPDATE files SET purpose = 'report' WHERE purpose = 'source' AND storage_key LIKE '%/report/%'`); err != nil {
-		return fmt.Errorf("failed to backfill report file usage: %w", err)
-	}
-	if _, err := s.DB.Exec(`UPDATE files SET purpose = 'artifact' WHERE purpose = 'source' AND storage_key LIKE '%/artifacts/%'`); err != nil {
-		return fmt.Errorf("failed to backfill artifact file usage: %w", err)
-	}
-
-	if err := s.backfillFileDataSources(); err != nil {
-		return fmt.Errorf("failed to backfill file-backed data sources: %w", err)
 	}
 
 	return nil
 }
 
-var safeIdentPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
-
-const cleanSessionSourceBindingsDDL = `CREATE TABLE session_source_bindings (
-	session_id TEXT NOT NULL,
-	source_id TEXT NOT NULL,
-	source_object_key TEXT NOT NULL,
-	active_snapshot_id TEXT NOT NULL,
-	created_at DATETIME NOT NULL,
-	updated_at DATETIME NOT NULL,
-	PRIMARY KEY (session_id, source_id, source_object_key),
-	FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-	FOREIGN KEY (source_id) REFERENCES data_sources(id) ON DELETE CASCADE
-)`
-
-func ensureSessionSourceBindingsShape(db *sql.DB) error {
+func validateSessionSourceBindingsShape(db *sql.DB) error {
 	rows, err := db.Query(`PRAGMA table_info(session_source_bindings)`)
 	if err != nil {
 		return fmt.Errorf("failed to inspect session_source_bindings: %w", err)
@@ -397,131 +365,24 @@ func ensureSessionSourceBindingsShape(db *sql.DB) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if cols["session_id"].PK == 1 && cols["source_id"].PK == 2 && cols["source_object_key"].PK == 3 {
-		return nil
+	if cols["session_id"].PK != 1 || cols["source_id"].PK != 2 || cols["source_object_key"].PK != 3 {
+		return fmt.Errorf("session_source_bindings has an unsupported schema; run an explicit metadata migration before starting the server")
 	}
-
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.Exec(`ALTER TABLE session_source_bindings RENAME TO session_source_bindings_legacy`); err != nil {
-		return fmt.Errorf("failed to replace session_source_bindings: %w", err)
-	}
-	if _, err := tx.Exec(cleanSessionSourceBindingsDDL); err != nil {
-		return fmt.Errorf("failed to create session_source_bindings: %w", err)
-	}
-
-	hasObjectKey := false
-	if _, ok := cols["source_object_key"]; ok {
-		hasObjectKey = true
-	}
-	selectSQL := `SELECT b.session_id, b.source_id, b.active_snapshot_id, b.created_at, b.updated_at, COALESCE(ss.upstream_kind, ''), COALESCE(ss.upstream_schema, ''), COALESCE(ss.upstream_object, '')`
-	if hasObjectKey {
-		selectSQL += `, COALESCE(b.source_object_key, '')`
-	}
-	selectSQL += ` FROM session_source_bindings_legacy b LEFT JOIN source_snapshots ss ON ss.id = b.active_snapshot_id`
-	legacyRows, err := tx.Query(selectSQL)
-	if err != nil {
-		return fmt.Errorf("failed to read old session_source_bindings: %w", err)
-	}
-	for legacyRows.Next() {
-		var sessionID, sourceID, snapshotID, createdAt, updatedAt, kind, schema, object string
-		objectKey := ""
-		scanArgs := []interface{}{&sessionID, &sourceID, &snapshotID, &createdAt, &updatedAt, &kind, &schema, &object}
-		if hasObjectKey {
-			scanArgs = append(scanArgs, &objectKey)
-		}
-		if err := legacyRows.Scan(scanArgs...); err != nil {
-			return fmt.Errorf("failed to scan old session_source_bindings: %w", err)
-		}
-		if strings.TrimSpace(objectKey) == "" {
-			objectKey = metadataSourceObjectKey(sourceID, kind, schema, object)
-		}
-		if _, err := tx.Exec(
-			`INSERT OR REPLACE INTO session_source_bindings (session_id, source_id, source_object_key, active_snapshot_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			sessionID, sourceID, objectKey, snapshotID, createdAt, updatedAt,
-		); err != nil {
-			return fmt.Errorf("failed to write session_source_bindings row: %w", err)
-		}
-	}
-	if err := legacyRows.Err(); err != nil {
-		_ = legacyRows.Close()
-		return err
-	}
-	if err := legacyRows.Close(); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DROP TABLE session_source_bindings_legacy`); err != nil {
-		return fmt.Errorf("failed to drop old session_source_bindings: %w", err)
-	}
-	return tx.Commit()
-}
-
-func metadataSourceObjectKey(sourceID, upstreamKind, upstreamSchema, upstreamObject string) string {
-	kind := strings.TrimSpace(upstreamKind)
-	if kind == "" {
-		kind = "source"
-	}
-	if kind == "file_upload" {
-		return "file_upload:" + strings.TrimSpace(sourceID)
-	}
-	schema := strings.TrimSpace(upstreamSchema)
-	object := strings.TrimSpace(upstreamObject)
-	if schema != "" || object != "" {
-		return kind + ":" + schema + "." + object
-	}
-	return kind + ":" + strings.TrimSpace(sourceID)
-}
-
-func (s *Store) backfillFileDataSources() error {
-	rows, err := s.DB.Query(`SELECT f.id, f.workspace_id, f.display_name, f.uploaded_by, f.created_at, f.updated_at FROM files f WHERE f.purpose = 'source' AND NOT EXISTS (SELECT 1 FROM data_sources ds WHERE ds.file_id = f.id)`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	type fileRow struct {
-		ID          string
-		WorkspaceID string
-		DisplayName string
-		UploadedBy  string
-		CreatedAt   string
-		UpdatedAt   string
-	}
-	var files []fileRow
-	for rows.Next() {
-		var f fileRow
-		if err := rows.Scan(&f.ID, &f.WorkspaceID, &f.DisplayName, &f.UploadedBy, &f.CreatedAt, &f.UpdatedAt); err != nil {
-			continue
-		}
-		files = append(files, f)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	for _, f := range files {
-		sourceID := "ds_" + f.ID
-		_, _ = s.DB.Exec(`INSERT OR IGNORE INTO data_sources (id, workspace_id, name, source_type, status, file_id, created_by, created_at, updated_at) VALUES (?, ?, ?, 'file_upload', 'active', ?, ?, ?, ?)`,
-			sourceID, f.WorkspaceID, f.DisplayName, f.ID, f.UploadedBy, f.CreatedAt, f.UpdatedAt)
-	}
-
 	return nil
 }
 
-func ensureColumn(db *sql.DB, table, column, definition string) error {
-	if !safeIdentPattern.MatchString(table) || !safeIdentPattern.MatchString(column) {
-		return fmt.Errorf("invalid identifier: table=%s column=%s", table, column)
-	}
+func validateRequiredColumns(db *sql.DB, table string, required []string) (resultErr error) {
 	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(\"%s\")", table))
 	if err != nil {
-		return fmt.Errorf("failed to check %s.%s: %w", table, column, err)
+		return fmt.Errorf("failed to inspect %s schema: %w", table, err)
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close %s schema rows: %w", table, closeErr))
+		}
+	}()
 
+	observed := make(map[string]struct{})
 	for rows.Next() {
 		var cid int
 		var name, colType string
@@ -530,16 +391,15 @@ func ensureColumn(db *sql.DB, table, column, definition string) error {
 		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk); err != nil {
 			return fmt.Errorf("failed to read %s table structure: %w", table, err)
 		}
-		if strings.EqualFold(name, column) {
-			return nil
-		}
+		observed[name] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("failed to iterate %s table structure: %w", table, err)
 	}
-
-	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE \"%s\" ADD COLUMN \"%s\" %s", table, column, definition)); err != nil {
-		return fmt.Errorf("failed to add column %s to %s: %w", table, column, err)
+	for _, column := range required {
+		if _, ok := observed[column]; !ok {
+			return fmt.Errorf("%s is missing required column %s; run an explicit metadata migration before starting the server", table, column)
+		}
 	}
 	return nil
 }

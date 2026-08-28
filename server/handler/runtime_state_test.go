@@ -121,37 +121,16 @@ func TestAttachRunRuntimeStateUsesRunTreeState(t *testing.T) {
 		t.Fatalf("create child run: %v", err)
 	}
 
-	callRoot := "call_root_memory"
-	callChild := "call_child_goal"
-	success := true
-
 	if err := messageRepo.Create(ctx, &domain.RunMessage{
 		ID:          "msg_1",
 		RunID:       rootID,
 		SessionID:   "sess_1",
 		WorkspaceID: "ws_1",
-		Type:        string(agent.EventToolCall),
-		Name:        "memory_save_fact",
-		ToolCallID:  &callRoot,
-		Content:     `{"key":"confirmed_metric","fact":"GMV uses settled orders"}`,
+		Type:        string(agent.EventStateMemoryUpdated),
+		Content:     `{"entries":{"retained_context":{"statement":"user-provided context","status":"inferred","created_by":"agent","created_at":"2026-08-11T00:00:00Z"}}}`,
 		CreatedAt:   now.Add(2 * time.Second),
 	}); err != nil {
-		t.Fatalf("create root tool call: %v", err)
-	}
-
-	if err := messageRepo.Create(ctx, &domain.RunMessage{
-		ID:          "msg_2",
-		RunID:       rootID,
-		SessionID:   "sess_1",
-		WorkspaceID: "ws_1",
-		Type:        string(agent.EventToolResult),
-		Name:        "memory_save_fact",
-		ToolCallID:  &callRoot,
-		Content:     `{"ok":true}`,
-		Success:     &success,
-		CreatedAt:   now.Add(3 * time.Second),
-	}); err != nil {
-		t.Fatalf("create root tool result: %v", err)
+		t.Fatalf("create memory state event: %v", err)
 	}
 
 	if err := messageRepo.Create(ctx, &domain.RunMessage{
@@ -159,28 +138,11 @@ func TestAttachRunRuntimeStateUsesRunTreeState(t *testing.T) {
 		RunID:       childID,
 		SessionID:   "sess_1",
 		WorkspaceID: "ws_1",
-		Type:        string(agent.EventToolCall),
-		Name:        "goal_manage",
-		ToolCallID:  &callChild,
-		Content:     `{"action":"add","description":"Inspect revenue quality"}`,
+		Type:        string(agent.EventStateSubgoalsUpdated),
+		Content:     `{"goals":[{"id":"goal_123","description":"Inspect source quality","status":"pending"}]}`,
 		CreatedAt:   now.Add(4 * time.Second),
 	}); err != nil {
-		t.Fatalf("create child tool call: %v", err)
-	}
-
-	if err := messageRepo.Create(ctx, &domain.RunMessage{
-		ID:          "msg_4",
-		RunID:       childID,
-		SessionID:   "sess_1",
-		WorkspaceID: "ws_1",
-		Type:        string(agent.EventToolResult),
-		Name:        "goal_manage",
-		ToolCallID:  &callChild,
-		Content:     `{"ok":true,"goal_id":"goal_123"}`,
-		Success:     &success,
-		CreatedAt:   now.Add(5 * time.Second),
-	}); err != nil {
-		t.Fatalf("create child tool result: %v", err)
+		t.Fatalf("create subgoal state event: %v", err)
 	}
 
 	if err := messageRepo.Create(ctx, &domain.RunMessage{
@@ -207,31 +169,33 @@ func TestAttachRunRuntimeStateUsesRunTreeState(t *testing.T) {
 		SessionID:   "sess_1",
 		WorkspaceID: "ws_1",
 		Type:        string(agent.EventStateReportEditUpdated),
-		Content:     `{"active":true,"scopeKind":"partial_selection","editContext":{"mode":"regenerate_selection","targetRunId":"run_child","blockId":"blk_1","blockLabel":"概览","selectionText":"共享草稿已持久化","selectionStart":0,"selectionEnd":8,"selectionRangeSet":true,"preserveOtherBlocks":true}}`,
+		Content:     `{"active":true,"scopeKind":"partial_selection","editContext":{"scopeKind":"partial_selection","targetRunId":"run_child","blockId":"blk_1","blockLabel":"概览","selectionText":"共享草稿已持久化","selectionStart":0,"selectionEnd":8,"selectionRangeSet":true}}`,
 		CreatedAt:   now.Add(7 * time.Second),
 	}); err != nil {
 		t.Fatalf("create report edit update: %v", err)
 	}
 
 	resp := map[string]interface{}{}
-	attachRunRuntimeState(ctx, resp, domain.AnalysisRun{
+	if err := attachRunRuntimeState(ctx, resp, domain.AnalysisRun{
 		ID:          rootID,
 		SessionID:   "sess_1",
 		WorkspaceID: "ws_1",
 		UserID:      "user_1",
-	})
+	}); err != nil {
+		t.Fatalf("attach run runtime state: %v", err)
+	}
 
 	runtimeState, ok := resp["runtimeState"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("expected runtimeState map, got %#v", resp["runtimeState"])
 	}
 
-	memory, ok := runtimeState["memory"].(map[string]string)
+	memory, ok := runtimeState["memory_entries"].(map[string]agent.MemoryEntry)
 	if !ok {
-		t.Fatalf("expected memory map, got %#v", runtimeState["memory"])
+		t.Fatalf("expected memory entries, got %#v", runtimeState["memory_entries"])
 	}
-	if memory["confirmed_metric"] != "GMV uses settled orders" {
-		t.Fatalf("expected run-tree memory fact from root run, got %#v", memory)
+	if memory["retained_context"].Statement != "user-provided context" {
+		t.Fatalf("expected run-tree memory state from root run, got %#v", memory)
 	}
 
 	subgoals, ok := runtimeState["subgoals"].([]agent.Subgoal)
@@ -268,7 +232,7 @@ func TestAttachRunRuntimeStateUsesRunTreeState(t *testing.T) {
 func TestDeriveRuntimeStateRegeneratesReportHTMLFromSnapshot(t *testing.T) {
 	t.Parallel()
 
-	_, _, reportSnapshot, reportHTML, _ := deriveRuntimeStateFromMessages([]domain.RunMessage{
+	_, _, reportSnapshot, reportHTML, _, err := deriveRuntimeStateFromMessages([]domain.RunMessage{
 		{
 			ID:          "msg_report_update",
 			RunID:       "run_1",
@@ -288,6 +252,9 @@ func TestDeriveRuntimeStateRegeneratesReportHTMLFromSnapshot(t *testing.T) {
 			CreatedAt: time.Now(),
 		},
 	})
+	if err != nil {
+		t.Fatalf("derive runtime state: %v", err)
+	}
 
 	if reportSnapshot == nil || reportSnapshot.Title != "结构化报告标题" {
 		t.Fatalf("expected structured report snapshot, got %#v", reportSnapshot)
@@ -314,7 +281,6 @@ func TestHydrateSessionFromPersistenceRestoresStructuredReportState(t *testing.T
 
 	now := time.Now()
 	rootID := "run_report_root"
-	success := true
 
 	mustCreateRunMessage(t, ctx, &domain.AnalysisRun{
 		ID:           rootID,
@@ -332,23 +298,9 @@ func TestHydrateSessionFromPersistenceRestoresStructuredReportState(t *testing.T
 		RunID:       rootID,
 		SessionID:   "sess_1",
 		WorkspaceID: "ws_1",
-		Type:        string(agent.EventToolCall),
-		Name:        "memory_save_fact",
-		ToolCallID:  strPtr("call_report_memory"),
-		Content:     `{"key":"report_scope","fact":"draft report should survive restart"}`,
+		Type:        string(agent.EventStateMemoryUpdated),
+		Content:     `{"entries":{"report_scope":{"statement":"draft report should survive restart","status":"inferred","created_by":"agent","created_at":"2026-08-11T00:00:00Z"}}}`,
 		CreatedAt:   now.Add(time.Second),
-	})
-	mustCreateRunMessage(t, ctx, &domain.RunMessage{
-		ID:          "msg_report_result",
-		RunID:       rootID,
-		SessionID:   "sess_1",
-		WorkspaceID: "ws_1",
-		Type:        string(agent.EventToolResult),
-		Name:        "memory_save_fact",
-		ToolCallID:  strPtr("call_report_memory"),
-		Content:     `{"ok":true}`,
-		Success:     &success,
-		CreatedAt:   now.Add(2 * time.Second),
 	})
 	mustCreateRunMessage(t, ctx, &domain.RunMessage{
 		ID:          "msg_report_update",
@@ -375,7 +327,7 @@ func TestHydrateSessionFromPersistenceRestoresStructuredReportState(t *testing.T
 		SessionID:   "sess_1",
 		WorkspaceID: "ws_1",
 		Type:        string(agent.EventStateReportEditUpdated),
-		Content:     `{"active":true,"scopeKind":"partial_selection","editContext":{"mode":"regenerate_selection","targetRunId":"run_report_root","blockId":"blk_1","blockLabel":"概览","selectionText":"draft body","selectionStart":0,"selectionEnd":10,"selectionRangeSet":true,"preserveOtherBlocks":true}}`,
+		Content:     `{"active":true,"scopeKind":"partial_selection","editContext":{"scopeKind":"partial_selection","targetRunId":"run_report_root","blockId":"blk_1","blockLabel":"概览","selectionText":"draft body","selectionStart":0,"selectionEnd":10,"selectionRangeSet":true}}`,
 		CreatedAt:   now.Add(4 * time.Second),
 	})
 
@@ -429,7 +381,6 @@ func TestLoadSessionRuntimeStateFromPersistenceDoesNotTruncateLongHistory(t *tes
 	setupRuntimeStateRepos(t, ctx, store)
 
 	now := time.Now()
-	success := true
 	oldestRunID := ""
 	for i := 0; i < 1001; i++ {
 		runID := "run_bulk_" + strconv.Itoa(i)
@@ -448,33 +399,22 @@ func TestLoadSessionRuntimeStateFromPersistenceDoesNotTruncateLongHistory(t *tes
 		if i == 0 {
 			oldestRunID = runID
 			mustCreateRunMessage(t, ctx, &domain.RunMessage{
-				ID:          "msg_old_call",
+				ID:          "msg_old_state",
 				RunID:       runID,
 				SessionID:   "sess_1",
 				WorkspaceID: "ws_1",
-				Type:        string(agent.EventToolCall),
-				Name:        "memory_save_fact",
-				ToolCallID:  strPtr("call_old_fact"),
-				Content:     `{"key":"oldest_fact","fact":"must survive beyond 1000 roots"}`,
+				Type:        string(agent.EventStateMemoryUpdated),
+				Content:     `{"entries":{"oldest_entry":{"statement":"must survive beyond 1000 roots","status":"inferred","created_by":"agent","created_at":"2026-08-11T00:00:00Z"}}}`,
 				CreatedAt:   createdAt.Add(100 * time.Millisecond),
-			})
-			mustCreateRunMessage(t, ctx, &domain.RunMessage{
-				ID:          "msg_old_result",
-				RunID:       runID,
-				SessionID:   "sess_1",
-				WorkspaceID: "ws_1",
-				Type:        string(agent.EventToolResult),
-				Name:        "memory_save_fact",
-				ToolCallID:  strPtr("call_old_fact"),
-				Content:     `{"ok":true}`,
-				Success:     &success,
-				CreatedAt:   createdAt.Add(200 * time.Millisecond),
 			})
 		}
 	}
 
-	memory, subgoals, reportSnapshot, reportHTML, editState := loadSessionRuntimeStateFromPersistence(ctx, "sess_1")
-	if memory["oldest_fact"] != "must survive beyond 1000 roots" {
+	memory, subgoals, reportSnapshot, reportHTML, editState, err := loadSessionRuntimeStateFromPersistence(ctx, "sess_1")
+	if err != nil {
+		t.Fatalf("load runtime state: %v", err)
+	}
+	if memory["oldest_entry"].Statement != "must survive beyond 1000 roots" {
 		t.Fatalf("expected oldest root fact from %s to survive unlimited replay, got %#v", oldestRunID, memory)
 	}
 	if len(subgoals) != 0 {
@@ -544,7 +484,10 @@ func TestGetSessionRuntimeStatePrefersLiveSessionStateOverPersistedDraft(t *test
 	liveSess.Memory = agent.NewWorkingMemory()
 	liveSess.Subgoals = agent.NewSubgoalManager()
 
-	memory, subgoals, reportSnapshot, reportHTML, editState := getSessionRuntimeState(ctx, "ws_1", "user_1", "sess_1")
+	memory, subgoals, reportSnapshot, reportHTML, editState, err := getSessionRuntimeState(ctx, "ws_1", "user_1", "sess_1")
+	if err != nil {
+		t.Fatalf("get runtime state: %v", err)
+	}
 	if len(memory) != 0 || len(subgoals) != 0 {
 		t.Fatalf("expected live empty runtime state, got memory=%#v subgoals=%#v", memory, subgoals)
 	}

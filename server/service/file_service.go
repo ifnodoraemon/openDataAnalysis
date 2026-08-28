@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -82,13 +83,10 @@ func (s *FileService) Upload(ctx context.Context, in UploadFileInput) (*domain.F
 		UpdatedAt:       now,
 	}
 	if err := s.FileRepo.Create(ctx, file); err != nil {
-		_ = s.Storage.Delete(ctx, obj.Key)
-		return nil, err
+		return nil, errors.Join(err, s.Storage.Delete(ctx, obj.Key))
 	}
 	if err := s.FileRepo.AttachFilesToSession(ctx, in.SessionID, []string{file.ID}); err != nil {
-		_ = s.Storage.Delete(ctx, obj.Key)
-		_ = s.FileRepo.Delete(ctx, file.ID)
-		return nil, err
+		return nil, errors.Join(err, s.Storage.Delete(ctx, obj.Key), s.FileRepo.Delete(ctx, file.ID))
 	}
 	return file, nil
 }
@@ -135,14 +133,17 @@ func (s *FileService) MaterializeToTemp(ctx context.Context, sessionID, workspac
 		return "", nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
 
-	tempPath := filepath.Join(s.TempDir, fmt.Sprintf("%s-%s", file.ID, sanitizeFilename(file.DisplayName)))
-	dest, err := os.Create(tempPath)
+	displayName := sanitizeFilename(file.DisplayName)
+	ext := filepath.Ext(displayName)
+	dest, err := os.CreateTemp(s.TempDir, fmt.Sprintf("%s-%s-*%s", file.ID, strings.TrimSuffix(displayName, ext), ext))
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
+	tempPath := dest.Name()
 	defer dest.Close()
 
 	if _, err := io.Copy(dest, reader); err != nil {
+		os.Remove(tempPath)
 		return "", nil, fmt.Errorf("failed to write temp file: %w", err)
 	}
 
@@ -154,23 +155,87 @@ type SaveReportInput struct {
 	WorkspaceID string
 	SessionID   string
 	RunID       string
-	Title       string
-	Author      string
 	HTML        string
 	Snapshot    domain.ReportSnapshot
 }
 
-func (s *FileService) DeleteReportFile(ctx context.Context, fileID string, runID string) {
-	if s.ReportRepo != nil {
-		report, err := s.ReportRepo.GetByRunID(ctx, runID)
-		if err == nil && report != nil {
-			_ = s.Storage.Delete(ctx, report.HTMLStorageKey)
-			_ = s.ReportRepo.Delete(ctx, report.ID)
+type SaveArtifactInput struct {
+	UserID      string
+	WorkspaceID string
+	SessionID   string
+	RunID       string
+	FileName    string
+	ContentType string
+	Body        io.Reader
+	Size        int64
+}
+
+func (s *FileService) SaveArtifact(ctx context.Context, in SaveArtifactInput) (*domain.File, error) {
+	ok, err := s.WorkspaceRepo.IsMember(ctx, in.WorkspaceID, in.UserID)
+	if err != nil || !ok {
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("user not authorized to access workspace")
+	}
+	name := sanitizeFilename(in.FileName)
+	fileID := "art_" + uuid.New().String()[:12]
+	key := ArtifactKey(in.WorkspaceID, in.RunID, fileID+"-"+name)
+	obj, err := s.Storage.Put(ctx, storage.PutObjectRequest{
+		Key: key, Body: in.Body, Size: in.Size, ContentType: in.ContentType,
+		Metadata: map[string]string{
+			"workspace_id": in.WorkspaceID, "session_id": in.SessionID,
+			"uploaded_by": in.UserID, "run_id": in.RunID, "file_id": fileID,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	file := &domain.File{
+		ID: fileID, WorkspaceID: in.WorkspaceID, UploadedBy: in.UserID,
+		DisplayName: name, Purpose: domain.FilePurposeArtifact, ContentType: obj.ContentType,
+		SizeBytes: obj.Size, StorageProvider: obj.Provider, Bucket: obj.Bucket,
+		StorageKey: obj.Key, Checksum: obj.ETag, Status: domain.FileStatusReady,
+		Visibility: domain.FileVisibilityPrivate, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.FileRepo.Create(ctx, file); err != nil {
+		return nil, errors.Join(err, s.Storage.Delete(ctx, obj.Key))
+	}
+	if strings.TrimSpace(in.SessionID) != "" {
+		if err := s.FileRepo.AttachFilesToSession(ctx, in.SessionID, []string{file.ID}); err != nil {
+			return nil, errors.Join(err, s.Storage.Delete(ctx, obj.Key), s.FileRepo.Delete(ctx, file.ID))
 		}
 	}
-	if file, err := s.FileRepo.GetByID(ctx, fileID); err == nil && file != nil {
-		_ = s.FileRepo.Delete(ctx, file.ID)
+	return file, nil
+}
+
+func (s *FileService) DeleteReportFile(ctx context.Context, fileID string, runID string) error {
+	var cleanupErrors []error
+	if s.ReportRepo != nil {
+		report, err := s.ReportRepo.GetByRunID(ctx, runID)
+		if err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("load report cleanup target: %w", err))
+		} else if report == nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("report repository returned an empty cleanup target"))
+		} else {
+			if err := s.Storage.Delete(ctx, report.HTMLStorageKey); err != nil {
+				cleanupErrors = append(cleanupErrors, fmt.Errorf("delete report object: %w", err))
+			}
+			if err := s.ReportRepo.Delete(ctx, report.ID); err != nil {
+				cleanupErrors = append(cleanupErrors, fmt.Errorf("delete report metadata: %w", err))
+			}
+		}
 	}
+	file, err := s.FileRepo.GetByID(ctx, fileID)
+	if err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("load report file cleanup target: %w", err))
+	} else if file == nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("file repository returned an empty report cleanup target"))
+	} else if err := s.FileRepo.Delete(ctx, file.ID); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("delete report file metadata: %w", err))
+	}
+	return errors.Join(cleanupErrors...)
 }
 
 func (s *FileService) SaveReportHTML(ctx context.Context, in SaveReportInput) (*domain.File, error) {
@@ -182,14 +247,16 @@ func (s *FileService) SaveReportHTML(ctx context.Context, in SaveReportInput) (*
 		return nil, fmt.Errorf("user not authorized to access workspace")
 	}
 
+	var snapshotJSON []byte
+	if s.ReportRepo != nil {
+		snapshotJSON, err = json.Marshal(in.Snapshot)
+		if err != nil {
+			return nil, fmt.Errorf("failed to serialize report snapshot: %w", err)
+		}
+	}
+
 	fileID := "rep_" + in.RunID
-	displayName := sanitizeFilename(strings.TrimSpace(in.Title))
-	if displayName == "" || displayName == "upload.bin" {
-		displayName = "report-" + in.RunID
-	}
-	if filepath.Ext(displayName) != ".html" {
-		displayName += ".html"
-	}
+	displayName := "report-" + in.RunID + ".html"
 
 	body := []byte(in.HTML)
 	key := ReportHTMLKey(in.WorkspaceID, in.RunID)
@@ -229,36 +296,24 @@ func (s *FileService) SaveReportHTML(ctx context.Context, in SaveReportInput) (*
 		UpdatedAt:       now,
 	}
 	if err := s.FileRepo.Create(ctx, file); err != nil {
-		return nil, err
+		return nil, errors.Join(err, s.Storage.Delete(ctx, obj.Key))
 	}
 
 	if s.ReportRepo != nil {
-		snapshotJSON, err := json.Marshal(in.Snapshot)
-		if err != nil {
-			return nil, fmt.Errorf("failed to serialize report snapshot: %w", err)
-		}
 		report := &domain.Report{
 			ID:                  "report_" + in.RunID,
 			RunID:               in.RunID,
 			WorkspaceID:         in.WorkspaceID,
-			Title:               strings.TrimSpace(in.Snapshot.Title),
-			Author:              strings.TrimSpace(in.Snapshot.Author),
+			Title:               in.Snapshot.Title,
+			Author:              in.Snapshot.Author,
 			HTMLStorageProvider: obj.Provider,
 			HTMLBucket:          obj.Bucket,
 			HTMLStorageKey:      obj.Key,
 			SnapshotJSON:        string(snapshotJSON),
 			CreatedAt:           now,
 		}
-		if report.Title == "" {
-			report.Title = strings.TrimSpace(in.Title)
-		}
-		if report.Author == "" {
-			report.Author = strings.TrimSpace(in.Author)
-		}
 		if err := s.ReportRepo.Create(ctx, report); err != nil {
-			_ = s.Storage.Delete(ctx, obj.Key)
-			_ = s.FileRepo.Delete(ctx, file.ID)
-			return nil, fmt.Errorf("failed to save report metadata: %w", err)
+			return nil, errors.Join(fmt.Errorf("failed to save report metadata: %w", err), s.Storage.Delete(ctx, obj.Key), s.FileRepo.Delete(ctx, file.ID))
 		}
 	}
 	return file, nil

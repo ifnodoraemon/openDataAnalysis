@@ -11,7 +11,7 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BACKUP_FILE="$BACKUP_DIR/metadata_${TIMESTAMP}.db"
 
 if [ ! -f "$DB_PATH" ]; then
-  echo "metadata database not found: $DB_PATH"
+  echo "未找到元数据数据库：$DB_PATH"
   exit 0
 fi
 
@@ -24,4 +24,4 @@ if [ "$BACKUP_COUNT" -gt "$MAX_BACKUPS" ]; then
   ls -1t "$BACKUP_DIR"/metadata_*.db.gz | tail -n +$((MAX_BACKUPS + 1)) | xargs rm -f
 fi
 
-echo "backup completed: ${BACKUP_FILE}.gz"
+echo "备份完成：${BACKUP_FILE}.gz"

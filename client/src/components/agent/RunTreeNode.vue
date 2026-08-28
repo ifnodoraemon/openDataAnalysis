@@ -129,16 +129,16 @@ function previewType(item) {
   justify-content: space-between;
   gap: 8px;
   padding: 8px 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
+  background: var(--bg-app);
+  color: var(--text-main);
   cursor: pointer;
   text-align: left;
 }
 
 .run-node.active {
-  border-color: var(--accent-blue);
+  border-color: var(--primary-blue);
   box-shadow: inset 0 0 0 1px rgba(47, 129, 247, 0.2);
 }
 
@@ -161,7 +161,7 @@ function previewType(item) {
 }
 
 .status-running {
-  background: var(--accent-blue);
+  background: var(--primary-blue);
 }
 .status-completed {
   background: var(--accent-green);
@@ -170,7 +170,7 @@ function previewType(item) {
   background: var(--accent-orange);
 }
 .status-failed {
-  background: var(--accent-red);
+  background: var(--accent-rose);
 }
 .status-queued {
   background: var(--text-muted);
@@ -193,12 +193,12 @@ function previewType(item) {
   padding: 1px 6px;
   border-radius: 999px;
   font-size: 0.65rem;
-  color: var(--text-secondary);
+  color: var(--text-sub);
   background: rgba(139, 148, 158, 0.14);
 }
 
 .run-kind.delegate {
-  color: var(--accent-blue);
+  color: var(--primary-blue);
   background: rgba(47, 129, 247, 0.12);
 }
 
@@ -212,7 +212,7 @@ function previewType(item) {
   margin-left: 18px;
   font-size: 0.74rem;
   line-height: 1.35;
-  color: var(--text-secondary);
+  color: var(--text-sub);
 }
 
 .run-preview {
@@ -228,7 +228,7 @@ function previewType(item) {
   gap: 6px;
   font-size: 0.72rem;
   line-height: 1.35;
-  color: var(--text-secondary);
+  color: var(--text-sub);
 }
 
 .preview-type {
@@ -245,7 +245,7 @@ function previewType(item) {
 .run-children {
   margin-left: 18px;
   padding-left: 12px;
-  border-left: 1px dashed var(--border);
+  border-left: 1px dashed var(--border-subtle);
   display: flex;
   flex-direction: column;
   gap: 8px;

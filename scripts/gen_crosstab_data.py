@@ -6,7 +6,7 @@ import os
 from datetime import date, timedelta
 from pathlib import Path
 
-BASE = Path("/home/ifnodoraemon/myagent/data-analysis/samples/coverage_scenarios")
+BASE = Path(__file__).resolve().parents[1] / "samples" / "coverage_scenarios"
 random.seed(42)
 
 def write_csv(path, rows):
@@ -15,7 +15,7 @@ def write_csv(path, rows):
         w = csv.writer(f)
         for r in rows:
             w.writerow(r)
-    print(f"  {path}  ({len(rows)-1} rows)")
+    print(f"  {path}  ({len(rows)-1} 行)")
 
 # ── 26: Sales pivot matrix ───────────────────────────────────────
 # product_category × region × month → revenue, units, margin
@@ -207,10 +207,10 @@ def gen_timeseries_multidim():
 
 # ── Run ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("Generating cross-tab test datasets...")
+    print("正在生成交叉表测试数据集...")
     gen_sales_pivot()
     gen_product_hierarchy()
     gen_hr_crosstab()
     gen_cohort_matrix()
     gen_timeseries_multidim()
-    print("Done.")
+    print("完成。")

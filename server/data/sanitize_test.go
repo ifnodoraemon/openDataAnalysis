@@ -34,22 +34,3 @@ func TestValidateSQLIdent(t *testing.T) {
 		})
 	}
 }
-
-func TestSanitizeTableName(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"Users Data", "users_data"},
-		{"2024-sales", "t_2024_sales"},
-		{"", "table"},
-		{"  spaces  ", "spaces"},
-		{"camelCase", "camelcase"},
-	}
-	for _, tt := range tests {
-		got := sanitizeTableName(tt.input)
-		if got != tt.want {
-			t.Errorf("sanitizeTableName(%q) = %q, want %q", tt.input, got, tt.want)
-		}
-	}
-}

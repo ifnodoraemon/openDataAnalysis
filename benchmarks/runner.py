@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
-import os
 import sys
-import time
 import json
-import glob
 from pathlib import Path
 
 # A minimal benchmark runner that aggregates prompt metrics from llm-trace logs.
@@ -17,11 +14,10 @@ def parse_trace_metrics():
         "input_item_count": 0,
         "avg_tool_arg_bytes": 0,
         "tool_call_count": 0,
-        "final_report_phase_prompt_bytes": 0,
     }
 
     if not LLM_DEBUG_DIR.exists():
-        print(f"Warning: {LLM_DEBUG_DIR} does not exist. Run the agent first.")
+        print(f"警告：{LLM_DEBUG_DIR} 不存在，请先运行智能体。", file=sys.stderr)
         return metrics
 
     # Find the most recent date dir
@@ -47,12 +43,8 @@ def parse_trace_metrics():
                     messages = req_data.get("messages", [])
                     metrics["input_item_count"] += len(messages)
                     
-                    # Track reporting phase size specifically
-                    for msg in messages:
-                        if "report_finalize" in json.dumps(msg):
-                            metrics["final_report_phase_prompt_bytes"] += size
-            except Exception as e:
-                pass
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f"读取跟踪请求失败：{req_file}：{exc}", file=sys.stderr)
 
         # Parse tool arguments specifically if tracked in index.jsonl
         # The agent logs event types in index.jsonl inside the date dir
@@ -61,17 +53,17 @@ def parse_trace_metrics():
     if index_file.exists():
         try:
             with open(index_file, 'r', encoding='utf-8') as f:
-                for line in f:
+                for line_number, line in enumerate(f, start=1):
                     try:
                         record = json.loads(line)
                         if record.get("event") == "tool.call":
                             payload = record.get("payload", {})
                             metrics["tool_call_count"] += 1
                             total_tool_arg_bytes += payload.get("arguments_bytes", 0)
-                    except json.JSONDecodeError:
-                        pass
-        except Exception:
-            pass
+                    except json.JSONDecodeError as exc:
+                        print(f"解析跟踪索引失败：{index_file}:{line_number}：{exc}", file=sys.stderr)
+        except OSError as exc:
+            print(f"读取跟踪索引失败：{index_file}：{exc}", file=sys.stderr)
 
     if metrics["tool_call_count"] > 0:
         metrics["avg_tool_arg_bytes"] = total_tool_arg_bytes / metrics["tool_call_count"]
@@ -79,30 +71,11 @@ def parse_trace_metrics():
     return metrics
 
 def run_benchmarks():
-    print("=== Open Data Analysis Benchmark Runner ===")
-    print("Scanning benchmarks/cases...")
-    
-    cases_dir = Path("benchmarks/cases")
-    if not cases_dir.exists():
-        print("No cases found. Create tests in benchmarks/cases/")
-        return
-        
-    for case in cases_dir.iterdir():
-        if case.is_dir():
-            print(f"Running case: {case.name}")
-            # Placeholder for actual API invocation
-            print(f" (Placeholder: Submit workspace API and await completion...) \n")
-            
-    # Print metrics collected during this run
+    print("=== OpenDataAnalysis 基准指标 ===")
     metrics = parse_trace_metrics()
-    print("\n=== LLM Trace Metrics Summary ===")
-    print(f"Total Request JSON Bytes: {metrics['request_json_bytes']}")
-    print(f"Total Input Items: {metrics['input_item_count']}")
-    print(f"Average Tool Arg Bytes: {metrics['avg_tool_arg_bytes']:.2f}")
-    if metrics["final_report_phase_prompt_bytes"] > 0:
-        print(f"Final Report Phase Prompt Bytes: {metrics['final_report_phase_prompt_bytes']}")
-    else:
-        print("Final Report Phase Prompt Bytes: N/A (No report tools called)")
+    print(f"请求 JSON 总字节数：{metrics['request_json_bytes']}")
+    print(f"输入项总数：{metrics['input_item_count']}")
+    print(f"工具参数平均字节数：{metrics['avg_tool_arg_bytes']:.2f}")
 
 if __name__ == "__main__":
     run_benchmarks()

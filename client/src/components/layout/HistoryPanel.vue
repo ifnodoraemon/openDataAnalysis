@@ -7,7 +7,7 @@
         <span class="count-pill">{{ sessions.length }}</span>
       </div>
 
-      <button class="btn-new-chat" @click="createNewSession">
+      <button class="btn-new-chat" @click="handleCreateSession">
         <span class="icon">+</span>
         <span>新建分析</span>
       </button>
@@ -37,7 +37,10 @@
           class="session-item-wrapper"
         >
           <!-- Editing Title Mode -->
-          <div v-if="editingSessionId === session.id" class="session-item editing">
+          <div
+            v-if="editingSessionId === session.id"
+            class="session-item editing"
+          >
             <span class="item-icon">💬</span>
             <input
               ref="editInput"
@@ -106,7 +109,7 @@
 
 <script setup>
 import { computed, ref, nextTick } from "vue";
-import { useWebSocket } from "../../composables/useWebSocket.js";
+import { useAgentTransport } from "../../composables/useAgentTransport.js";
 import { useAgentStore } from "../../stores/agent.js";
 
 const {
@@ -115,7 +118,7 @@ const {
   openSession,
   renameSession,
   deleteSession,
-} = useWebSocket();
+} = useAgentTransport();
 const store = useAgentStore();
 
 const searchQuery = ref("");
@@ -127,6 +130,15 @@ const workspaceOptions = computed(() => store.workspaces || []);
 const workspaceId = computed(() => store.workspace?.id || "");
 const sessions = computed(() => store.sessions || []);
 const currentSessionId = computed(() => store.sessionId || "");
+
+async function handleCreateSession() {
+  try {
+    await createNewSession();
+  } catch (err) {
+    store.addMessage({ type: "error", content: "新建分析会话失败" });
+    console.error("新建分析会话失败：", err);
+  }
+}
 
 const filteredSessions = computed(() => {
   const query = searchQuery.value.trim().toLowerCase();
@@ -144,7 +156,8 @@ async function handleSessionClick(sessionId) {
   try {
     await openSession(sessionId);
   } catch (err) {
-    console.error("open session failed:", err);
+    store.addMessage({ type: "error", content: "打开历史会话失败" });
+    console.error("打开历史会话失败：", err);
   }
 }
 
@@ -154,7 +167,8 @@ async function handleWorkspaceChange(event) {
   try {
     await switchWorkspace(nextWorkspaceId);
   } catch (err) {
-    console.error("switch workspace failed:", err);
+    store.addMessage({ type: "error", content: "切换工作区失败" });
+    console.error("切换工作区失败：", err);
   }
 }
 
@@ -187,7 +201,8 @@ async function saveRename(sessionId) {
     try {
       await renameSession(sessionId, newTitle);
     } catch (err) {
-      console.error("rename failed", err);
+      store.addMessage({ type: "error", content: "重命名会话失败" });
+      console.error("重命名会话失败：", err);
     }
   }
 }
@@ -197,7 +212,8 @@ async function confirmDelete(sessionId) {
     try {
       await deleteSession(sessionId);
     } catch (err) {
-      console.error("delete failed", err);
+      store.addMessage({ type: "error", content: "删除会话失败" });
+      console.error("删除会话失败：", err);
     }
   }
 }
@@ -240,7 +256,7 @@ async function confirmDelete(sessionId) {
 .count-pill {
   font-size: 0.7rem;
   font-weight: 700;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.05);
   color: var(--text-sub);
   padding: 1px 6px;
   border-radius: 10px;
@@ -250,7 +266,7 @@ async function confirmDelete(sessionId) {
   width: 100%;
   padding: 8px 12px;
   background: linear-gradient(135deg, var(--primary-blue), #2563eb);
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(0, 0, 0, 0.05);
   border-radius: 8px;
   color: white;
   font-size: 0.83rem;
@@ -314,7 +330,10 @@ async function confirmDelete(sessionId) {
   gap: 6px;
 }
 
-.empty-icon { font-size: 1.4rem; opacity: 0.4; }
+.empty-icon {
+  font-size: 1.4rem;
+  opacity: 0.4;
+}
 
 .session-list {
   display: flex;
@@ -343,13 +362,16 @@ async function confirmDelete(sessionId) {
 }
 
 .session-item.active {
-  background: rgba(59, 130, 246, 0.14);
-  border-color: rgba(59, 130, 246, 0.3);
-  color: var(--text-main);
+  background: var(--primary-glow);
+  border-color: var(--border-accent);
+  color: var(--primary-blue);
   font-weight: 600;
 }
 
-.item-icon { font-size: 0.85rem; opacity: 0.7; }
+.item-icon {
+  font-size: 0.85rem;
+  opacity: 0.7;
+}
 
 .session-title {
   flex: 1;
@@ -382,8 +404,8 @@ async function confirmDelete(sessionId) {
 }
 
 .action-btn:hover {
-  background: rgba(255, 255, 255, 0.15);
-  color: white;
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--text-main);
 }
 
 .action-btn.delete:hover {
@@ -401,7 +423,7 @@ async function confirmDelete(sessionId) {
   border: none;
   background: transparent;
   outline: none;
-  color: white;
+  color: var(--text-main);
   font-size: 0.82rem;
   width: 100%;
 }

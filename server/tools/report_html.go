@@ -11,37 +11,24 @@ import (
 	"strings"
 
 	"github.com/ifnodoraemon/openDataAnalysis/config"
-	htmlnode "golang.org/x/net/html"
-	"golang.org/x/net/html/atom"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
 	gmhtml "github.com/yuin/goldmark/renderer/html"
+	htmlnode "golang.org/x/net/html"
+	"golang.org/x/net/html/atom"
 )
 
 var (
 	htmlHeadingRegexp = regexp.MustCompile(`(?im)^\s*<h[1-6][^>]*>(.*?)</h[1-6]>`)
 	htmlTagsRegexp    = regexp.MustCompile(`<[^>]*>`)
 	mdHeadingRegexp   = regexp.MustCompile(`(?m)^\s*(?:#{1,6})\s+(.+?)(?:\r?\n|$)`)
-	renderTokenRegexp = regexp.MustCompile(`[a-z0-9]+`)
 )
 
 func ResolveReportTitleFromState(state *ReportState) string {
 	if state == nil {
 		return ""
 	}
-	if t := strings.TrimSpace(state.FinalTitle); t != "" {
-		return t
-	}
-	// Derive title from first block's heading when FinalTitle not yet set (streaming preview)
-	for _, block := range state.Blocks {
-		if heading, level, ok := firstMarkdownHeading(block.Content); ok && level <= 2 {
-			return heading
-		}
-		if t := strings.TrimSpace(block.Title); t != "" {
-			return t
-		}
-	}
-	return ""
+	return strings.TrimSpace(state.FinalTitle)
 }
 
 // RenderReportHTML 生成完整的研报 HTML（含 ECharts 图表支持）
@@ -70,17 +57,13 @@ func RenderReportHTML(title, author string, state *ReportState) string {
 
 	for _, unit := range units {
 		block := unit.Block
-		if isTitleBlock(block) {
+		blockKind := block.Kind
+		if _, ok := reportBlockRenderers[blockKind]; !ok {
 			continue
 		}
-
 		if block.ID != lastBlockID {
 			if wrapperOpen {
 				bodyHTML.WriteString("</div>\n")
-			}
-			blockKind := strings.ToLower(strings.TrimSpace(block.Kind))
-			if blockKind == "" {
-				blockKind = "markdown" // Default
 			}
 			wrapperTitle := blockDisplayTitle(block)
 			bodyHTML.WriteString(fmt.Sprintf(`<div class="report-block-wrapper" data-block-id="%s" data-block-kind="%s" data-block-title="%s">`+"\n",
@@ -92,7 +75,7 @@ func RenderReportHTML(title, author string, state *ReportState) string {
 		}
 
 		chapterNum++
-		bodyHTML.WriteString(renderReportBlockHTML(block, chapterNum, state.Charts, unit.AttachedCharts))
+		bodyHTML.WriteString(renderReportBlockHTML(block, chapterNum, state.Charts))
 	}
 
 	if wrapperOpen {
@@ -114,9 +97,9 @@ func RenderReportHTML(title, author string, state *ReportState) string {
 	}
 	echartsScriptNode := fmt.Sprintf(`<script id="oda-echarts-loader" src="%s"></script>`, escapeHTMLAttr(echartsURL))
 
-	katexCSS := `<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">`
-	katexScripts := `<script id="oda-math-loader" defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-<script id="oda-math-auto-render" defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+	katexCSS := `<link rel="stylesheet" href="` + ReportKaTeXCDNBaseURL + `katex.min.css">`
+	katexScripts := `<script id="oda-math-loader" defer src="` + ReportKaTeXCDNBaseURL + `katex.min.js"></script>
+<script id="oda-math-auto-render" defer src="` + ReportKaTeXCDNBaseURL + `contrib/auto-render.min.js"></script>
 <script id="oda-math-runtime" defer src="/oda-math-runtime.js"></script>`
 
 	return fmt.Sprintf(`<!DOCTYPE html>
@@ -493,9 +476,6 @@ func buildReportTOCItems(blocks []ReportBlock, reportTitle string) []reportTOCIt
 	sectionNum := 0
 	for _, unit := range baseUnits {
 		block := unit.Block
-		if isTitleBlock(block) {
-			continue
-		}
 		splitUnits := splitRenderUnitSections(unit)
 		if len(splitUnits) == 0 {
 			continue
@@ -529,38 +509,22 @@ func buildReportTOCItems(blocks []ReportBlock, reportTitle string) []reportTOCIt
 	return items
 }
 
-func structuredBlockTOCTitle(block ReportBlock, reportTitle string) string {
-	if title := strings.TrimSpace(block.Title); title != "" && !titlesReferToSameReport(title, reportTitle) {
-		if strings.EqualFold(strings.TrimSpace(block.Kind), "markdown") {
-			if _, level, ok := firstMarkdownHeading(block.Content); ok && level > 2 {
-				return ""
-			}
-		}
-		return title
-	}
-	return ""
+func structuredBlockTOCTitle(block ReportBlock, _ string) string {
+	return strings.TrimSpace(block.Title)
 }
 
-func documentTOCTitle(block ReportBlock, reportTitle string) string {
-	if strings.EqualFold(strings.TrimSpace(block.Kind), "markdown") {
-		if heading, level, ok := firstMarkdownHeading(block.Content); ok {
-			if level <= 2 && !titlesReferToSameReport(heading, reportTitle) {
-				return heading
-			}
-			if level > 2 {
-				return ""
-			}
+func documentTOCTitle(block ReportBlock, _ string) string {
+	if block.Kind == "markdown" {
+		if heading, _, ok := firstMarkdownHeading(block.Content); ok {
+			return heading
 		}
 	}
-	if strings.EqualFold(strings.TrimSpace(block.Kind), "html") {
-		if title := extractContentHeadingTitle(block.Content); title != "" && !titlesReferToSameReport(title, reportTitle) {
+	if block.Kind == "html" {
+		if title := extractContentHeadingTitle(block.Content); title != "" {
 			return title
 		}
 	}
-	if title := strings.TrimSpace(block.Title); title != "" && !titlesReferToSameReport(title, reportTitle) {
-		return title
-	}
-	return ""
+	return strings.TrimSpace(block.Title)
 }
 
 func firstMarkdownHeading(content string) (string, int, bool) {
@@ -582,31 +546,11 @@ func buildChartScripts(charts []ChartData) string {
 	return `<script id="oda-chart-runtime" src="/oda-chart-runtime.js"></script>`
 }
 
-func collectReferencedCharts(blocks []ReportBlock) map[string]struct{} {
-	re := regexp.MustCompile(`\{\{chart:(\w+)\}\}`)
-	refs := make(map[string]struct{})
-	for _, block := range blocks {
-		for _, match := range re.FindAllStringSubmatch(block.Content, -1) {
-			if len(match) > 1 {
-				refs[match[1]] = struct{}{}
-			}
-		}
-		if strings.TrimSpace(block.Kind) == "chart" && strings.TrimSpace(block.ChartID) != "" {
-			refs[strings.TrimSpace(block.ChartID)] = struct{}{}
-		}
-	}
-	return refs
-}
-
-func isTitleBlock(block ReportBlock) bool {
-	return strings.EqualFold(strings.TrimSpace(block.Kind), "title")
-}
-
 func blockDisplayTitle(block ReportBlock) string {
-	if title := extractContentHeadingTitle(block.Content); title != "" {
+	if title := strings.TrimSpace(block.Title); title != "" {
 		return title
 	}
-	return strings.TrimSpace(block.Title)
+	return extractContentHeadingTitle(block.Content)
 }
 
 func extractContentHeadingTitle(content string) string {
@@ -640,31 +584,30 @@ var reportBlockRenderers = map[string]reportBlockRenderer{
 }
 
 type reportRenderUnit struct {
-	Block          ReportBlock
-	AttachedCharts []ReportBlock
+	Block ReportBlock
 }
 
-func renderReportBlockHTML(block ReportBlock, chapterNum int, charts []ChartData, attachedCharts []ReportBlock) string {
-	kind := strings.ToLower(strings.TrimSpace(block.Kind))
+func renderReportBlockHTML(block ReportBlock, chapterNum int, charts []ChartData) string {
+	kind := block.Kind
 	switch kind {
 	case "markdown":
-		return renderMarkdownBlockHTML(block, chapterNum, charts, attachedCharts)
+		return renderMarkdownBlockHTML(block, chapterNum, charts)
 	case "html":
-		return renderHTMLBlock(block, chapterNum, charts, attachedCharts)
+		return renderHTMLBlock(block, chapterNum, charts)
 	default:
 		renderer, ok := reportBlockRenderers[kind]
 		if !ok {
-			renderer = renderMarkdownBlockHTMLStandalone
+			return ""
 		}
 		return renderer(block, chapterNum, charts)
 	}
 }
 
 func renderMarkdownBlockHTMLStandalone(block ReportBlock, chapterNum int, charts []ChartData) string {
-	return renderMarkdownBlockHTML(block, chapterNum, charts, nil)
+	return renderMarkdownBlockHTML(block, chapterNum, charts)
 }
 
-func renderMarkdownBlockHTML(block ReportBlock, chapterNum int, charts []ChartData, attachedCharts []ReportBlock) string {
+func renderMarkdownBlockHTML(block ReportBlock, chapterNum int, charts []ChartData) string {
 	displayTitle := blockDisplayTitle(block)
 
 	headingHTML := ""
@@ -672,7 +615,7 @@ func renderMarkdownBlockHTML(block ReportBlock, chapterNum int, charts []ChartDa
 		headingHTML = fmt.Sprintf("<h2>%s</h2>\n", escapeHTMLText(displayTitle))
 	}
 
-	contentHTML := headingHTML + processContent(block.Content, charts) + renderAttachedChartsInline(attachedCharts, charts)
+	contentHTML := headingHTML + processContent(block.Content, charts)
 
 	return fmt.Sprintf(`
 			<div class="section" id="section-%d">
@@ -680,7 +623,7 @@ func renderMarkdownBlockHTML(block ReportBlock, chapterNum int, charts []ChartDa
 			</div>`, chapterNum, contentHTML)
 }
 
-func renderHTMLBlock(block ReportBlock, chapterNum int, charts []ChartData, attachedCharts []ReportBlock) string {
+func renderHTMLBlock(block ReportBlock, chapterNum int, charts []ChartData) string {
 	displayTitle := blockDisplayTitle(block)
 
 	headingHTML := ""
@@ -688,7 +631,7 @@ func renderHTMLBlock(block ReportBlock, chapterNum int, charts []ChartData, atta
 		headingHTML = fmt.Sprintf("<h2>%s</h2>\n", escapeHTMLText(displayTitle))
 	}
 
-	contentHTML := headingHTML + sanitizeHTMLFragment(block.Content) + renderAttachedChartsInline(attachedCharts, charts)
+	contentHTML := headingHTML + sanitizeHTMLFragment(block.Content)
 	return fmt.Sprintf(`
 		<div class="section html-block" id="section-%d">
 			<div class="content">%s</div>
@@ -696,7 +639,7 @@ func renderHTMLBlock(block ReportBlock, chapterNum int, charts []ChartData, atta
 }
 
 func renderHTMLBlockStandalone(block ReportBlock, chapterNum int, charts []ChartData) string {
-	return renderHTMLBlock(block, chapterNum, charts, nil)
+	return renderHTMLBlock(block, chapterNum, charts)
 }
 
 func renderChartBlockHTML(block ReportBlock, chapterNum int, charts []ChartData) string {
@@ -716,27 +659,8 @@ func renderChartBlockHTML(block ReportBlock, chapterNum int, charts []ChartData)
 		</div>`, chapterNum, headingHTML, processContent(content, charts))
 }
 
-func renderAttachedChartsInline(attachedCharts []ReportBlock, charts []ChartData) string {
-	if len(attachedCharts) == 0 {
-		return ""
-	}
-	var html strings.Builder
-	for _, block := range attachedCharts {
-		title := blockDisplayTitle(block)
-		if title != "" {
-			html.WriteString(fmt.Sprintf("<h4>%s</h4>\n", escapeHTMLText(title)))
-		}
-		content := fmt.Sprintf("{{chart:%s}}", block.ChartID)
-		if strings.TrimSpace(block.Content) != "" {
-			content += "\n\n" + block.Content
-		}
-		html.WriteString(processContent(content, charts))
-	}
-	return html.String()
-}
-
-func buildRenderUnits(blocks []ReportBlock, reportTitle string) []reportRenderUnit {
-	baseUnits := buildBaseRenderUnits(blocks, reportTitle)
+func buildRenderUnits(blocks []ReportBlock, _ string) []reportRenderUnit {
+	baseUnits := buildBaseRenderUnits(blocks, "")
 	units := make([]reportRenderUnit, 0, len(baseUnits))
 	for _, unit := range baseUnits {
 		units = append(units, splitRenderUnitSections(unit)...)
@@ -744,128 +668,19 @@ func buildRenderUnits(blocks []ReportBlock, reportTitle string) []reportRenderUn
 	return units
 }
 
-func buildBaseRenderUnits(blocks []ReportBlock, reportTitle string) []reportRenderUnit {
+func buildBaseRenderUnits(blocks []ReportBlock, _ string) []reportRenderUnit {
 	if len(blocks) == 0 {
 		return nil
 	}
-	blocks = normalizeReportBlocksForRendering(blocks, reportTitle)
-	attachments := make(map[int][]ReportBlock)
-	attachedCharts := make(map[int]struct{})
-	for idx, block := range blocks {
-		if !shouldAttachChartInline(block) {
-			continue
-		}
-		target := findInlineChartAnchorIndex(blocks, idx)
-		if target < 0 {
-			continue
-		}
-		attachments[target] = append(attachments[target], block)
-		attachedCharts[idx] = struct{}{}
-	}
-
 	baseUnits := make([]reportRenderUnit, 0, len(blocks))
-	for idx, block := range blocks {
-		if _, attached := attachedCharts[idx]; attached {
-			continue
-		}
-		unit := reportRenderUnit{Block: block}
-		if len(attachments[idx]) > 0 {
-			unit.AttachedCharts = append(unit.AttachedCharts, attachments[idx]...)
-		}
-		baseUnits = append(baseUnits, unit)
+	for _, block := range blocks {
+		baseUnits = append(baseUnits, reportRenderUnit{Block: block})
 	}
 	return baseUnits
 }
 
-func normalizeReportBlocksForRendering(blocks []ReportBlock, reportTitle string) []ReportBlock {
-	normalized := make([]ReportBlock, len(blocks))
-	copy(normalized, blocks)
-
-	reportTitle = strings.TrimSpace(reportTitle)
-	if reportTitle == "" {
-		return normalized
-	}
-
-	for idx, block := range normalized {
-		if isTitleBlock(block) || !strings.EqualFold(strings.TrimSpace(block.Kind), "markdown") {
-			continue
-		}
-		heading, content, ok := stripLeadingMarkdownDocumentTitle(block.Content, reportTitle)
-		if !ok {
-			continue
-		}
-		block.Content = content
-		if strings.TrimSpace(block.Title) == "" || comparableTitle(block.Title) == comparableTitle(heading) {
-			block.Title = ""
-		}
-		normalized[idx] = block
-		break
-	}
-
-	return normalized
-}
-
-func stripLeadingMarkdownDocumentTitle(content, reportTitle string) (string, string, bool) {
-	lines := strings.Split(content, "\n")
-	firstContentLine := -1
-	for idx, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		firstContentLine = idx
-		break
-	}
-	if firstContentLine < 0 {
-		return "", content, false
-	}
-
-	trimmed := strings.TrimSpace(lines[firstContentLine])
-	if !strings.HasPrefix(trimmed, "# ") || strings.HasPrefix(trimmed, "## ") {
-		return "", content, false
-	}
-
-	heading := strings.TrimSpace(trimmed[2:])
-	if !titlesReferToSameReport(heading, reportTitle) {
-		return "", content, false
-	}
-
-	remaining := append([]string{}, lines[:firstContentLine]...)
-	remaining = append(remaining, lines[firstContentLine+1:]...)
-	return heading, strings.TrimSpace(strings.Join(remaining, "\n")), true
-}
-
-func titlesReferToSameReport(heading, reportTitle string) bool {
-	headingKey := comparableTitle(heading)
-	titleKey := comparableTitle(reportTitle)
-	if headingKey == "" || titleKey == "" {
-		return false
-	}
-	if headingKey == titleKey {
-		return true
-	}
-	if len(headingKey) < 10 || len(titleKey) < 10 {
-		return false
-	}
-	return strings.Contains(titleKey, headingKey) || strings.Contains(headingKey, titleKey)
-}
-
-func comparableTitle(value string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(strings.TrimSpace(value)) {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r >= '\u4e00' && r <= '\u9fff':
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
-
 func splitRenderUnitSections(unit reportRenderUnit) []reportRenderUnit {
-	if !strings.EqualFold(strings.TrimSpace(unit.Block.Kind), "markdown") {
+	if unit.Block.Kind != "markdown" {
 		return []reportRenderUnit{unit}
 	}
 
@@ -875,14 +690,10 @@ func splitRenderUnitSections(unit reportRenderUnit) []reportRenderUnit {
 	}
 
 	units := make([]reportRenderUnit, 0, len(fragments))
-	for i, fragment := range fragments {
+	for _, fragment := range fragments {
 		block := unit.Block
 		block.Content = fragment
-		fragmentUnit := reportRenderUnit{Block: block}
-		if i == 0 && len(unit.AttachedCharts) > 0 {
-			fragmentUnit.AttachedCharts = append(fragmentUnit.AttachedCharts, unit.AttachedCharts...)
-		}
-		units = append(units, fragmentUnit)
+		units = append(units, reportRenderUnit{Block: block})
 	}
 	return units
 }
@@ -943,127 +754,34 @@ func markdownHeadingLevel(line string) (int, bool) {
 	return level, true
 }
 
-func shouldAttachChartInline(block ReportBlock) bool {
-	return strings.EqualFold(strings.TrimSpace(block.Kind), "chart") &&
-		strings.TrimSpace(block.ChartID) != "" &&
-		strings.TrimSpace(block.Title) == ""
-}
-
-func findInlineChartAnchorIndex(blocks []ReportBlock, chartIndex int) int {
-	chartBlock := blocks[chartIndex]
-	prevIdx := findAdjacentTextBlockIndex(blocks, chartIndex, -1)
-	nextIdx := findAdjacentTextBlockIndex(blocks, chartIndex, 1)
-	if prevIdx < 0 {
-		return nextIdx
-	}
-	if nextIdx < 0 {
-		return prevIdx
-	}
-
-	prevScore := scoreInlineChartAnchor(chartBlock, blocks[prevIdx], chartIndex-prevIdx, false)
-	nextScore := scoreInlineChartAnchor(chartBlock, blocks[nextIdx], nextIdx-chartIndex, true)
-	if nextScore > prevScore {
-		return nextIdx
-	}
-	return prevIdx
-}
-
-func findAdjacentTextBlockIndex(blocks []ReportBlock, start, step int) int {
-	for idx := start + step; idx >= 0 && idx < len(blocks); idx += step {
-		if isTextRenderBlock(blocks[idx]) {
-			return idx
-		}
-	}
-	return -1
-}
-
-func isTextRenderBlock(block ReportBlock) bool {
-	kind := strings.ToLower(strings.TrimSpace(block.Kind))
-	return kind == "markdown" || kind == "html"
-}
-
-func scoreInlineChartAnchor(chartBlock, textBlock ReportBlock, distance int, _ bool) int {
-	score := positiveDistanceScore(distance)
-	score += tokenOverlapScore(chartBlock, textBlock) * 10
-	if isOverviewLikeBlock(textBlock) {
-		score -= 4
-	}
-	return score
-}
-
-func positiveDistanceScore(distance int) int {
-	if distance >= 8 {
-		return 0
-	}
-	return 8 - distance
-}
-
-func tokenOverlapScore(chartBlock, textBlock ReportBlock) int {
-	chartTokens := blockRenderTokens(chartBlock)
-	textTokens := blockRenderTokens(textBlock)
-	if len(chartTokens) == 0 || len(textTokens) == 0 {
-		return 0
-	}
-	score := 0
-	for token := range chartTokens {
-		if _, ok := textTokens[token]; ok {
-			score++
-		}
-	}
-	return score
-}
-
-func blockRenderTokens(block ReportBlock) map[string]struct{} {
-	source := strings.ToLower(strings.TrimSpace(strings.Join([]string{
-		block.ID,
-		block.Title,
-		block.ChartID,
-		blockDisplayTitle(block),
-	}, " ")))
-	matches := renderTokenRegexp.FindAllString(source, -1)
-	tokens := make(map[string]struct{}, len(matches))
-	for _, match := range matches {
-		if len(match) < 3 {
-			continue
-		}
-		tokens[match] = struct{}{}
-	}
-	return tokens
-}
-
-func isOverviewLikeBlock(block ReportBlock) bool {
-	hint := strings.ToLower(strings.TrimSpace(strings.Join([]string{
-		block.ID,
-		block.Title,
-		blockDisplayTitle(block),
-	}, " ")))
-	return strings.Contains(hint, "overview") ||
-		strings.Contains(hint, "summary") ||
-		strings.Contains(hint, "exec") ||
-		strings.Contains(hint, "摘要") ||
-		strings.Contains(hint, "概览")
-}
-
 // processContent 处理内容：Markdown 转 HTML + 替换图表占位符
 func processContent(content string, charts []ChartData) string {
-	html := markdownToHTML(content)
+	html := sanitizeHTMLFragment(markdownToHTML(content))
 
-	// 替换 {{chart:chart_id}} 占位符为 ECharts 容器
-	re := regexp.MustCompile(`\{\{chart:(\w+)\}\}`)
 	chartRefCounts := make(map[string]int)
-	html = re.ReplaceAllStringFunc(html, func(match string) string {
-		chartID := re.FindStringSubmatch(match)[1]
+	html = chartReferenceRegexp.ReplaceAllStringFunc(html, func(match string) string {
+		chartID := chartReferenceRegexp.FindStringSubmatch(match)[1]
+		if chartID != strings.TrimSpace(chartID) {
+			return match
+		}
 		// 查找对应图表
 		for _, ch := range charts {
 			if ch.ID == chartID {
-				height := ch.Height
-				if height == "" {
-					height = "400px"
-				}
 				chartRefCounts[chartID]++
 				containerID := fmt.Sprintf("%s-ref-%d", chartID, chartRefCounts[chartID])
 				optionAttr := escapeHTMLAttr(safeJSONForInlineScript(ch.Option))
-				return fmt.Sprintf(`<div id="%s" data-chart-id="%s" data-chart-option="%s" class="chart-box" style="height:%s;"></div>`, escapeHTMLAttr(containerID), escapeHTMLAttr(ch.ID), optionAttr, escapeHTMLAttr(height))
+				style := ""
+				if ch.Width != "" || ch.Height != "" {
+					var declarations []string
+					if ch.Width != "" {
+						declarations = append(declarations, "width:"+ch.Width)
+					}
+					if ch.Height != "" {
+						declarations = append(declarations, "height:"+ch.Height)
+					}
+					style = ` style="` + escapeHTMLAttr(strings.Join(declarations, ";")+";") + `"`
+				}
+				return fmt.Sprintf(`<div id="%s" data-chart-id="%s" data-chart-option="%s" class="chart-box"%s></div>`, escapeHTMLAttr(containerID), escapeHTMLAttr(ch.ID), optionAttr, style)
 			}
 		}
 		return ""
@@ -1077,12 +795,12 @@ func markdownToHTML(md string) string {
 	if strings.TrimSpace(md) == "" {
 		return ""
 	}
-	
+
 	// Pre-process: Extract math blocks to protect them from markdown formatting (like _, *)
 	replacements := make(map[string]string)
 	var out strings.Builder
 	out.Grow(len(md))
-	
+
 	i := 0
 	idCounter := 0
 	for i < len(md) {
@@ -1109,7 +827,7 @@ func markdownToHTML(md string) string {
 			out.WriteByte(md[start])
 			continue
 		}
-		
+
 		if strings.HasPrefix(md[i:], `\(`) {
 			start := i
 			i += 2
@@ -1133,7 +851,7 @@ func markdownToHTML(md string) string {
 			out.WriteByte(md[start])
 			continue
 		}
-		
+
 		if strings.HasPrefix(md[i:], `\[`) {
 			start := i
 			i += 2
@@ -1157,17 +875,17 @@ func markdownToHTML(md string) string {
 			out.WriteByte(md[start])
 			continue
 		}
-		
+
 		out.WriteByte(md[i])
 		i++
 	}
-	
+
 	newMd := out.String()
-	
+
 	gm := goldmark.New(
 		goldmark.WithExtensions(extension.GFM), // Removed mathjax, rely on manual extraction
 		goldmark.WithRendererOptions(
-			gmhtml.WithUnsafe(), // 允许在 Markdown 中保留 HTML，由前端 DOMPurify (sanitizeReportHTML) 进行最终防御
+			gmhtml.WithUnsafe(), // 输出 HTML 由 sanitizeHTMLFragment 白名单净化后再插入报告
 		),
 	)
 
@@ -1175,12 +893,12 @@ func markdownToHTML(md string) string {
 	if err := gm.Convert([]byte(newMd), &buf); err != nil {
 		return fixCJKBoldHTML(fmt.Sprintf("<p>%s</p>", escapeHTMLText(md)))
 	}
-	
+
 	htmlStr := buf.String()
 	for k, v := range replacements {
 		htmlStr = strings.ReplaceAll(htmlStr, k, htmlstd.EscapeString(v))
 	}
-	
+
 	return fixCJKBoldHTML(htmlStr)
 }
 
@@ -1217,24 +935,19 @@ func fixCJKBoldHTML(htmlStr string) string {
 	for _, node := range doc {
 		htmlnode.Render(&out, node)
 	}
-	
+
 	res := out.String()
 	res = strings.ReplaceAll(res, "%%ODA_STRONG_START%%", "<strong>")
 	res = strings.ReplaceAll(res, "%%ODA_STRONG_END%%", "</strong>")
 	return res
 }
 
-// 兼容旧代码，但现在不再使用
-func formatInline(text string) string {
-	return text
-}
-
 func escapeHTMLText(value string) string {
-	return htmlstd.EscapeString(strings.TrimSpace(value))
+	return htmlstd.EscapeString(value)
 }
 
 func escapeHTMLAttr(value string) string {
-	return htmlstd.EscapeString(strings.TrimSpace(value))
+	return htmlstd.EscapeString(value)
 }
 
 func sanitizeBodyClass(value string) string {
@@ -1318,6 +1031,11 @@ func escapeInlineScript(value string) string {
 	)
 	return replacer.Replace(value)
 }
+
+const (
+	ReportKaTeXVersion    = "0.16.9"
+	ReportKaTeXCDNBaseURL = "https://cdn.jsdelivr.net/npm/katex@" + ReportKaTeXVersion + "/dist/"
+)
 
 var allowedHTMLBlockTags = map[string]struct{}{
 	"a": {}, "b": {}, "blockquote": {}, "br": {}, "code": {}, "div": {}, "em": {}, "h1": {}, "h2": {}, "h3": {}, "h4": {}, "h5": {}, "h6": {},

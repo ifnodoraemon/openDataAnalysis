@@ -31,7 +31,7 @@ func TestRenderReportHTMLConvertsMarkdownHeadings(t *testing.T) {
 	}
 }
 
-func TestRenderReportHTMLUsesContentHeadingAsCanonicalSectionTitle(t *testing.T) {
+func TestRenderReportHTMLKeepsExplicitBlockTitleAndAuthoredHeading(t *testing.T) {
 	t.Parallel()
 
 	html := RenderReportHTML("测试报告", "AI", &ReportState{
@@ -48,7 +48,7 @@ func TestRenderReportHTMLUsesContentHeadingAsCanonicalSectionTitle(t *testing.T)
 	if strings.Contains(html, "<h2>销售分布与区域表现</h2>") {
 		t.Fatalf("expected markdown block not to render generated h2 heading, got: %s", html)
 	}
-	if !strings.Contains(html, `<div class="report-block-wrapper" data-block-id="analysis-1" data-block-kind="markdown" data-block-title="2. 销售分布与区域表现">`) {
+	if !strings.Contains(html, `<div class="report-block-wrapper" data-block-id="analysis-1" data-block-kind="markdown" data-block-title="销售分布与区域表现">`) {
 		t.Fatalf("expected block title metadata to remain on wrapper, got: %s", html)
 	}
 	if strings.Contains(html, `class="section" id="section-1" data-block-id`) {
@@ -130,11 +130,8 @@ func TestRenderReportHTMLTOCUsesDocumentLevelSections(t *testing.T) {
 			t.Fatalf("expected toc item %s, got: %s", expected, html)
 		}
 	}
-	if strings.Contains(html, `1.3 月度趋势与渠道波动</a>`) {
-		t.Fatalf("expected h3 subsection block to be excluded from document toc, got: %s", html)
-	}
-	if strings.Contains(html, `三表全维度深度对比分析报告</a>`) {
-		t.Fatalf("expected duplicate report title heading to be excluded from toc, got: %s", html)
+	if !strings.Contains(html, `<a href="#section-3">1.3 月度趋势与渠道波动</a>`) {
+		t.Fatalf("expected explicit block title to remain in toc without heading-level inference, got: %s", html)
 	}
 }
 
@@ -184,7 +181,7 @@ func TestRenderReportHTMLTOCPrefersStructuredBlockTitles(t *testing.T) {
 	}
 }
 
-func TestRenderReportHTMLStripsDuplicateLeadingReportTitle(t *testing.T) {
+func TestRenderReportHTMLPreservesAuthoredLeadingReportTitle(t *testing.T) {
 	t.Parallel()
 
 	html := RenderReportHTML("全面数据深度分析报告 - 2025年上半年业务洞察", "AI", &ReportState{
@@ -201,20 +198,18 @@ func TestRenderReportHTMLStripsDuplicateLeadingReportTitle(t *testing.T) {
 		},
 	})
 
-	if strings.Contains(html, `<a href="#section-1">全面数据深度分析报告</a>`) {
-		t.Fatalf("expected duplicate report title to be excluded from toc, got: %s", html)
+	if !strings.Contains(html, `<a href="#section-1">全面数据深度分析报告</a>`) {
+		t.Fatalf("expected authored block title to remain in toc, got: %s", html)
 	}
 	for _, expected := range []string{
-		`<a href="#section-1">执行摘要</a>`,
-		`<a href="#section-2">一、销售趋势分析</a>`,
-		`<a href="#section-3">二、区域业绩对比分析</a>`,
+		`<a href="#section-2">二、区域业绩对比分析</a>`,
 	} {
 		if !strings.Contains(html, expected) {
 			t.Fatalf("expected toc item %s, got: %s", expected, html)
 		}
 	}
-	if strings.Contains(html, "<h2>全面数据深度分析报告</h2>") {
-		t.Fatalf("expected duplicate body report title to be stripped, got: %s", html)
+	if !strings.Contains(html, "<h1>全面数据深度分析报告</h1>") {
+		t.Fatalf("expected model-authored report title to remain in body, got: %s", html)
 	}
 	if strings.Count(html, "<h1>全面数据深度分析报告 - 2025年上半年业务洞察</h1>") != 1 {
 		t.Fatalf("expected one renderer-owned report title, got: %s", html)
@@ -253,7 +248,7 @@ func TestRenderReportHTMLPrintCSSAllowsLongSectionsToFlow(t *testing.T) {
 	}
 }
 
-func TestRenderReportHTMLAttachesUntitledChartBlocksToNearestSection(t *testing.T) {
+func TestRenderReportHTMLKeepsUntitledChartBlockAtExplicitPosition(t *testing.T) {
 	t.Parallel()
 
 	html := RenderReportHTML("测试报告", "AI", &ReportState{
@@ -267,13 +262,15 @@ func TestRenderReportHTMLAttachesUntitledChartBlocksToNearestSection(t *testing.
 		},
 	})
 
-	if strings.Contains(html, `data-block-id="blk_sales_chart"`) {
-		t.Fatalf("expected untitled chart block to be inlined into nearby section, got: %s", html)
+	if !strings.Contains(html, `data-block-id="blk_sales_chart"`) {
+		t.Fatalf("expected chart block to remain explicit, got: %s", html)
 	}
+	overviewIdx := strings.Index(html, `data-block-id="blk_overview"`)
+	blockChartIdx := strings.Index(html, `data-block-id="blk_sales_chart"`)
 	analysisIdx := strings.Index(html, `data-block-id="blk_sales_analysis"`)
 	chartIdx := strings.Index(html, `data-chart-id="chart_sales_trend"`)
-	if analysisIdx < 0 || chartIdx < 0 || chartIdx < analysisIdx {
-		t.Fatalf("expected chart to render inside analysis section after it starts, got: %s", html)
+	if overviewIdx < 0 || blockChartIdx <= overviewIdx || analysisIdx <= blockChartIdx || chartIdx < blockChartIdx || chartIdx > analysisIdx {
+		t.Fatalf("expected chart to render in its authored block order, got: %s", html)
 	}
 	if strings.Count(html, `data-chart-id="chart_sales_trend"`) != 1 {
 		t.Fatalf("expected chart to render exactly once, got: %s", html)
@@ -453,6 +450,100 @@ func TestRenderReportHTMLSanitizesUnsafeHTML(t *testing.T) {
 	}
 	if !strings.Contains(html, "&lt;img src=x onerror=alert(1)&gt;") {
 		t.Fatalf("expected title to render, got %s", html)
+	}
+}
+
+func TestRenderReportHTMLSanitizesUnsafeMarkdownBlocks(t *testing.T) {
+	t.Parallel()
+
+	html := RenderReportHTML("测试报告", "AI", &ReportState{
+		Blocks: []ReportBlock{
+			{
+				ID:   "md-unsafe",
+				Kind: "markdown",
+				Content: "## 恶意内容\n\n" +
+					"<script>alert(1)</script>\n\n" +
+					"<img src=x onerror=alert(1)>\n\n" +
+					"<a href=\"javascript:alert(1)\">evil link</a>\n\n" +
+					"<iframe src=\"https://evil.example\"></iframe>\n\n" +
+					"安全正文",
+			},
+		},
+	})
+
+	for _, forbidden := range []string{
+		"<script>alert(1)",
+		"onerror=alert(1)",
+		"javascript:alert(1)",
+		"<iframe",
+	} {
+		if strings.Contains(html, forbidden) {
+			t.Fatalf("expected markdown block to sanitize %q, got: %s", forbidden, html)
+		}
+	}
+	if !strings.Contains(html, "<h2>恶意内容</h2>") || !strings.Contains(html, "安全正文") {
+		t.Fatalf("expected benign markdown content to survive sanitization, got: %s", html)
+	}
+	if strings.Contains(html, `<a href="javascript:`) {
+		t.Fatalf("expected javascript href to be dropped from markdown link, got: %s", html)
+	}
+	if !strings.Contains(html, "<a>evil link</a>") {
+		t.Fatalf("expected inert anchor text to remain without href, got: %s", html)
+	}
+}
+
+func TestRenderReportHTMLPreservesBenignMarkdownThroughSanitization(t *testing.T) {
+	t.Parallel()
+
+	html := RenderReportHTML("测试报告", "AI", &ReportState{
+		Blocks: []ReportBlock{
+			{
+				ID:   "md-benign",
+				Kind: "markdown",
+				Content: "## 标题\n\n" +
+					"[示例链接](https://example.com/docs)\n\n" +
+					"`inline code`\n\n" +
+					"```go\nfmt.Println(\"ok\")\n```\n\n" +
+					"| 列A | 列B |\n|-----|-----|\n| 1   | 2   |\n\n" +
+					"**加粗文本**\n\n- 列表项\n",
+			},
+		},
+	})
+
+	for _, expected := range []string{
+		"<h2>标题</h2>",
+		`<a href="https://example.com/docs" rel="noopener noreferrer" target="_blank">示例链接</a>`,
+		"inline code",
+		"fmt.Println(&#34;ok&#34;)",
+		"<table>",
+		"<th>列A</th>",
+		"<td>1</td>",
+		"<strong>加粗文本</strong>",
+		"<li>列表项</li>",
+	} {
+		if !strings.Contains(html, expected) {
+			t.Fatalf("expected benign markdown to keep %q, got: %s", expected, html)
+		}
+	}
+}
+
+func TestRenderReportHTMLSanitizesChartBlockContent(t *testing.T) {
+	t.Parallel()
+
+	html := RenderReportHTML("测试报告", "AI", &ReportState{
+		Blocks: []ReportBlock{
+			{ID: "blk_chart", Kind: "chart", ChartID: "chart_sales", Content: "<script>alert(1)</script>图表解读"},
+		},
+		Charts: []ChartData{
+			{ID: "chart_sales", Option: json.RawMessage(`{"series":[{"type":"bar","data":[1]}]}`)},
+		},
+	})
+
+	if strings.Contains(html, "<script>alert(1)") || strings.Contains(html, "alert(1)") {
+		t.Fatalf("expected chart block content to be sanitized, got: %s", html)
+	}
+	if !strings.Contains(html, `data-chart-id="chart_sales"`) || !strings.Contains(html, "图表解读") {
+		t.Fatalf("expected chart container and benign commentary to survive, got: %s", html)
 	}
 }
 

@@ -2,13 +2,10 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 type SessionRepository struct {
@@ -38,11 +35,8 @@ func (r *SessionRepository) GetByID(ctx context.Context, sessionID string) (*dom
 	var session domain.Session
 	var status string
 	err := row.Scan(&session.ID, &session.WorkspaceID, &session.UserID, &session.Title, &status, &session.LastRunID, &session.CreatedAt, &session.UpdatedAt, &session.LastSeenAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, sql.ErrNoRows
-	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get session by id: %w", err)
+		return nil, fmt.Errorf("failed to get session by id: %w", normalizeLookupError(err))
 	}
 	session.Status = domain.SessionStatus(status)
 	return &session, nil

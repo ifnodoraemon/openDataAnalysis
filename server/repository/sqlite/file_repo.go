@@ -28,7 +28,7 @@ func (r *FileRepository) GetByID(ctx context.Context, fileID string) (*domain.Fi
 	var status, visibility, purpose string
 	var deletedAt sql.NullTime
 	if err := row.Scan(&file.ID, &file.WorkspaceID, &file.UploadedBy, &file.DisplayName, &purpose, &file.ContentType, &file.SizeBytes, &file.StorageProvider, &file.Bucket, &file.StorageKey, &file.Checksum, &status, &visibility, &file.CreatedAt, &file.UpdatedAt, &deletedAt); err != nil {
-		return nil, err
+		return nil, normalizeLookupError(err)
 	}
 	file.Purpose = domain.FilePurpose(purpose)
 	file.Status = domain.FileStatus(status)

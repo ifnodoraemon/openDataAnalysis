@@ -29,11 +29,12 @@ type Claims struct {
 }
 
 type TokenManager struct {
-	secret []byte
+	secret  []byte
+	revoker *Revoker
 }
 
 func NewTokenManager(secret string) *TokenManager {
-	return &TokenManager{secret: []byte(secret)}
+	return &TokenManager{secret: []byte(secret), revoker: NewRevoker()}
 }
 
 func (m *TokenManager) Sign(identity Identity, ttl time.Duration) (string, error) {
@@ -56,38 +57,26 @@ func (m *TokenManager) Sign(identity Identity, ttl time.Duration) (string, error
 	}
 	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
 	mac := hmac.New(sha256.New, m.secret)
-	_, _ = mac.Write([]byte(encodedPayload))
+	if _, err := mac.Write([]byte(encodedPayload)); err != nil {
+		return "", fmt.Errorf("sign token payload: %w", err)
+	}
 	signature := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	return encodedPayload + "." + signature, nil
 }
 
 func (m *TokenManager) Parse(token string) (Identity, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 2 {
-		return Identity{}, errors.New("invalid token format")
-	}
-
-	mac := hmac.New(sha256.New, m.secret)
-	_, _ = mac.Write([]byte(parts[0]))
-	expected := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-	if !hmac.Equal([]byte(expected), []byte(parts[1])) {
-		return Identity{}, errors.New("invalid token signature")
-	}
-
-	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	claims, err := m.verifiedClaims(token)
 	if err != nil {
-		return Identity{}, fmt.Errorf("token parse failed: %w", err)
-	}
-
-	var claims Claims
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return Identity{}, fmt.Errorf("token claims parse failed: %w", err)
+		return Identity{}, err
 	}
 	if claims.ExpiresAt < time.Now().Unix() {
 		return Identity{}, errors.New("token expired")
 	}
-	if claims.Issuer != "" && claims.Issuer != TokenIssuer {
+	if claims.Issuer != TokenIssuer {
 		return Identity{}, errors.New("invalid token issuer")
+	}
+	if claims.JWTID != "" && m.revoker.IsRevoked(claims.JWTID) {
+		return Identity{}, errors.New("token revoked")
 	}
 
 	userID := claims.UserID
@@ -102,4 +91,46 @@ func (m *TokenManager) Parse(token string) (Identity, error) {
 		WorkspaceID: claims.WorkspaceID,
 		Workspace:   claims.Workspace,
 	}, nil
+}
+
+func (m *TokenManager) Revoke(token string) error {
+	claims, err := m.verifiedClaims(token)
+	if err != nil {
+		return err
+	}
+	if claims.ExpiresAt <= time.Now().Unix() {
+		return errors.New("token expired")
+	}
+	if claims.JWTID == "" {
+		return errors.New("token has no jti")
+	}
+	m.revoker.Revoke(claims.JWTID, time.Unix(claims.ExpiresAt, 0))
+	return nil
+}
+
+func (m *TokenManager) verifiedClaims(token string) (Claims, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 {
+		return Claims{}, errors.New("invalid token format")
+	}
+
+	mac := hmac.New(sha256.New, m.secret)
+	if _, err := mac.Write([]byte(parts[0])); err != nil {
+		return Claims{}, fmt.Errorf("verify token signature: %w", err)
+	}
+	expected := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(expected), []byte(parts[1])) {
+		return Claims{}, errors.New("invalid token signature")
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return Claims{}, fmt.Errorf("token parse failed: %w", err)
+	}
+
+	var claims Claims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return Claims{}, fmt.Errorf("token claims parse failed: %w", err)
+	}
+	return claims, nil
 }

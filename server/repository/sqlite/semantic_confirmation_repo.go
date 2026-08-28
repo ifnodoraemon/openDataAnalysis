@@ -15,14 +15,14 @@ func NewSemanticConfirmationRepository(db *sql.DB) *SemanticConfirmationReposito
 
 func (r *SemanticConfirmationRepository) Create(ctx context.Context, confirmation *domain.SemanticConfirmation) error {
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO semantic_confirmations (id, profile_id, workspace_id, session_id, confirmed_by, scope, overrides_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		confirmation.ID, confirmation.ProfileID, confirmation.WorkspaceID, confirmation.SessionID, confirmation.ConfirmedBy, string(confirmation.Scope), confirmation.OverridesJSON, confirmation.CreatedAt)
+		`INSERT INTO semantic_confirmations (id, profile_id, workspace_id, session_id, confirmed_by, confirmation_receipt_id, provenance, scope, overrides_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		confirmation.ID, confirmation.ProfileID, confirmation.WorkspaceID, confirmation.SessionID, confirmation.ConfirmedBy, confirmation.ConfirmationReceiptID, string(confirmation.Provenance), string(confirmation.Scope), confirmation.OverridesJSON, confirmation.CreatedAt)
 	return err
 }
 
 func (r *SemanticConfirmationRepository) ListByProfile(ctx context.Context, profileID string) ([]domain.SemanticConfirmation, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, profile_id, workspace_id, session_id, confirmed_by, scope, overrides_json, created_at FROM semantic_confirmations WHERE profile_id = ? ORDER BY created_at DESC`, profileID)
+		`SELECT id, profile_id, workspace_id, session_id, confirmed_by, confirmation_receipt_id, provenance, scope, overrides_json, created_at FROM semantic_confirmations WHERE profile_id = ? ORDER BY created_at DESC`, profileID)
 	if err != nil {
 		return nil, err
 	}
@@ -31,11 +31,12 @@ func (r *SemanticConfirmationRepository) ListByProfile(ctx context.Context, prof
 	var results []domain.SemanticConfirmation
 	for rows.Next() {
 		var c domain.SemanticConfirmation
-		var scope string
-		if err := rows.Scan(&c.ID, &c.ProfileID, &c.WorkspaceID, &c.SessionID, &c.ConfirmedBy, &scope, &c.OverridesJSON, &c.CreatedAt); err != nil {
+		var scope, provenance string
+		if err := rows.Scan(&c.ID, &c.ProfileID, &c.WorkspaceID, &c.SessionID, &c.ConfirmedBy, &c.ConfirmationReceiptID, &provenance, &scope, &c.OverridesJSON, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		c.Scope = domain.ConfirmationScope(scope)
+		c.Provenance = domain.ConfirmationProvenance(provenance)
 		results = append(results, c)
 	}
 	return results, rows.Err()
@@ -43,7 +44,7 @@ func (r *SemanticConfirmationRepository) ListByProfile(ctx context.Context, prof
 
 func (r *SemanticConfirmationRepository) ListBySession(ctx context.Context, sessionID string) ([]domain.SemanticConfirmation, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, profile_id, workspace_id, session_id, confirmed_by, scope, overrides_json, created_at FROM semantic_confirmations WHERE session_id = ? ORDER BY created_at DESC`, sessionID)
+		`SELECT id, profile_id, workspace_id, session_id, confirmed_by, confirmation_receipt_id, provenance, scope, overrides_json, created_at FROM semantic_confirmations WHERE session_id = ? ORDER BY created_at DESC`, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -52,11 +53,12 @@ func (r *SemanticConfirmationRepository) ListBySession(ctx context.Context, sess
 	var results []domain.SemanticConfirmation
 	for rows.Next() {
 		var c domain.SemanticConfirmation
-		var scope string
-		if err := rows.Scan(&c.ID, &c.ProfileID, &c.WorkspaceID, &c.SessionID, &c.ConfirmedBy, &scope, &c.OverridesJSON, &c.CreatedAt); err != nil {
+		var scope, provenance string
+		if err := rows.Scan(&c.ID, &c.ProfileID, &c.WorkspaceID, &c.SessionID, &c.ConfirmedBy, &c.ConfirmationReceiptID, &provenance, &scope, &c.OverridesJSON, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		c.Scope = domain.ConfirmationScope(scope)
+		c.Provenance = domain.ConfirmationProvenance(provenance)
 		results = append(results, c)
 	}
 	return results, rows.Err()
@@ -64,7 +66,7 @@ func (r *SemanticConfirmationRepository) ListBySession(ctx context.Context, sess
 
 func (r *SemanticConfirmationRepository) ListByWorkspace(ctx context.Context, workspaceID string) ([]domain.SemanticConfirmation, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, profile_id, workspace_id, session_id, confirmed_by, scope, overrides_json, created_at FROM semantic_confirmations WHERE workspace_id = ? ORDER BY created_at DESC`, workspaceID)
+		`SELECT id, profile_id, workspace_id, session_id, confirmed_by, confirmation_receipt_id, provenance, scope, overrides_json, created_at FROM semantic_confirmations WHERE workspace_id = ? ORDER BY created_at DESC`, workspaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -73,11 +75,12 @@ func (r *SemanticConfirmationRepository) ListByWorkspace(ctx context.Context, wo
 	var results []domain.SemanticConfirmation
 	for rows.Next() {
 		var c domain.SemanticConfirmation
-		var scope string
-		if err := rows.Scan(&c.ID, &c.ProfileID, &c.WorkspaceID, &c.SessionID, &c.ConfirmedBy, &scope, &c.OverridesJSON, &c.CreatedAt); err != nil {
+		var scope, provenance string
+		if err := rows.Scan(&c.ID, &c.ProfileID, &c.WorkspaceID, &c.SessionID, &c.ConfirmedBy, &c.ConfirmationReceiptID, &provenance, &scope, &c.OverridesJSON, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		c.Scope = domain.ConfirmationScope(scope)
+		c.Provenance = domain.ConfirmationProvenance(provenance)
 		results = append(results, c)
 	}
 	return results, rows.Err()

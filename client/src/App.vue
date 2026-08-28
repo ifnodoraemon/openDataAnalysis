@@ -8,7 +8,9 @@
       <span class="error-icon">⚠️</span>
       <p class="title">工作区加载遇到阻碍</p>
       <p class="error-message">{{ restoreError }}</p>
-      <button class="retry-btn" type="button" @click="retryInit">重新连接</button>
+      <button class="retry-btn" type="button" @click="retryInit">
+        重新连接
+      </button>
     </div>
   </div>
   <LoginScreen v-else-if="!isAuthenticated" />
@@ -40,7 +42,7 @@
               @click="isHistoryOpen = !isHistoryOpen"
               title="切换历史对话列"
             >
-              <span>{{ isHistoryOpen ? '◀' : '▶' }}</span>
+              <span>{{ isHistoryOpen ? "◀" : "▶" }}</span>
             </button>
             <div class="session-badge">
               <span class="session-dot"></span>
@@ -51,7 +53,7 @@
           <div class="bar-center">
             <span class="model-pill">
               <span class="sparkle">✨</span>
-              <span>Gemini 3.5 Flash + Python Sandbox</span>
+              <span>自主分析工作空间</span>
             </span>
           </div>
 
@@ -62,7 +64,10 @@
               title="关联数据源"
             >
               <span>📁 数据源</span>
-              <span class="tool-count" v-if="dataSourceStore.sessionSources?.length">
+              <span
+                class="tool-count"
+                v-if="dataSourceStore.sessionSources?.length"
+              >
                 {{ dataSourceStore.sessionSources.length }}
               </span>
             </button>
@@ -70,9 +75,9 @@
             <button
               class="quick-tool-btn"
               @click="showSemanticModal = true"
-              title="语义模型"
+              title="数据事实与用户补丁"
             >
-              <span>🧠 语义模型</span>
+              <span>🧠 数据事实</span>
             </button>
 
             <button
@@ -116,12 +121,11 @@
     </div>
 
     <!-- Modals & Drawers -->
-    <DataSourceDrawer
+    <DataSourceModal
       :open="showSourcesDrawer"
       :sessionId="store.sessionId"
       :sessionSources="dataSourceStore.sessionSources"
       :workspaceDataSources="dataSourceStore.workspaceDataSources"
-      :pendingProfiles="[]"
       @close="showSourcesDrawer = false"
     />
 
@@ -139,7 +143,7 @@
 
 <script setup>
 import { computed, ref, onMounted, watch } from "vue";
-import { useWebSocket } from "./composables/useWebSocket.js";
+import { useAgentTransport } from "./composables/useAgentTransport.js";
 import { useAgentStore } from "./stores/agent.js";
 import { useDataSourceStore } from "./stores/datasource.js";
 import IconRail from "./components/layout/IconRail.vue";
@@ -148,11 +152,11 @@ import AgentPanel from "./components/agent/AgentPanel.vue";
 import ReportPreview from "./components/report/ReportPreview.vue";
 import InputBar from "./components/layout/InputBar.vue";
 import LoginScreen from "./components/auth/LoginScreen.vue";
-import DataSourceDrawer from "./components/datasource/DataSourceDrawer.vue";
+import DataSourceModal from "./components/datasource/DataSourceModal.vue";
 import WorkspaceSettingsModal from "./components/layout/WorkspaceSettingsModal.vue";
 import SemanticProfilesModal from "./components/layout/SemanticProfilesModal.vue";
 
-const { initializeApp } = useWebSocket();
+const { initializeApp } = useAgentTransport();
 const store = useAgentStore();
 const dataSourceStore = useDataSourceStore();
 
@@ -194,7 +198,7 @@ watch(
 
 function initApp() {
   return initializeApp().catch((err) => {
-    console.error("bootstrap failed:", err);
+    console.error("工作区初始化失败：", err);
   });
 }
 
@@ -410,7 +414,7 @@ function handleSplitterKey(e) {
 }
 
 .model-pill .sparkle {
-  color: #60a5fa;
+  color: var(--primary-blue);
 }
 
 .bar-right {

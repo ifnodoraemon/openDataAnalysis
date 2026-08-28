@@ -27,6 +27,8 @@ type ReportSnapshot struct {
 	Layout        ReportSnapshotLayout  `json:"layout,omitempty"`
 	Blocks        []ReportSnapshotBlock `json:"blocks,omitempty"`
 	Charts        []ReportSnapshotChart `json:"charts"`
+	Results       json.RawMessage       `json:"results,omitempty"`
+	Artifacts     json.RawMessage       `json:"artifacts,omitempty"`
 }
 
 type ReportSnapshotLayout struct {
@@ -44,8 +46,9 @@ type ReportSnapshotBlock struct {
 }
 
 type ReportSnapshotChart struct {
-	ID     string          `json:"id"`
-	Option json.RawMessage `json:"option"`
-	Width  string          `json:"width,omitempty"`
-	Height string          `json:"height,omitempty"`
+	ID      string          `json:"id"`
+	Option  json.RawMessage `json:"option"`
+	Width   string          `json:"width,omitempty"`
+	Height  string          `json:"height,omitempty"`
+	Sources json.RawMessage `json:"sources,omitempty"`
 }

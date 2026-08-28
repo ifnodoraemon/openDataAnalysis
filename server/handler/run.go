@@ -2,175 +2,163 @@ package handler
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/ifnodoraemon/openDataAnalysis/auth"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
+	"github.com/ifnodoraemon/openDataAnalysis/internal/jsoncontract"
+	"github.com/ifnodoraemon/openDataAnalysis/repository"
+	"github.com/ifnodoraemon/openDataAnalysis/session"
 	"github.com/ifnodoraemon/openDataAnalysis/tools"
 )
 
 const runPreviewLimit = 3
-const reportHTMLCSP = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'self';"
+const reportHTMLCSP = "default-src 'self'; script-src 'self' " + tools.ReportKaTeXCDNBaseURL + " style-src 'self' 'unsafe-inline' " + tools.ReportKaTeXCDNBaseURL + " https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com " + tools.ReportKaTeXCDNBaseURL + "fonts/; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'self';"
 
 func ListRunsHandler(w http.ResponseWriter, r *http.Request) {
 	identity, _ := auth.FromContext(r.Context())
-	if ok, _ := workspaceRepo.IsMember(r.Context(), identity.WorkspaceID, identity.UserID); !ok {
-		http.Error(w, "user not authorized to access workspace", http.StatusForbidden)
+	if !requireWorkspaceMembership(w, r.Context(), identity.WorkspaceID, identity.UserID) {
 		return
 	}
-	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
-	if sessionID == "" {
-		http.Error(w, "missing session_id", http.StatusBadRequest)
+	sessionID := r.URL.Query().Get("session_id")
+	if strings.TrimSpace(sessionID) == "" {
+		http.Error(w, "缺少 session_id", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(sessionID) != sessionID {
+		http.Error(w, "session_id 必须保持原值", http.StatusBadRequest)
 		return
 	}
 
 	session, err := sessionRepo.GetByID(r.Context(), sessionID)
-	if writeRepoLookupError(w, err, "session does not exist") {
+	if writeRepoLookupError(w, err, "会话不存在") {
 		return
 	}
 	if session.UserID != identity.UserID || session.WorkspaceID != identity.WorkspaceID {
-		http.Error(w, "not authorized to access this session", http.StatusForbidden)
+		http.Error(w, "无权访问此会话", http.StatusForbidden)
 		return
 	}
 	if err := recoverStaleSessionRuns(r.Context(), sessionID); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeHandlerError(w, http.StatusInternalServerError, "恢复任务状态失败", err)
 		return
 	}
 
 	runs, err := runRepo.ListBySession(r.Context(), sessionID, 20)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeHandlerError(w, http.StatusInternalServerError, "获取任务历史失败", err)
+		return
+	}
+	serializedRuns, err := serializeRuns(r.Context(), runs)
+	if err != nil {
+		http.Error(w, "序列化任务历史失败", http.StatusInternalServerError)
 		return
 	}
 
 	resp := map[string]interface{}{
-		"runs": serializeRuns(r.Context(), runs),
+		"runs": serializedRuns,
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func GetRunHandler(w http.ResponseWriter, r *http.Request) {
 	identity, _ := auth.FromContext(r.Context())
-	if ok, _ := workspaceRepo.IsMember(r.Context(), identity.WorkspaceID, identity.UserID); !ok {
-		http.Error(w, "user not authorized to access workspace", http.StatusForbidden)
+	if !requireWorkspaceMembership(w, r.Context(), identity.WorkspaceID, identity.UserID) {
 		return
 	}
 	runID := chi.URLParam(r, "runID")
 	run, err := runRepo.GetByID(r.Context(), runID)
-	if writeRepoLookupError(w, err, "task does not exist") {
+	if writeRepoLookupError(w, err, "任务不存在") {
 		return
 	}
 	if run.UserID != identity.UserID || run.WorkspaceID != identity.WorkspaceID {
-		http.Error(w, "not authorized to access this task", http.StatusForbidden)
+		http.Error(w, "无权访问此任务", http.StatusForbidden)
 		return
 	}
 	if err := recoverStaleSessionRuns(r.Context(), run.SessionID); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeHandlerError(w, http.StatusInternalServerError, "恢复任务状态失败", err)
 		return
 	}
 	run, err = runRepo.GetByID(r.Context(), runID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeHandlerError(w, http.StatusInternalServerError, "重新加载任务失败", err)
 		return
 	}
 
+	serializedRun, err := serializeRun(r.Context(), *run)
+	if err != nil {
+		http.Error(w, "序列化任务失败", http.StatusInternalServerError)
+		return
+	}
 	resp := map[string]interface{}{
-		"run": serializeRun(r.Context(), *run),
+		"run": serializedRun,
 	}
 
 	messages, err := messageRepo.ListByRunPath(r.Context(), runID)
-	if err == nil {
-		resp["messages"] = messages
-	} else {
-		resp["messages"] = []domain.RunMessage{}
+	if err != nil {
+		http.Error(w, "获取任务消息失败", http.StatusInternalServerError)
+		return
 	}
-	attachRunRuntimeState(r.Context(), resp, *run)
+	resp["messages"] = messages
+	if err := attachRunRuntimeState(r.Context(), resp, *run); err != nil {
+		http.Error(w, "获取任务运行时状态失败", http.StatusInternalServerError)
+		return
+	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func GetRunReportHandler(w http.ResponseWriter, r *http.Request) {
 	identity, _ := auth.FromContext(r.Context())
-	if ok, _ := workspaceRepo.IsMember(r.Context(), identity.WorkspaceID, identity.UserID); !ok {
-		http.Error(w, "user not authorized to access workspace", http.StatusForbidden)
+	if !requireWorkspaceMembership(w, r.Context(), identity.WorkspaceID, identity.UserID) {
 		return
 	}
 	runID := chi.URLParam(r, "runID")
 	run, err := runRepo.GetByID(r.Context(), runID)
-	if writeRepoLookupError(w, err, "task does not exist") {
+	if writeRepoLookupError(w, err, "任务不存在") {
 		return
 	}
 	if run.UserID != identity.UserID || run.WorkspaceID != identity.WorkspaceID {
-		http.Error(w, "not authorized to access this task", http.StatusForbidden)
+		http.Error(w, "无权访问此任务", http.StatusForbidden)
 		return
 	}
 	if err := recoverStaleSessionRuns(r.Context(), run.SessionID); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeHandlerError(w, http.StatusInternalServerError, "恢复任务状态失败", err)
 		return
 	}
 	run, err = runRepo.GetByID(r.Context(), runID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeHandlerError(w, http.StatusInternalServerError, "重新加载任务失败", err)
 		return
 	}
 
 	report, reportErr := reportRepo.GetByRunID(r.Context(), runID)
-	if reportErr == nil && report != nil {
-		if html, ok := renderReportHTMLFromSnapshot(report); ok {
-			setReportHTMLHeaders(w)
-			w.Header().Set("Content-Disposition", `inline; filename="`+safeHeaderFilename(reportFilename(report.Title, runID))+`"`)
-			_, _ = io.WriteString(w, html)
-			return
-		}
-		reader, err := fileService.OpenStoredObject(r.Context(), identity.UserID, identity.WorkspaceID, report.HTMLStorageKey)
-		if err == nil {
-			defer reader.Close()
-			setReportHTMLHeaders(w)
-			w.Header().Set("Content-Disposition", `inline; filename="`+safeHeaderFilename(reportFilename(report.Title, runID))+`"`)
-			_, _ = io.Copy(w, reader)
-			return
-		}
-		if errors.Is(err, os.ErrNotExist) {
-			http.Error(w, "task report file does not exist", http.StatusNotFound)
-			return
-		}
-	}
-	if reportErr != nil && reportErr != sql.ErrNoRows {
-		http.Error(w, reportErr.Error(), http.StatusInternalServerError)
+	if errors.Is(reportErr, repository.ErrNotFound) {
+		http.Error(w, "任务尚未生成已定稿报告", http.StatusNotFound)
 		return
 	}
-	if run.ReportFileID == nil || strings.TrimSpace(*run.ReportFileID) == "" {
-		http.Error(w, "task has not generated a report yet", http.StatusNotFound)
+	if reportErr != nil {
+		writeHandlerError(w, http.StatusInternalServerError, "获取报告失败", reportErr)
 		return
 	}
-
-	reader, file, err := fileService.OpenForDownload(r.Context(), identity.UserID, identity.WorkspaceID, *run.ReportFileID)
+	if report == nil {
+		http.Error(w, "报告存储返回了空记录", http.StatusInternalServerError)
+		return
+	}
+	html, err := renderReportHTMLFromSnapshot(report)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			http.Error(w, "task report file does not exist", http.StatusNotFound)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "渲染报告快照失败", http.StatusInternalServerError)
 		return
 	}
-	defer reader.Close()
-
-	w.Header().Set("Content-Type", defaultContentType(file.ContentType))
-	if strings.Contains(strings.ToLower(defaultContentType(file.ContentType)), "text/html") {
-		w.Header().Set("Content-Security-Policy", reportHTMLCSP)
-		w.Header().Set("X-Content-Type-Options", "nosniff")
+	setReportHTMLHeaders(w)
+	w.Header().Set("Content-Disposition", `inline; filename="`+safeHeaderFilename(reportFilename(report.Title, runID))+`"`)
+	if _, err := io.WriteString(w, html); err != nil {
+		return
 	}
-	w.Header().Set("Content-Disposition", `inline; filename="`+safeHeaderFilename(file.DisplayName)+`"`)
-	_, _ = io.Copy(w, reader)
 }
 
 func setReportHTMLHeaders(w http.ResponseWriter) {
@@ -179,72 +167,43 @@ func setReportHTMLHeaders(w http.ResponseWriter) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 }
 
-func renderReportHTMLFromSnapshot(report *domain.Report) (string, bool) {
+func renderReportHTMLFromSnapshot(report *domain.Report) (string, error) {
 	if report == nil || strings.TrimSpace(report.SnapshotJSON) == "" {
-		return "", false
+		return "", fmt.Errorf("report snapshot is required")
 	}
 
 	var snapshot domain.ReportSnapshot
-	if err := json.Unmarshal([]byte(report.SnapshotJSON), &snapshot); err != nil {
-		return "", false
+	if err := jsoncontract.Decode([]byte(report.SnapshotJSON), &snapshot); err != nil {
+		return "", fmt.Errorf("invalid report snapshot: %w", err)
 	}
 
-	html, ok := renderReportHTMLFromSnapshotData(&snapshot)
-	if !ok {
-		return "", false
-	}
-	return html, true
+	return renderReportHTMLFromSnapshotData(&snapshot)
 }
 
-func renderReportHTMLFromSnapshotData(snapshot *domain.ReportSnapshot) (string, bool) {
+func renderReportHTMLFromSnapshotData(snapshot *domain.ReportSnapshot) (string, error) {
 	if snapshot == nil {
-		return "", false
+		return "", fmt.Errorf("report snapshot is required")
 	}
-
-	state := &tools.ReportState{
-		FinalTitle:  strings.TrimSpace(snapshot.Title),
-		FinalAuthor: strings.TrimSpace(snapshot.Author),
-		Layout: tools.ReportLayout{
-			CustomCSS: snapshot.Layout.CustomCSS,
-			BodyClass: snapshot.Layout.BodyClass,
-		},
-		NeedsFinalize: snapshot.NeedsFinalize,
-		Blocks:        make([]tools.ReportBlock, 0, len(snapshot.Blocks)),
-		Charts:        make([]tools.ChartData, 0, len(snapshot.Charts)),
+	restored := &session.Session{ReportState: &tools.ReportState{}}
+	if err := restored.LoadReportSnapshot(snapshot); err != nil {
+		return "", fmt.Errorf("invalid report snapshot state: %w", err)
 	}
-
-	for _, block := range snapshot.Blocks {
-		reportBlock := tools.ReportBlock{
-			ID:      block.ID,
-			Kind:    block.Kind,
-			Title:   block.Title,
-			Content: block.Content,
-			ChartID: block.ChartID,
-		}
-		state.Blocks = append(state.Blocks, reportBlock)
-	}
-
-	for _, chart := range snapshot.Charts {
-		state.Charts = append(state.Charts, tools.ChartData{
-			ID:     chart.ID,
-			Option: chart.Option,
-			Width:  chart.Width,
-			Height: chart.Height,
-		})
-	}
-
-	return tools.RenderReportHTML(snapshot.Title, snapshot.Author, state), true
+	return tools.RenderReportHTML(snapshot.Title, snapshot.Author, restored.ReportState), nil
 }
 
-func serializeRuns(ctx context.Context, runs []domain.AnalysisRun) []map[string]interface{} {
+func serializeRuns(ctx context.Context, runs []domain.AnalysisRun) ([]map[string]interface{}, error) {
 	resp := make([]map[string]interface{}, 0, len(runs))
 	for _, run := range runs {
-		resp = append(resp, serializeRun(ctx, run))
+		item, err := serializeRun(ctx, run)
+		if err != nil {
+			return nil, err
+		}
+		resp = append(resp, item)
 	}
-	return resp
+	return resp, nil
 }
 
-func serializeRun(ctx context.Context, run domain.AnalysisRun) map[string]interface{} {
+func serializeRun(ctx context.Context, run domain.AnalysisRun) (map[string]interface{}, error) {
 	item := map[string]interface{}{
 		"id":           run.ID,
 		"sessionId":    run.SessionID,
@@ -269,10 +228,14 @@ func serializeRun(ctx context.Context, run domain.AnalysisRun) map[string]interf
 	if run.ReportFileID != nil {
 		item["reportFileId"] = *run.ReportFileID
 	}
-	if reportRepo != nil {
-		if report, err := reportRepo.GetByRunID(ctx, run.ID); err == nil && report != nil {
-			item["report"] = serializeReport(*report)
-		}
+	if reportRepo == nil || runRepo == nil || messageRepo == nil {
+		return nil, fmt.Errorf("task serialization repositories are not configured")
+	}
+	report, err := reportRepo.GetByRunID(ctx, run.ID)
+	if err == nil && report != nil {
+		item["report"] = serializeReport(*report)
+	} else if err != nil && !isRepoNotFound(err) {
+		return nil, fmt.Errorf("failed to read report for task %s: %w", run.ID, err)
 	}
 	if run.StartedAt != nil {
 		item["startedAt"] = *run.StartedAt
@@ -280,22 +243,37 @@ func serializeRun(ctx context.Context, run domain.AnalysisRun) map[string]interf
 	if run.FinishedAt != nil {
 		item["finishedAt"] = *run.FinishedAt
 	}
-	if preview := buildRunPreview(ctx, run.ID); len(preview) > 0 {
+	preview, err := buildRunPreview(ctx, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(preview) > 0 {
 		item["previewMessages"] = preview
 	}
-	if childRuns, err := runRepo.ListByParent(ctx, run.ID); err == nil && len(childRuns) > 0 {
-		item["childRuns"] = serializeRuns(ctx, childRuns)
+	childRuns, err := runRepo.ListByParent(ctx, run.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list child tasks for %s: %w", run.ID, err)
 	}
-	return item
+	if len(childRuns) > 0 {
+		serializedChildren, err := serializeRuns(ctx, childRuns)
+		if err != nil {
+			return nil, err
+		}
+		item["childRuns"] = serializedChildren
+	}
+	return item, nil
 }
 
-func buildRunPreview(ctx context.Context, runID string) []map[string]interface{} {
+func buildRunPreview(ctx context.Context, runID string) ([]map[string]interface{}, error) {
 	if messageRepo == nil {
-		return nil
+		return nil, fmt.Errorf("message repository is not configured")
 	}
 	messages, err := messageRepo.ListRecentByRun(ctx, runID, runPreviewLimit)
-	if err != nil || len(messages) == 0 {
-		return nil
+	if err != nil {
+		return nil, fmt.Errorf("failed to read task preview messages: %w", err)
+	}
+	if len(messages) == 0 {
+		return nil, nil
 	}
 	items := make([]map[string]interface{}, 0, len(messages))
 	for _, msg := range messages {
@@ -309,7 +287,7 @@ func buildRunPreview(ctx context.Context, runID string) []map[string]interface{}
 			"summary": summary,
 		})
 	}
-	return items
+	return items, nil
 }
 
 func summarizeRunMessage(msg domain.RunMessage) string {
@@ -321,12 +299,9 @@ func summarizeRunMessage(msg domain.RunMessage) string {
 		return msg.Name
 	case "tool_result":
 		var payload map[string]interface{}
-		if err := json.Unmarshal([]byte(content), &payload); err == nil {
+		if err := jsoncontract.Decode([]byte(content), &payload); err == nil {
 			if summary, ok := payload["ui_summary"].(string); ok && strings.TrimSpace(summary) != "" {
 				return clipPreviewText(summary, 120)
-			}
-			if message, ok := payload["message"].(string); ok && strings.TrimSpace(message) != "" {
-				return clipPreviewText(message, 120)
 			}
 		}
 		if msg.Name != "" {

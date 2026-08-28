@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -37,43 +38,15 @@ func TestNewSessionToleratesMissingGlobalConfig(t *testing.T) {
 	if sess.Engine == nil || sess.Registry == nil {
 		t.Fatalf("expected session runtime to initialize")
 	}
-}
-
-func TestNewSessionDoesNotEnableSemanticEnricherForPlaceholderLLMKey(t *testing.T) {
-	prev := config.Cfg
-	config.Cfg = &config.Config{LLMAPIKey: "REPLACE_WITH_YOUR_API_KEY"}
-	t.Cleanup(func() { config.Cfg = prev })
-	t.Setenv("PROXY_TOKEN", "")
-
-	sess, err := New("sess_1", "ws_1", "user_1", t.TempDir(), nil, nil)
-	if err != nil {
-		t.Fatalf("new session: %v", err)
-	}
-	if sess.Ingester.SemanticEnricher != nil {
-		t.Fatal("did not expect semantic enricher for placeholder LLM key")
-	}
-}
-
-func TestNewSessionEnablesSemanticEnricherForConfiguredLLMKey(t *testing.T) {
-	prev := config.Cfg
-	config.Cfg = &config.Config{
-		LLMProvider:  "openai",
-		LLMAPIKey:    "sk-test-realish-key",
-		LLMBaseURL:   "https://api.openai.com",
-		LLMModel:     "gpt-4o",
-		AuthSecret:   "abcdefghijklmnopqrstuvwxyz123456",
-		ProxyToken:   "",
-		PythonMCPURL: "",
-	}
-	t.Cleanup(func() { config.Cfg = prev })
-	t.Setenv("PROXY_TOKEN", "")
-
-	sess, err := New("sess_1", "ws_1", "user_1", t.TempDir(), nil, nil)
-	if err != nil {
-		t.Fatalf("new session: %v", err)
-	}
-	if sess.Ingester.SemanticEnricher == nil {
-		t.Fatal("expected semantic enricher for configured LLM key")
+	for _, toolName := range []string{
+		"state_session_sources_inspect",
+		"state_semantic_profile_inspect",
+		"state_governance_inspect",
+		"profile_patch_commit",
+	} {
+		if sess.Registry.HasTool(toolName) {
+			t.Fatalf("source capability %s must be absent when the source service is unavailable", toolName)
+		}
 	}
 }
 
@@ -96,7 +69,7 @@ func TestPrepareUserRunLoadsSnapshotThroughLoader(t *testing.T) {
 				{ID: "b1", Kind: "chart", Title: "趋势", ChartID: "chart_1"},
 			},
 			Charts: []domain.ReportSnapshotChart{
-				{ID: "chart_1"},
+				{ID: "chart_1", Option: json.RawMessage(`{}`)},
 			},
 		},
 	}
@@ -104,10 +77,9 @@ func TestPrepareUserRunLoadsSnapshotThroughLoader(t *testing.T) {
 	err := sess.PrepareUserRun(context.Background(), agent.UserMessage{
 		Content: "重写这一段",
 		EditContext: &agent.ReportEditContext{
-			Mode:                "regenerate_block",
-			TargetRunID:         "run_123",
-			BlockID:             "b1",
-			PreserveOtherBlocks: true,
+			ScopeKind:   "partial_block",
+			TargetRunID: "run_123",
+			BlockID:     "b1",
 		},
 	}, loader)
 	if err != nil {
@@ -166,7 +138,7 @@ func TestPrepareUserRunLoadsSnapshotFromTurnContextTarget(t *testing.T) {
 			Author:        "tester",
 			NeedsFinalize: true,
 			Blocks: []domain.ReportSnapshotBlock{
-				{ID: "b1", Kind: "markdown", Title: "结论"},
+				{ID: "b1", Kind: "markdown", Title: "结论", Content: "结论内容"},
 			},
 		},
 	}
@@ -204,9 +176,9 @@ func TestSessionRuntimeVars(t *testing.T) {
 
 	// 1. Test EditScope
 	sess.EditState = &tools.ReportEditState{
-		Mode:          "append",
-		TargetBlockID: "b1",
-		SelectionText: "hello",
+		ScopeKindValue: "partial_block",
+		TargetBlockID:  "b1",
+		SelectionText:  "hello",
 	}
 	vars := sess.RuntimeVars()
 	if len(vars) != 1 {
@@ -214,9 +186,6 @@ func TestSessionRuntimeVars(t *testing.T) {
 	}
 	if vars[0].Name != "active_edit_scope" {
 		t.Fatalf("expected active_edit_scope, got %v", vars)
-	}
-	if !strings.Contains(vars[0].Content, "Mode: append") {
-		t.Errorf("missing Mode in edit scope fact: %s", vars[0].Content)
 	}
 	if !strings.Contains(vars[0].Content, "ScopeKind: partial_block") {
 		t.Errorf("missing ScopeKind in edit scope fact: %s", vars[0].Content)
@@ -241,9 +210,8 @@ func TestSessionRuntimeVarsChartScope(t *testing.T) {
 			NeedsFinalize: true,
 		},
 		EditState: &tools.ReportEditState{
-			Mode:                "revise_chart",
-			TargetChartID:       "chart_sales",
-			PreserveOtherBlocks: true,
+			ScopeKindValue: "partial_chart",
+			TargetChartID:  "chart_sales",
 		},
 	}
 
@@ -271,14 +239,13 @@ func TestSessionRuntimeVarsSelectionScope(t *testing.T) {
 			NeedsFinalize: true,
 		},
 		EditState: &tools.ReportEditState{
-			Mode:                "regenerate_selection",
-			TargetBlockID:       "b1",
-			TargetBlockLabel:    "结论",
-			SelectionText:       "其中这句需要改",
-			SelectionStart:      0,
-			SelectionEnd:        7,
-			SelectionRangeSet:   true,
-			PreserveOtherBlocks: true,
+			ScopeKindValue:    "partial_selection",
+			TargetBlockID:     "b1",
+			TargetBlockLabel:  "结论",
+			SelectionText:     "其中这句需要改",
+			SelectionStart:    0,
+			SelectionEnd:      7,
+			SelectionRangeSet: true,
 		},
 	}
 
@@ -294,9 +261,6 @@ func TestSessionRuntimeVarsSelectionScope(t *testing.T) {
 	}
 	if !strings.Contains(vars[0].Content, "SelectionRange: 0-7") {
 		t.Fatalf("missing selection range fact: %s", vars[0].Content)
-	}
-	if !strings.Contains(vars[0].Content, "PreserveOtherBlocks: true") {
-		t.Fatalf("missing preserve-other-blocks fact: %s", vars[0].Content)
 	}
 	if !strings.Contains(vars[0].Content, "MutationContract: only the target block content may change") {
 		t.Fatalf("missing mutation contract fact: %s", vars[0].Content)
@@ -315,7 +279,7 @@ func TestSessionRuntimeVarsLayoutScope(t *testing.T) {
 			NeedsFinalize: true,
 		},
 		EditState: &tools.ReportEditState{
-			Mode: "configure_layout",
+			ScopeKindValue: "layout",
 		},
 	}
 
@@ -332,11 +296,11 @@ func TestSessionRuntimeVarsDoNotInjectGoalState(t *testing.T) {
 	t.Parallel()
 
 	subgoals := agent.NewSubgoalManager()
-	rootID, err := subgoals.AddGoal("整理当前报告结构", "")
+	rootID, err := subgoals.AddGoalWithBlocking("整理当前报告结构", "", false)
 	if err != nil {
 		t.Fatalf("add root goal: %v", err)
 	}
-	childID, err := subgoals.AddGoal("重写结论部分", rootID)
+	childID, err := subgoals.AddGoalWithBlocking("重写结论部分", rootID, false)
 	if err != nil {
 		t.Fatalf("add child goal: %v", err)
 	}

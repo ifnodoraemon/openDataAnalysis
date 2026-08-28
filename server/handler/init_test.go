@@ -7,16 +7,16 @@ import (
 	"github.com/ifnodoraemon/openDataAnalysis/config"
 )
 
-func TestEnsureRequiredConfigRejectsPlaceholderValues(t *testing.T) {
+func TestEnsureRequiredConfigRejectsPaddedValues(t *testing.T) {
 	prev := config.Cfg
 	config.Cfg = validRequiredConfig()
-	config.Cfg.AuthSecret = "replace-with-a-long-random-secret"
+	config.Cfg.AuthSecret = " 8f3995c9dbd14f1eb1cf8d3f9a296e11"
 	t.Cleanup(func() { config.Cfg = prev })
 
 	defer func() {
 		recovered := recover()
 		if recovered == nil {
-			t.Fatal("expected placeholder config panic")
+			t.Fatal("expected padded config panic")
 		}
 		if !strings.Contains(recovered.(string), "AUTH_SECRET") {
 			t.Fatalf("unexpected panic: %v", recovered)

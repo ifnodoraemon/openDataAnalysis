@@ -24,7 +24,7 @@ func (r *RunRepository) GetByID(ctx context.Context, runID string) (*domain.Anal
 	var parentRunID, errMsg, reportID, goalID sql.NullString
 	var startedAt, finishedAt sql.NullTime
 	if err := row.Scan(&run.ID, &run.SessionID, &run.WorkspaceID, &run.UserID, &parentRunID, &runKind, &run.DelegateRole, &goalID, &status, &run.InputMessage, &run.Summary, &errMsg, &reportID, &startedAt, &finishedAt, &run.CreatedAt, &run.UpdatedAt); err != nil {
-		return nil, err
+		return nil, normalizeLookupError(err)
 	}
 	if parentRunID.Valid {
 		run.ParentRunID = &parentRunID.String

@@ -1,11 +1,15 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/ifnodoraemon/openDataAnalysis/data"
+	"github.com/ifnodoraemon/openDataAnalysis/service"
 )
 
 // Tool 工具接口
@@ -18,6 +22,24 @@ type Tool interface {
 
 type StrictTool interface {
 	Strict() bool
+}
+
+type ToolCapability struct {
+	Mode                string `json:"mode"`
+	RuntimeEnabled      bool   `json:"runtime_enabled"`
+	Delegable           bool   `json:"delegable"`
+	RequiresUserReceipt bool   `json:"requires_user_receipt,omitempty"`
+	RunControl          string `json:"run_control,omitempty"`
+	DeliveryBoundary    bool   `json:"delivery_boundary,omitempty"`
+	EmitsReportPreview  bool   `json:"emits_report_preview,omitempty"`
+}
+
+type CapabilityTool interface {
+	Capability() ToolCapability
+}
+
+type AvailabilityTool interface {
+	CheckAvailability(context.Context) error
 }
 
 type FunctionSpec struct {
@@ -47,25 +69,31 @@ type QueryLocker interface {
 	RUnlockQuery()
 }
 
+type QueryMutationLocker interface {
+	LockQuery()
+	UnlockQuery()
+}
+
 // ToolContext 提供给工具初始化时的上下文依赖
+type RegistryFactory func(allowed []string) *Registry
+
 type ToolContext struct {
-	Ingester                   *data.Ingester
-	ReportState                *ReportState
-	EditState                  *ReportEditState
-	Memory                     any            // Type: *agent.WorkingMemory
-	Subgoals                   SubgoalChecker // Instead of any, we use an interface to avoid circular imports
-	DelegateRegistry           *Registry
-	EmitFunc                   func(any) // Type: func(agent.WSEvent)
-	SessionID                  string
-	WorkspaceID                string
-	SessionSourcesProvider     SessionSourcesProvider
-	ProfileDetailProvider      ProfileDetailProvider
-	GovernanceProvider         GovernanceProvider
-	ConfirmedOverridesProvider ConfirmedOverridesProvider
-	KnownRowCount              KnownRowCountProvider
-	QueryLocker                QueryLocker
-	ProfileConfirmer           ProfileConfirmer
-	Now                        func() time.Time
+	Ingester                *data.Ingester
+	ReportState             *ReportState
+	EditState               *ReportEditState
+	Memory                  any            // Type: *agent.WorkingMemory
+	Subgoals                SubgoalChecker // Instead of any, we use an interface to avoid circular imports
+	DelegateRegistryFactory RegistryFactory
+	EmitFunc                func(any) // Type: func(agent.RuntimeEvent)
+	SessionID               string
+	WorkspaceID             string
+	SessionSourcesProvider  SessionSourcesProvider
+	ProfileDetailProvider   ProfileDetailProvider
+	GovernanceProvider      GovernanceProvider
+	QueryLocker             QueryLocker
+	ProfileConfirmer        ProfileConfirmer
+	Now                     func() time.Time
+	FileService             *service.FileService
 }
 
 // ToolBuilder 是负责动态创建有状态工具的函数
@@ -75,6 +103,9 @@ var globalToolBuilders []ToolBuilder
 
 // RegisterGlobalTool 用于各个包的 init() 方法向全局注册自己
 func RegisterGlobalTool(builder ToolBuilder) {
+	if builder == nil {
+		panic("tool builder must not be nil")
+	}
 	globalToolBuilders = append(globalToolBuilders, builder)
 }
 
@@ -105,9 +136,39 @@ func (r *Registry) CloneFiltered(allowed []string) *Registry {
 	return filtered
 }
 
+func (r *Registry) RuntimeToolNames(delegableOnly bool) []string {
+	names := make([]string, 0, len(r.tools))
+	for name, tool := range r.tools {
+		provider, ok := tool.(CapabilityTool)
+		if !ok {
+			continue
+		}
+		capability := provider.Capability()
+		if !capability.RuntimeEnabled || (delegableOnly && !capability.Delegable) {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // Register 注册工具
 func (r *Registry) Register(tool Tool) {
-	r.tools[tool.Name()] = tool
+	if r == nil || r.tools == nil {
+		panic("tool registry is not initialized")
+	}
+	if tool == nil {
+		panic("tool must not be nil")
+	}
+	name := tool.Name()
+	if name == "" || name != strings.TrimSpace(name) {
+		panic("tool name must be a non-empty exact value")
+	}
+	if _, exists := r.tools[name]; exists {
+		panic(fmt.Sprintf("tool %q is already registered", name))
+	}
+	r.tools[name] = tool
 }
 
 // Get 获取工具

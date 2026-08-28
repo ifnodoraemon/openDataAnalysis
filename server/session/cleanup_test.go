@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -31,8 +32,14 @@ func TestCleanupExpiredSessions_RemovesIdleSessions(t *testing.T) {
 
 	manager.sessions["s_old"] = expired
 	manager.sessions["s_new"] = active
+	manager.SetFullDeleteFunc(func(ctx context.Context, sessionID string) error {
+		return manager.Delete(sessionID, "w1", "u1")
+	})
 
-	cleaned := manager.CleanupExpiredSessions(2) // TTL = 2 小时
+	cleaned, err := manager.CleanupExpiredSessions(2)
+	if err != nil {
+		t.Fatalf("cleanup expired sessions: %v", err)
+	}
 	if cleaned != 1 {
 		t.Fatalf("expected 1 cleaned, got %d", cleaned)
 	}
@@ -60,8 +67,14 @@ func TestCleanupExpiredSessions_SkipsRunning(t *testing.T) {
 		},
 	}
 	manager.sessions["s_running"] = running
+	manager.SetFullDeleteFunc(func(ctx context.Context, sessionID string) error {
+		return manager.Delete(sessionID, "w1", "u1")
+	})
 
-	cleaned := manager.CleanupExpiredSessions(1)
+	cleaned, err := manager.CleanupExpiredSessions(1)
+	if err != nil {
+		t.Fatalf("cleanup expired sessions: %v", err)
+	}
 	if cleaned != 0 {
 		t.Fatalf("expected 0 cleaned (running session), got %d", cleaned)
 	}
@@ -78,7 +91,10 @@ func TestCleanupOldTraces(t *testing.T) {
 	os.MkdirAll(oldDir, 0o755)
 	os.MkdirAll(newDir, 0o755)
 
-	cleaned := CleanupOldTraces(traceDir, 7)
+	cleaned, err := CleanupOldTraces(traceDir, 7)
+	if err != nil {
+		t.Fatalf("cleanup old traces: %v", err)
+	}
 	if cleaned != 1 {
 		t.Fatalf("expected 1 cleaned, got %d", cleaned)
 	}
@@ -117,10 +133,113 @@ func TestCleanupExpiredSessions_ZeroTTL_NoOp(t *testing.T) {
 		CacheRoot:  t.TempDir(),
 	}
 
-	cleaned := manager.CleanupExpiredSessions(0)
+	cleaned, err := manager.CleanupExpiredSessions(0)
+	if err != nil {
+		t.Fatalf("zero TTL cleanup: %v", err)
+	}
 	if cleaned != 0 {
 		t.Fatalf("expected 0 for zero TTL, got %d", cleaned)
 	}
+}
+
+func TestCleanupExpiredSessionsRejectsMissingCompleteDeletion(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(t.TempDir(), nil, nil)
+	if _, err := manager.CleanupExpiredSessions(1); err == nil {
+		t.Fatal("expected missing complete deletion function to fail")
+	}
+}
+
+func TestCleanupExpiredSessions_RestoresSessionWhenFullDeleteFails(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(t.TempDir(), nil, nil)
+	expired := &Session{
+		ID:          "s_fail",
+		WorkspaceID: "w1",
+		UserID:      "u1",
+		LastSeenAt:  time.Now().Add(-3 * time.Hour),
+		CacheRoot:   t.TempDir(),
+	}
+	manager.sessions["s_fail"] = expired
+
+	var deletedIDs []string
+	manager.SetFullDeleteFunc(func(ctx context.Context, sessionID string) error {
+		deletedIDs = append(deletedIDs, sessionID)
+		return errors.New("storage unavailable")
+	})
+
+	cleaned, err := manager.CleanupExpiredSessions(2)
+	if err == nil {
+		t.Fatal("expected full delete failure to be reported")
+	}
+	if cleaned != 0 {
+		t.Fatalf("expected 0 cleaned, got %d", cleaned)
+	}
+	if len(deletedIDs) != 1 || deletedIDs[0] != "s_fail" {
+		t.Fatalf("expected full delete to be attempted once, got %v", deletedIDs)
+	}
+	if _, exists := manager.sessions["s_fail"]; !exists {
+		t.Fatal("expected session object to be restored after failed full delete")
+	}
+}
+
+func TestCleanupExpiredSessions_WaitingSessionIsIdleAndCleaned(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(t.TempDir(), nil, nil)
+	waiting := &Session{
+		ID:          "s_waiting",
+		WorkspaceID: "w1",
+		UserID:      "u1",
+		LastSeenAt:  time.Now().Add(-3 * time.Hour),
+		CacheRoot:   t.TempDir(),
+		ActiveRun: &RunState{
+			RunID:  "r_1",
+			Status: "waiting_user_input",
+		},
+	}
+	manager.sessions["s_waiting"] = waiting
+
+	var deletedIDs []string
+	manager.SetFullDeleteFunc(func(ctx context.Context, sessionID string) error {
+		deletedIDs = append(deletedIDs, sessionID)
+		return nil
+	})
+
+	cleaned, err := manager.CleanupExpiredSessions(2)
+	if err != nil {
+		t.Fatalf("cleanup expired sessions: %v", err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("expected 1 cleaned, got %d", cleaned)
+	}
+	if len(deletedIDs) != 1 || deletedIDs[0] != "s_waiting" {
+		t.Fatalf("expected waiting session to be fully deleted, got %v", deletedIDs)
+	}
+	if _, exists := manager.sessions["s_waiting"]; exists {
+		t.Fatal("expected s_waiting to be removed")
+	}
+}
+
+func TestCleanupOldTracesReportsMissingDirectory(t *testing.T) {
+	t.Parallel()
+
+	if _, err := CleanupOldTraces(filepath.Join(t.TempDir(), "missing"), 7); err == nil {
+		t.Fatal("expected missing trace directory to fail")
+	}
+}
+
+func TestStartPeriodicCleanupRejectsIncompleteTTLConfiguration(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected incomplete TTL cleanup configuration to panic")
+		}
+	}()
+	NewManager(t.TempDir(), nil, nil).StartPeriodicCleanup(1, 0, "", "", false)
 }
 
 // ---- P1-8: 状态串扰回归测试 ----

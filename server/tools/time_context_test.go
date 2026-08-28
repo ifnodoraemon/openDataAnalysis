@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -8,7 +9,7 @@ import (
 	"github.com/ifnodoraemon/openDataAnalysis/service"
 )
 
-func TestInspectTimeContextToolReturnsCurrentDateAndDataPeriods(t *testing.T) {
+func TestInspectTimeContextToolReturnsClockAndImportFactsOnly(t *testing.T) {
 	t.Parallel()
 
 	loc := time.FixedZone("CST", 8*60*60)
@@ -16,7 +17,7 @@ func TestInspectTimeContextToolReturnsCurrentDateAndDataPeriods(t *testing.T) {
 		Now: func() time.Time {
 			return time.Date(2026, 4, 23, 9, 30, 0, 0, loc)
 		},
-		SessionSourcesProvider: func() ([]service.SessionSourceSummary, error) {
+		SessionSourcesProvider: func(ctx context.Context) ([]service.SessionSourceSummary, error) {
 			return []service.SessionSourceSummary{
 				{
 					SourceID:          "src_1",
@@ -28,36 +29,21 @@ func TestInspectTimeContextToolReturnsCurrentDateAndDataPeriods(t *testing.T) {
 				},
 			}, nil
 		},
-		ProfileDetailProvider: func(profileID string) (string, string, error) {
-			return `{
-				"time_candidates": [
-					{"column_name":"month","grain":"month","coverage_start":"2025-01","coverage_end":"2025-06","estimated":false}
-				]
-			}`, `[]`, nil
-		},
 	}
+	tool.SetExecutionContext(context.Background())
 
-	result, err := tool.Execute(nil)
+	result, err := tool.Execute(json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 
 	var payload struct {
-		OK                    bool   `json:"ok"`
-		CurrentDate           string `json:"current_date"`
-		DataPeriodSourceCount int    `json:"data_period_source_count"`
-		DataPeriods           []struct {
-			AnalysisTableName  string `json:"analysis_table_name"`
-			CoverageStart      string `json:"coverage_start"`
-			CoverageEnd        string `json:"coverage_end"`
-			TimeCandidateCount int    `json:"time_candidate_count"`
-			TimeCandidates     []struct {
-				ColumnName    string `json:"column_name"`
-				Grain         string `json:"grain"`
-				CoverageStart string `json:"coverage_start"`
-				CoverageEnd   string `json:"coverage_end"`
-			} `json:"time_candidates"`
-		} `json:"data_periods"`
+		OK          bool   `json:"ok"`
+		CurrentDate string `json:"current_date"`
+		Sources     []struct {
+			AnalysisTableName string `json:"analysis_table_name"`
+			LastImportedAt    string `json:"last_imported_at"`
+		} `json:"sources"`
 	}
 	if err := json.Unmarshal([]byte(result), &payload); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -65,15 +51,15 @@ func TestInspectTimeContextToolReturnsCurrentDateAndDataPeriods(t *testing.T) {
 	if !payload.OK || payload.CurrentDate != "2026-04-23" {
 		t.Fatalf("unexpected current date payload: %#v", payload)
 	}
-	if payload.DataPeriodSourceCount != 1 || len(payload.DataPeriods) != 1 {
-		t.Fatalf("unexpected data periods: %#v", payload.DataPeriods)
+	if len(payload.Sources) != 1 {
+		t.Fatalf("unexpected source facts: %#v", payload.Sources)
 	}
-	period := payload.DataPeriods[0]
-	if period.AnalysisTableName != "sales" || period.CoverageStart != "2025-01" || period.CoverageEnd != "2025-06" {
-		t.Fatalf("unexpected aggregate period: %#v", period)
+	period := payload.Sources[0]
+	if period.AnalysisTableName != "sales" {
+		t.Fatalf("unexpected source time fact: %#v", period)
 	}
-	if period.TimeCandidateCount != 1 || len(period.TimeCandidates) != 1 || period.TimeCandidates[0].ColumnName != "month" {
-		t.Fatalf("unexpected time candidates: %#v", period.TimeCandidates)
+	if period.LastImportedAt == "" {
+		t.Fatalf("expected exact import timestamp fact: %#v", period)
 	}
 }
 
@@ -86,8 +72,9 @@ func TestInspectTimeContextToolKeepsInjectedTimezoneDate(t *testing.T) {
 			return time.Date(2026, 4, 23, 0, 30, 0, 0, loc)
 		},
 	}
+	tool.SetExecutionContext(context.Background())
 
-	result, err := tool.Execute(nil)
+	result, err := tool.Execute(json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -108,8 +95,9 @@ func TestInspectTimeContextToolWorksWithoutSources(t *testing.T) {
 			return time.Date(2026, 4, 23, 1, 2, 3, 0, time.UTC)
 		},
 	}
+	tool.SetExecutionContext(context.Background())
 
-	result, err := tool.Execute(nil)
+	result, err := tool.Execute(json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}

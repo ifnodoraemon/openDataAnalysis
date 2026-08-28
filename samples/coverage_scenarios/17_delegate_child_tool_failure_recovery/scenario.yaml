@@ -5,17 +5,13 @@ prompt: 请先自行加载并识别这两张表，然后做一次“子代理内
 files:
   - marketing_spend_by_channel_month.csv
   - attributed_revenue_by_channel_month.csv
-expected:
-  should_inspect_schema: true
-  should_auto_map: true
-  should_ask_user: false
-  should_finalize_report: true
-  expected_coverage: sufficient
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
   required_tool_calls:
     - task_delegate
   required_tool_result_codes:
     - data_query_sql:query_failed
-  required_mentions:
-    - month + channel join
-  forbidden_claims:
-    - tables cannot be combined
+manual_review:
+  - 子运行的查询失败有结构化记录，主运行仍完成用户要求的分析。

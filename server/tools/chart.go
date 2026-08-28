@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // ChartData 图表数据结构
@@ -23,34 +22,12 @@ func init() {
 }
 
 type createChartParams struct {
-	ChartID    string             `json:"chart_id"`
-	Title      string             `json:"title"`
-	Option     json.RawMessage    `json:"option"`
-	ChartType  string             `json:"chart_type"`
-	Categories []string           `json:"categories"`
-	Series     []chartSeriesInput `json:"series"`
-	Values     []chartValueInput  `json:"values"`
-	Legend     []string           `json:"legend"`
-	XAxisName  string             `json:"x_axis_name"`
-	YAxisName  string             `json:"y_axis_name"`
-	Y2AxisName string             `json:"y2_axis_name"`
-	Sources    []EvidenceRef      `json:"sources"`
-}
-
-type chartSeriesInput struct {
-	Name   string    `json:"name"`
-	Type   string    `json:"type"`
-	Data   []float64 `json:"data"`
-	YAxis  string    `json:"y_axis"`
-	Smooth bool      `json:"smooth"`
-	Color  string    `json:"color"`
-	Stack  string    `json:"stack"`
-}
-
-type chartValueInput struct {
-	Name  string  `json:"name"`
-	Value float64 `json:"value"`
-	Color string  `json:"color"`
+	ChartID string          `json:"chart_id"`
+	Title   string          `json:"title"`
+	Option  json.RawMessage `json:"option"`
+	Width   string          `json:"width"`
+	Height  string          `json:"height"`
+	Sources []EvidenceRef   `json:"sources"`
 }
 
 // CreateChartTool 创建 ECharts 图表
@@ -60,11 +37,14 @@ type CreateChartTool struct {
 }
 
 func (t *CreateChartTool) Name() string { return "report_create_chart" }
+func (t *CreateChartTool) Capability() ToolCapability {
+	return ToolCapability{Mode: "action", RuntimeEnabled: true, EmitsReportPreview: true}
+}
 
 func (t *CreateChartTool) Strict() bool { return true }
 
 func (t *CreateChartTool) Description() string {
-	return "Create or update an ECharts chart. Supports simplified DSL or native option; accepts source citations for the chart data and returns chart_id, chart_ref, and delivery_state facts. Modifies report chart state but does not auto-create or update content blocks. To embed a chart inline, use `{{chart:chart_id}}` placeholder in markdown/html block content. When a partial edit scope is active, only the authorized chart_id can be modified."
+	return "Create or update an ECharts chart from an explicit native option object. Accepts source citations and optional container dimensions; returns chart_id, chart_ref, and delivery_state facts. Modifies report chart state but does not infer a chart type, series mapping, title, or content block. To embed it inline, use `{{chart:chart_id}}` in a markdown/html block. When a partial edit scope is active, only the authorized chart_id can be modified."
 }
 
 func (t *CreateChartTool) Parameters() json.RawMessage {
@@ -72,77 +52,38 @@ func (t *CreateChartTool) Parameters() json.RawMessage {
 		"type": "object",
 		"additionalProperties": false,
 		"properties": {
-			"chart_id": {"type": "string", "description": "Unique chart identifier, e.g. chart_sales_trend"},
-			"title": {"type": "string", "description": "Chart title"},
-			"option": {"type": "object", "description": "Optional. Native ECharts option; when present, DSL inference is skipped."},
-			"chart_type": {"type": "string", "enum": ["bar", "line", "pie"], "description": "Chart type."},
-			"categories": {"type": "array", "description": "Category axis labels for bar/line charts", "items": {"type": "string"}},
-			"series": {
-				"type": "array",
-				"description": "Series definition for bar/line charts; data should come from data_query_sql results",
-				"items": {
-					"type": "object",
-					"additionalProperties": false,
-					"properties": {
-						"name": {"type": "string"},
-						"type": {"type": "string", "enum": ["bar", "line"]},
-						"data": {"type": "array", "items": {"type": "number"}},
-						"y_axis": {"type": "string", "enum": ["left", "right"]},
-						"smooth": {"type": "boolean"},
-						"color": {"type": "string"},
-						"stack": {"type": "string"}
-					},
-					"required": ["data"]
-				}
-			},
-			"values": {
-				"type": "array",
-				"description": "Pie chart data",
-				"items": {
-					"type": "object",
-					"additionalProperties": false,
-					"properties": {
-						"name": {"type": "string"},
-						"value": {"type": "number"},
-						"color": {"type": "string"}
-					},
-					"required": ["name", "value"]
-				}
-			},
-				"legend": {"type": "array", "items": {"type": "string"}},
-				"x_axis_name": {"type": "string"},
-				"y_axis_name": {"type": "string"},
-				"y2_axis_name": {"type": "string"},
+			"chart_id": {"type": "string", "description": "Unique chart identifier."},
+			"title": {"type": "string", "description": "Caller-provided display title; the runtime does not derive it from option."},
+			"option": {"type": "object", "description": "Complete native ECharts option object."},
+			"width": {"type": "string", "description": "Optional chart container width."},
+			"height": {"type": "string", "description": "Optional chart container height."},
 				"sources": {
 					"type": "array",
-					"description": "Source citations for the chart data, recording which query/table/tool result produced the series or values.",
+					"description": "Structured citations resolving to an existing analysis result, artifact, or chart ledger ID.",
 					"items": {
 						"type": "object",
 						"additionalProperties": false,
 						"properties": {
-							"kind":       {"type": "string", "enum": ["sql", "chart", "table", "python", "tool_result"]},
-							"tool_name":  {"type": "string"},
-							"sql":        {"type": "string"},
-							"table_name": {"type": "string"},
+							"kind":       {"type": "string", "enum": ["result", "artifact", "chart"]},
+							"result_id":  {"type": "string"},
+							"artifact_id":{"type": "string"},
 							"chart_id":   {"type": "string"},
-							"summary":    {"type": "string"}
+							"label":      {"type": "string"}
 						},
 						"required": ["kind"]
 					}
 				}
 			},
-			"required": ["chart_id", "title"]
+			"required": ["chart_id", "option"]
 		}`)
 }
 
 func (t *CreateChartTool) Execute(args json.RawMessage) (string, error) {
-	normalizedArgs, err := normalizeStringifiedJSONFields(args, "option", "categories", "series", "values", "legend", "sources")
-	if err != nil {
-		return "", fmt.Errorf("failed to parse parameters: %w", err)
+	if t.ReportState == nil {
+		return "", fmt.Errorf("report state is not initialized")
 	}
-
 	var params createChartParams
-	if err := json.Unmarshal(normalizedArgs, &params); err != nil {
+	if err := decodeToolArgs(args, &params); err != nil {
 		return "", fmt.Errorf("failed to parse parameters: %w", err)
 	}
 
@@ -165,233 +106,8 @@ func (t *CreateChartTool) Execute(args json.RawMessage) (string, error) {
 		"chart_id":   result.ChartID,
 		"title":      result.Title,
 		"chart_ref":  result.ChartRef,
-		"ui_summary": fmt.Sprintf("chart %s %s report state; delivery_state=draft", result.ChartID, map[bool]string{true: "updated in", false: "written to"}[result.Replaced]),
+		"ui_summary": fmt.Sprintf("图表 %s 已%s报告，当前仍为草稿。", result.ChartID, map[bool]string{true: "更新到", false: "写入"}[result.Replaced]),
 	}), nil
-}
-
-func buildOptionFromDSL(params createChartParams) (json.RawMessage, error) {
-	chartType := strings.ToLower(strings.TrimSpace(params.ChartType))
-	if chartType == "" {
-		switch {
-		case len(params.Values) > 0:
-			chartType = "pie"
-		case len(params.Series) > 0:
-			chartType = firstNonEmptySeriesType(params.Series, "bar")
-		}
-	}
-
-	switch chartType {
-	case "pie":
-		return buildPieOption(params)
-	case "bar", "line":
-		return buildAxisChartOption(params, chartType)
-	default:
-		return nil, fmt.Errorf("chart_type is required; currently only bar, line, pie are supported")
-	}
-}
-
-func hasRawChartOption(option json.RawMessage) bool {
-	trimmed := strings.TrimSpace(string(option))
-	return trimmed != "" && trimmed != "null" && trimmed != "{}"
-}
-
-func buildAxisChartOption(params createChartParams, defaultType string) (json.RawMessage, error) {
-	if len(params.Categories) == 0 {
-		return nil, fmt.Errorf("bar/line charts require categories")
-	}
-	if len(params.Series) == 0 {
-		return nil, fmt.Errorf("bar/line charts require series")
-	}
-
-	legend := append([]string(nil), params.Legend...)
-	hasRightAxis := false
-	series := make([]map[string]interface{}, 0, len(params.Series))
-	for i, item := range params.Series {
-		if len(item.Data) == 0 {
-			return nil, fmt.Errorf("series[%d].data cannot be empty", i)
-		}
-		if len(item.Data) != len(params.Categories) {
-			return nil, fmt.Errorf("series[%d].data length must match categories", i)
-		}
-
-		seriesType := strings.ToLower(strings.TrimSpace(item.Type))
-		if seriesType == "" {
-			seriesType = defaultType
-		}
-		if seriesType != "bar" && seriesType != "line" {
-			return nil, fmt.Errorf("series[%d].type only supports bar or line", i)
-		}
-
-		name := strings.TrimSpace(item.Name)
-		if name == "" {
-			if len(params.Series) == 1 {
-				name = params.Title
-			} else {
-				name = fmt.Sprintf("series_%d", i+1)
-			}
-		}
-		legend = appendIfMissing(legend, name)
-
-		seriesItem := map[string]interface{}{
-			"name": name,
-			"type": seriesType,
-			"data": item.Data,
-		}
-		if strings.EqualFold(item.YAxis, "right") {
-			seriesItem["yAxisIndex"] = 1
-			hasRightAxis = true
-		}
-		if item.Smooth {
-			seriesItem["smooth"] = true
-		}
-		if strings.TrimSpace(item.Stack) != "" {
-			seriesItem["stack"] = strings.TrimSpace(item.Stack)
-		}
-		if strings.TrimSpace(item.Color) != "" {
-			seriesItem["itemStyle"] = map[string]interface{}{"color": strings.TrimSpace(item.Color)}
-		}
-		series = append(series, seriesItem)
-	}
-
-	yAxis := []map[string]interface{}{
-		{
-			"type": "value",
-			"name": strings.TrimSpace(params.YAxisName),
-		},
-	}
-	if hasRightAxis {
-		rightAxisName := strings.TrimSpace(params.Y2AxisName)
-		if rightAxisName == "" {
-			rightAxisName = "right_axis"
-		}
-		yAxis = append(yAxis, map[string]interface{}{
-			"type": "value",
-			"name": rightAxisName,
-		})
-	}
-
-	option := map[string]interface{}{
-		"title": map[string]interface{}{
-			"text": params.Title,
-			"left": "center",
-			"top":  8,
-			"textStyle": map[string]interface{}{
-				"fontSize":   18,
-				"fontWeight": 700,
-				"color":      "#374151",
-			},
-		},
-		"tooltip": map[string]interface{}{
-			"trigger": "axis",
-		},
-		"legend": map[string]interface{}{
-			"data": legend,
-			"left": "center",
-			"top":  42,
-			"type": "scroll",
-		},
-		"grid": map[string]interface{}{
-			"left":         "7%",
-			"right":        "7%",
-			"bottom":       "8%",
-			"top":          88,
-			"containLabel": true,
-		},
-		"xAxis": map[string]interface{}{
-			"type": "category",
-			"data": params.Categories,
-			"name": strings.TrimSpace(params.XAxisName),
-		},
-		"yAxis":  yAxis,
-		"series": series,
-	}
-	normalized, err := json.Marshal(option)
-	if err != nil {
-		return nil, err
-	}
-	return normalized, nil
-}
-
-func buildPieOption(params createChartParams) (json.RawMessage, error) {
-	if len(params.Values) == 0 {
-		return nil, fmt.Errorf("pie charts require values")
-	}
-
-	legend := append([]string(nil), params.Legend...)
-	pieData := make([]map[string]interface{}, 0, len(params.Values))
-	for i, item := range params.Values {
-		name := strings.TrimSpace(item.Name)
-		if name == "" {
-			return nil, fmt.Errorf("values[%d].name cannot be empty", i)
-		}
-		legend = appendIfMissing(legend, name)
-
-		entry := map[string]interface{}{
-			"name":  name,
-			"value": item.Value,
-		}
-		if strings.TrimSpace(item.Color) != "" {
-			entry["itemStyle"] = map[string]interface{}{"color": strings.TrimSpace(item.Color)}
-		}
-		pieData = append(pieData, entry)
-	}
-
-	option := map[string]interface{}{
-		"title": map[string]interface{}{
-			"text": params.Title,
-			"left": "center",
-			"top":  8,
-			"textStyle": map[string]interface{}{
-				"fontSize":   18,
-				"fontWeight": 700,
-				"color":      "#374151",
-			},
-		},
-		"tooltip": map[string]interface{}{
-			"trigger": "item",
-		},
-		"legend": map[string]interface{}{
-			"data": legend,
-			"left": "center",
-			"top":  42,
-			"type": "scroll",
-		},
-		"series": []map[string]interface{}{
-			{
-				"name":   params.Title,
-				"type":   "pie",
-				"radius": "55%",
-				"data":   pieData,
-			},
-		},
-	}
-	normalized, err := json.Marshal(option)
-	if err != nil {
-		return nil, err
-	}
-	return normalized, nil
-}
-
-func firstNonEmptySeriesType(series []chartSeriesInput, defaultType string) string {
-	for _, item := range series {
-		if value := strings.ToLower(strings.TrimSpace(item.Type)); value != "" {
-			return value
-		}
-	}
-	return defaultType
-}
-
-func appendIfMissing(items []string, value string) []string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return items
-	}
-	for _, existing := range items {
-		if existing == value {
-			return items
-		}
-	}
-	return append(items, value)
 }
 
 func chartValidationFeedback(code, chartID, title, message, detail string) string {
@@ -402,10 +118,6 @@ func chartValidationFeedback(code, chartID, title, message, detail string) strin
 	if detail != "" {
 		payload["detail"] = detail
 	}
-	payload["required_fields"] = []string{"chart_id", "title"}
-	payload["supported_shapes"] = []string{
-		"chart_type + categories + series",
-		"chart_type=pie + values",
-	}
+	payload["required_fields"] = []string{"chart_id", "option"}
 	return toolFailure("report_create_chart", code, message, payload)
 }

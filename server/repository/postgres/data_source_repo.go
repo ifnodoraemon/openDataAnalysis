@@ -2,8 +2,6 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 
@@ -47,11 +45,8 @@ func (r *DataSourceRepository) GetByID(ctx context.Context, id string) (*domain.
 		`SELECT id, workspace_id, name, source_type, status, file_id, created_by, created_at, updated_at FROM data_sources WHERE id = $1`, id,
 	)
 	ds, err := scanDataSource(row)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, sql.ErrNoRows
-	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get data source by id: %w", err)
+		return nil, fmt.Errorf("failed to get data source by id: %w", normalizeLookupError(err))
 	}
 	return ds, nil
 }
@@ -61,11 +56,8 @@ func (r *DataSourceRepository) GetByFileID(ctx context.Context, fileID string) (
 		`SELECT id, workspace_id, name, source_type, status, file_id, created_by, created_at, updated_at FROM data_sources WHERE file_id = $1`, fileID,
 	)
 	ds, err := scanDataSource(row)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get data source by file id: %w", err)
+		return nil, fmt.Errorf("failed to get data source by file id: %w", normalizeLookupError(err))
 	}
 	return ds, nil
 }

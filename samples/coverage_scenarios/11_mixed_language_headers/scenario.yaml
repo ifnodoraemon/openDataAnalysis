@@ -5,12 +5,10 @@ prompt: 请分析各渠道销售和投放效率，说明趋势变化和渠道差
 files:
   - mixed_lang_sales.csv
   - mixed_lang_spend.csv
-expected:
-  should_inspect_schema: true
-  should_auto_map: true
-  should_ask_user: false
-  expected_coverage: sufficient
-  required_mentions:
-    - channel mapped between 渠道 and channel_name
-  forbidden_claims:
-    - channel fields are incompatible
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
+manual_review:
+  - 跨语言字段解释有值域或用户上下文依据。
+  - 不仅凭列名语言差异断言字段不兼容。

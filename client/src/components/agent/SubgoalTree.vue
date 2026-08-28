@@ -43,8 +43,8 @@ const rootGoals = computed(() =>
 <style scoped>
 .subgoal-tree {
   margin: 12px 12px 0 12px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
   overflow: hidden;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
@@ -57,12 +57,12 @@ const rootGoals = computed(() =>
   align-items: center;
   cursor: pointer;
   background: var(--bg-card);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
   transition: background 0.2s;
 }
 
 .tree-header:hover {
-  background: var(--bg-hover);
+  background: var(--bg-card-hover);
 }
 
 .header-title {
@@ -71,7 +71,7 @@ const rootGoals = computed(() =>
   display: flex;
   align-items: center;
   gap: 8px;
-  color: var(--text-primary);
+  color: var(--text-main);
 }
 
 .tree-icon {
@@ -81,7 +81,7 @@ const rootGoals = computed(() =>
 .toggle-btn {
   background: transparent;
   border: none;
-  color: var(--text-secondary);
+  color: var(--text-sub);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -100,7 +100,7 @@ const rootGoals = computed(() =>
 
 .tree-content {
   padding: 8px 12px;
-  background: var(--bg-primary);
+  background: var(--bg-app);
 }
 
 .goal-list {

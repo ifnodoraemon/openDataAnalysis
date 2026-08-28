@@ -15,7 +15,7 @@ func (r *WorkspaceRepository) GetByID(ctx context.Context, workspaceID string) (
 	var workspace domain.Workspace
 	var status string
 	if err := row.Scan(&workspace.ID, &workspace.Name, &workspace.Slug, &workspace.OwnerUserID, &status, &workspace.CreatedAt, &workspace.UpdatedAt); err != nil {
-		return nil, err
+		return nil, normalizeLookupError(err)
 	}
 	workspace.Status = domain.WorkspaceStatus(status)
 	return &workspace, nil

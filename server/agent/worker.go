@@ -3,14 +3,22 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
+	"github.com/ifnodoraemon/openDataAnalysis/internal/jsoncontract"
 	"github.com/ifnodoraemon/openDataAnalysis/tools"
 )
+
+func toolEventEmitterFromContext(ctx tools.ToolContext) func(RuntimeEvent) {
+	if ctx.EmitFunc == nil {
+		return nil
+	}
+	return func(ev RuntimeEvent) { ctx.EmitFunc(ev) }
+}
 
 func init() {
 	tools.RegisterGlobalTool(func(ctx tools.ToolContext) tools.Tool {
@@ -19,72 +27,73 @@ func init() {
 		}
 		var memory *WorkingMemory
 		if ctx.Memory != nil {
-			if typed, ok := ctx.Memory.(*WorkingMemory); ok {
-				memory = typed
+			var ok bool
+			memory, ok = ctx.Memory.(*WorkingMemory)
+			if !ok {
+				panic("tool context memory has an invalid type")
 			}
 		}
+		subgoals, ok := ctx.Subgoals.(*SubgoalManager)
+		if !ok {
+			panic("tool context subgoals has an invalid type")
+		}
 		return &ManageSubgoalsTool{
-			Subgoals: func() *SubgoalManager {
-				if sm, ok := ctx.Subgoals.(*SubgoalManager); ok {
-					return sm
-				}
-				return nil
-			}(),
-			EmitFunc: func(event WSEvent) {
-				if ctx.EmitFunc != nil {
-					ctx.EmitFunc(event)
-				}
-			},
-			Memory: memory,
+			Subgoals: subgoals,
+			EmitFunc: toolEventEmitterFromContext(ctx),
+			Memory:   memory,
 		}
 	})
 	tools.RegisterGlobalTool(func(ctx tools.ToolContext) tools.Tool {
 		var memory *WorkingMemory
 		if ctx.Memory != nil {
-			if typed, ok := ctx.Memory.(*WorkingMemory); ok {
-				memory = typed
+			var ok bool
+			memory, ok = ctx.Memory.(*WorkingMemory)
+			if !ok {
+				panic("tool context memory has an invalid type")
 			}
 		}
 		var subgoals *SubgoalManager
 		if ctx.Subgoals != nil {
-			if sm, ok := ctx.Subgoals.(*SubgoalManager); ok {
-				subgoals = sm
+			var ok bool
+			subgoals, ok = ctx.Subgoals.(*SubgoalManager)
+			if !ok {
+				panic("tool context subgoals has an invalid type")
 			}
 		}
 		return &DelegateTaskTool{
-			BaseRegistry: ctx.DelegateRegistry,
-			EmitFunc: func(event WSEvent) {
-				if ctx.EmitFunc != nil {
-					ctx.EmitFunc(event)
-				}
-			},
-			Memory:   memory,
-			Subgoals: subgoals,
+			RegistryFactory: ctx.DelegateRegistryFactory,
+			EmitFunc:        toolEventEmitterFromContext(ctx),
+			Memory:          memory,
+			Subgoals:        subgoals,
 		}
 	})
 }
 
 type ManageSubgoalsTool struct {
 	Subgoals *SubgoalManager
-	EmitFunc func(WSEvent)
+	EmitFunc func(RuntimeEvent)
 	Memory   *WorkingMemory
 }
 
-func (t *ManageSubgoalsTool) SetEventEmitter(emit func(WSEvent)) {
+func (t *ManageSubgoalsTool) SetEventEmitter(emit func(RuntimeEvent)) {
 	t.EmitFunc = emit
 }
 
 func (t *ManageSubgoalsTool) Name() string {
 	return "goal_manage"
 }
+func (t *ManageSubgoalsTool) Capability() tools.ToolCapability {
+	return tools.ToolCapability{Mode: "action", RuntimeEnabled: true}
+}
 
 func (t *ManageSubgoalsTool) Description() string {
-	return "Record or update node states in the goal tree. Supports add, complete, reject; only modifies goal state, does not execute tasks. Added goals are non-blocking scratchpad notes unless blocking=true is provided. Returns the changed goal_id and current goal tree facts."
+	return "Record or update node states in the goal tree. Supports add, complete, reject; only modifies goal state and does not execute tasks. The caller explicitly sets blocking for each added goal; a blocking root branch gates report finalization until terminal. Returns the changed goal_id and current goal tree facts."
 }
 
 func (t *ManageSubgoalsTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
+		"additionalProperties": false,
 		"properties": {
 			"action": {
 				"type": "string",
@@ -101,7 +110,7 @@ func (t *ManageSubgoalsTool) Parameters() json.RawMessage {
 			},
 			"blocking": {
 				"type": "boolean",
-				"description": "Optional, only for action=add. When true on a root goal, report_finalize is blocked until that goal branch is terminal. Defaults to false for scratchpad goals."
+				"description": "Required for action=add. When true on a root goal, report_finalize is blocked until that goal branch is terminal."
 			},
 			"goal_id": {
 				"type": "string",
@@ -120,16 +129,19 @@ func (t *ManageSubgoalsTool) Execute(args json.RawMessage) (string, error) {
 	if t.Subgoals == nil {
 		return "", fmt.Errorf("subgoal manager is not initialized")
 	}
+	if t.EmitFunc == nil {
+		return "", fmt.Errorf("goal update event emitter is not initialized")
+	}
 
 	var payload struct {
 		Action       string `json:"action"`
 		Description  string `json:"description"`
 		ParentGoalID string `json:"parent_goal_id"`
-		Blocking     bool   `json:"blocking"`
+		Blocking     *bool  `json:"blocking"`
 		GoalID       string `json:"goal_id"`
 		Result       string `json:"result"`
 	}
-	if err := json.Unmarshal(args, &payload); err != nil {
+	if err := jsoncontract.Decode(args, &payload); err != nil {
 		return "", fmt.Errorf("invalid arguments: %v", err)
 	}
 
@@ -138,14 +150,20 @@ func (t *ManageSubgoalsTool) Execute(args json.RawMessage) (string, error) {
 		if payload.Description == "" {
 			return "", fmt.Errorf("description is required for add action")
 		}
-		id, addErr := t.Subgoals.AddGoalWithBlocking(payload.Description, payload.ParentGoalID, payload.Blocking)
+		if payload.Blocking == nil {
+			return "", fmt.Errorf("blocking must be explicitly true or false for add action")
+		}
+		if payload.ParentGoalID != strings.TrimSpace(payload.ParentGoalID) {
+			return "", fmt.Errorf("parent_goal_id must be an exact value")
+		}
+		id, addErr := t.Subgoals.AddGoalWithBlocking(payload.Description, payload.ParentGoalID, *payload.Blocking)
 		if addErr != nil {
 			result := map[string]interface{}{
 				"ok":         false,
 				"tool":       "goal_manage",
 				"action":     "add",
 				"error":      addErr.Error(),
-				"ui_summary": fmt.Sprintf("Goal creation failed: %v", addErr),
+				"ui_summary": fmt.Sprintf("目标创建失败：%v", addErr),
 			}
 			return marshalToolPayload(result)
 		}
@@ -157,15 +175,18 @@ func (t *ManageSubgoalsTool) Execute(args json.RawMessage) (string, error) {
 		result["goal_id"] = id
 		result["status"] = StatusPending
 		result["description"] = payload.Description
-		result["blocking"] = payload.Blocking
-		if strings.TrimSpace(payload.ParentGoalID) != "" {
+		result["blocking"] = *payload.Blocking
+		if payload.ParentGoalID != "" {
 			result["parent_goal_id"] = payload.ParentGoalID
 		}
-		result["ui_summary"] = fmt.Sprintf("Goal %s recorded.", id)
+		result["ui_summary"] = fmt.Sprintf("目标 %s 已记录。", id)
 		return marshalToolPayload(result)
 	case "complete":
-		if payload.GoalID == "" {
+		if payload.GoalID == "" || payload.GoalID != strings.TrimSpace(payload.GoalID) {
 			return "", fmt.Errorf("goal_id is required for complete action")
+		}
+		if strings.TrimSpace(payload.Result) == "" {
+			return "", fmt.Errorf("result is required for complete action")
 		}
 		if err := t.Subgoals.UpdateGoalStatus(payload.GoalID, StatusComplete, payload.Result); err != nil {
 			return "", err
@@ -178,11 +199,14 @@ func (t *ManageSubgoalsTool) Execute(args json.RawMessage) (string, error) {
 		result["goal_id"] = payload.GoalID
 		result["status"] = StatusComplete
 		result["result"] = payload.Result
-		result["ui_summary"] = fmt.Sprintf("Goal %s marked as complete.", payload.GoalID)
+		result["ui_summary"] = fmt.Sprintf("目标 %s 已标记为完成。", payload.GoalID)
 		return marshalToolPayload(result)
 	case "reject":
-		if payload.GoalID == "" {
+		if payload.GoalID == "" || payload.GoalID != strings.TrimSpace(payload.GoalID) {
 			return "", fmt.Errorf("goal_id is required for reject action")
+		}
+		if strings.TrimSpace(payload.Result) == "" {
+			return "", fmt.Errorf("result is required for reject action")
 		}
 		if err := t.Subgoals.UpdateGoalStatus(payload.GoalID, StatusRejected, payload.Result); err != nil {
 			return "", err
@@ -195,7 +219,7 @@ func (t *ManageSubgoalsTool) Execute(args json.RawMessage) (string, error) {
 		result["goal_id"] = payload.GoalID
 		result["status"] = StatusRejected
 		result["result"] = payload.Result
-		result["ui_summary"] = fmt.Sprintf("Goal %s marked as rejected.", payload.GoalID)
+		result["ui_summary"] = fmt.Sprintf("目标 %s 已标记为拒绝。", payload.GoalID)
 		return marshalToolPayload(result)
 	default:
 		return "", fmt.Errorf("unknown action: %s", payload.Action)
@@ -203,19 +227,15 @@ func (t *ManageSubgoalsTool) Execute(args json.RawMessage) (string, error) {
 }
 
 func (t *ManageSubgoalsTool) emitUpdate() {
-	if t.EmitFunc == nil {
-		return
-	}
-	t.EmitFunc(WSEvent{
+	t.EmitFunc(RuntimeEvent{
 		Type: EventStateSubgoalsUpdated,
 		Data: map[string]interface{}{"goals": t.Subgoals.ListAll()},
 	})
 }
 
 type DelegateTaskTool struct {
-	BaseRegistry    *tools.Registry
-	RegistryFactory func([]string) *tools.Registry
-	EmitFunc        func(WSEvent)
+	RegistryFactory tools.RegistryFactory
+	EmitFunc        func(RuntimeEvent)
 	ParentContext   context.Context
 	Memory          *WorkingMemory
 	Subgoals        *SubgoalManager
@@ -226,7 +246,7 @@ type delegateTraceItem struct {
 	Summary string `json:"summary"`
 }
 
-func (t *DelegateTaskTool) SetEventEmitter(emit func(WSEvent)) {
+func (t *DelegateTaskTool) SetEventEmitter(emit func(RuntimeEvent)) {
 	t.EmitFunc = emit
 }
 
@@ -237,14 +257,18 @@ func (t *DelegateTaskTool) SetExecutionContext(ctx context.Context) {
 func (t *DelegateTaskTool) Name() string {
 	return "task_delegate"
 }
+func (t *DelegateTaskTool) Capability() tools.ToolCapability {
+	return tools.ToolCapability{Mode: "action", RuntimeEnabled: true}
+}
 
 func (t *DelegateTaskTool) Description() string {
-	return "Create a constrained sub-agent and execute a specified task. Reads role_name, task_instruction, allowed_tools, and optional goal_id/policy_appendix; allowed_tools only describes the tool boundary visible to the sub-agent; user_request_input and report_finalize cannot be delegated. On success returns child_run_id, child_result, trace_count, and child_run_status; detailed child trace is persisted for UI/debug instead of being returned to the parent context."
+	return "Create a constrained sub-agent and execute a specified task. allowed_tools is intersected with tools whose capability contract declares delegable=true. Returns child status plus structured result IDs, artifact IDs, and tool failures collected during execution; detailed trace remains persisted for UI/debug."
 }
 
 func (t *DelegateTaskTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
+		"additionalProperties": false,
 		"properties": {
 			"role_name": {
 				"type": "string",
@@ -261,7 +285,7 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 			"allowed_tools": {
 				"type": "array",
 				"items": {"type": "string"},
-				"description": "List of tools the sub-agent is allowed to use. Cannot include user_request_input or report_finalize."
+				"description": "Requested tool capability names. The runtime returns unavailable or non-delegable names as facts."
 			},
 			"goal_id": {
 				"type": "string",
@@ -273,8 +297,8 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 }
 
 func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
-	if t.BaseRegistry == nil && t.RegistryFactory == nil {
-		return delegateToolFailure("", "", "", nil, "", "delegate_registry_missing", "delegate base registry is not configured", nil), nil
+	if t.RegistryFactory == nil {
+		return delegateToolFailure("", "", "", nil, "", "delegate_registry_missing", "delegate registry factory is not configured", nil)
 	}
 
 	var payload struct {
@@ -284,38 +308,60 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 		AllowedTools    []string `json:"allowed_tools"`
 		GoalID          string   `json:"goal_id"`
 	}
-	if err := json.Unmarshal(args, &payload); err != nil {
-		return delegateToolFailure("", "", "", nil, "", "invalid_arguments", fmt.Sprintf("invalid arguments: %v", err), nil), nil
+	if err := jsoncontract.Decode(args, &payload); err != nil {
+		return delegateToolFailure("", "", "", nil, "", "invalid_arguments", fmt.Sprintf("invalid arguments: %v", err), nil)
 	}
 	if strings.TrimSpace(payload.RoleName) == "" {
-		return delegateToolFailure("", "", payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "missing_role_name", "role_name is required", nil), nil
+		return delegateToolFailure("", "", payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "missing_role_name", "role_name is required", nil)
 	}
 	if strings.TrimSpace(payload.TaskInstruction) == "" {
-		return delegateToolFailure("", payload.RoleName, "", payload.AllowedTools, payload.GoalID, "missing_task_instruction", "task_instruction is required", nil), nil
+		return delegateToolFailure("", payload.RoleName, "", payload.AllowedTools, payload.GoalID, "missing_task_instruction", "task_instruction is required", nil)
 	}
 	if len(payload.AllowedTools) == 0 {
-		return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, nil, payload.GoalID, "missing_allowed_tools", "allowed_tools is required", nil), nil
+		return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, nil, payload.GoalID, "missing_allowed_tools", "allowed_tools is required", nil)
 	}
-	if forbidden := disallowedDelegateTools(payload.AllowedTools); len(forbidden) > 0 {
-		return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "disallowed_delegate_tools", "delegate cannot use these tools: "+strings.Join(forbidden, ", "), map[string]interface{}{
-			"disallowed_tools": forbidden,
-		}), nil
+	if payload.RoleName != strings.TrimSpace(payload.RoleName) || payload.GoalID != strings.TrimSpace(payload.GoalID) {
+		return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "non_exact_identifier", "role_name and goal_id must use exact values", nil)
+	}
+	seenAllowedTools := make(map[string]struct{}, len(payload.AllowedTools))
+	for _, requested := range payload.AllowedTools {
+		if requested == "" || requested != strings.TrimSpace(requested) {
+			return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "non_exact_tool_name", "allowed_tools must contain non-empty exact names", nil)
+		}
+		if _, exists := seenAllowedTools[requested]; exists {
+			return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "duplicate_tool_name", "allowed_tools must not contain duplicates", map[string]interface{}{"tool_name": requested})
+		}
+		seenAllowedTools[requested] = struct{}{}
 	}
 	if err := validatePolicyAppendix(payload.PolicyAppendix); err != nil {
-		return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "policy_appendix_invalid", err.Error(), nil), nil
+		return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "policy_appendix_invalid", err.Error(), nil)
 	}
 
 	subReg := t.buildDelegateRegistry(payload.AllowedTools)
+	if subReg == nil {
+		return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "delegate_registry_unavailable", "delegate registry factory returned no registry", nil)
+	}
+	resolved := make(map[string]struct{})
+	for _, tool := range subReg.ListTools() {
+		resolved[tool.Name()] = struct{}{}
+	}
+	var unavailable []string
+	for _, requested := range payload.AllowedTools {
+		if _, ok := resolved[requested]; !ok {
+			unavailable = append(unavailable, requested)
+		}
+	}
+	if len(unavailable) > 0 {
+		return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "tools_not_delegable", "one or more requested tools are unknown, unavailable, or not delegable", map[string]interface{}{"unavailable_tools": unavailable})
+	}
 	if len(subReg.ListTools()) == 0 {
-		return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "no_allowed_tools_resolved", "no allowed tools resolved for delegate", nil), nil
+		return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "no_allowed_tools_resolved", "no allowed tools resolved for delegate", nil)
 	}
 
 	parentCtx := t.ParentContext
 	if parentCtx == nil {
-		parentCtx = context.Background()
+		return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "execution_context_missing", "delegate execution context is not initialized", nil)
 	}
-	parentEmit := t.EmitFunc
-
 	ctx := parentCtx
 	const delegateMaxDuration = 5 * time.Minute
 	var cancel context.CancelFunc
@@ -324,10 +370,27 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 
 	emit := t.EmitFunc
 	if emit == nil {
-		emit = func(WSEvent) {}
+		return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "event_emitter_missing", "delegate event emitter is not initialized", nil)
 	}
 	persistence := DelegateRunPersistenceFromContext(ctx)
+	if persistence == nil {
+		return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "child_run_persistence_missing", "delegate child-run persistence is not initialized", nil)
+	}
 	childRunID := ""
+	childEmit := func(ev RuntimeEvent) {
+		if childRunID != "" && ev.RunID == "" {
+			ev.RunID = childRunID
+		}
+		emit(ev)
+	}
+	if payload.GoalID != "" {
+		if t.Subgoals == nil {
+			return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "goal_store_missing", "goal_id was provided but the goal store is unavailable", nil)
+		}
+		if !t.Subgoals.HasGoal(payload.GoalID) {
+			return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "goal_not_found", "goal_id does not identify an existing goal", nil)
+		}
+	}
 	if persistence != nil {
 		var err error
 		childRunID, err = persistence.StartChildRun(ctx, ChildRunStart{
@@ -338,7 +401,10 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 			AllowedTools: payload.AllowedTools,
 		})
 		if err != nil {
-			return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "child_run_start_failed", fmt.Sprintf("failed to start child run: %v", err), nil), nil
+			return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "child_run_start_failed", fmt.Sprintf("failed to start child run: %v", err), nil)
+		}
+		if childRunID == "" || childRunID != strings.TrimSpace(childRunID) {
+			return delegateToolFailure("", payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "child_run_identity_invalid", "delegate persistence returned an invalid child run ID", nil)
 		}
 	}
 	childCtx := ctx
@@ -351,66 +417,51 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 			TraceID:     childRunID,
 		}
 		childCtx = WithTraceMetadata(ctx, childMeta)
+		parentExecutionMeta := tools.ExecutionMetadataFromContext(ctx)
 		childCtx = tools.WithExecutionMetadata(childCtx, tools.ExecutionMetadata{
+			UserID:      parentExecutionMeta.UserID,
 			WorkspaceID: parentMeta.WorkspaceID,
 			SessionID:   parentMeta.SessionID,
 			RunID:       childRunID,
 		})
 	}
-	childEmit := func(ev WSEvent) {
-		if strings.TrimSpace(childRunID) != "" && strings.TrimSpace(ev.RunID) == "" {
-			ev.RunID = childRunID
-		}
-		emit(ev)
-	}
 	prepareRegistryRuntimeTools(subReg, childCtx, childEmit)
-	defer t.restoreParentRegistryRuntimeTools(parentCtx, parentEmit)
-
-	if t.Subgoals != nil && payload.GoalID != "" {
-		if err := t.Subgoals.UpdateGoalStatus(payload.GoalID, StatusRunning, ""); err == nil {
-			childEmit(WSEvent{
-				Type: EventStateSubgoalsUpdated,
-				Data: map[string]interface{}{"goals": t.Subgoals.ListAll()},
-			})
-		}
-	}
 
 	childPrompt := BuildPolicyPrompt()
 	llmClient := NewLLMClient()
 	bundle := &PromptBundle{
 		Policy:         childPrompt,
-		PolicyAppendix: strings.TrimSpace(payload.PolicyAppendix),
+		PolicyAppendix: payload.PolicyAppendix,
 		Task:           payload.TaskInstruction,
 	}
 	toolSpecs := subReg.GetToolSpecs()
 	trace := make([]delegateTraceItem, 0, 12)
+	evidence := delegateEvidence{}
 
 	const maxWorkerIterations = 25
 	totalPromptTokens := 0
 	totalCompletionTokens := 0
 	for i := 0; i < maxWorkerIterations; i++ {
 		if childCtx.Err() != nil {
-			if t.Subgoals != nil && payload.GoalID != "" {
-				_ = t.Subgoals.UpdateGoalStatus(payload.GoalID, StatusPending, "task cancelled")
-				childEmit(WSEvent{
-					Type: EventStateSubgoalsUpdated,
-					Data: map[string]interface{}{"goals": t.Subgoals.ListAll()},
-				})
-			}
+			var cleanupErrors []error
 			if persistence != nil && childRunID != "" {
 				cancelMsg := "task cancelled"
-				// 使用独立的 Background context 确保取消后仍能写入 DB
-				bgCtx := context.Background()
-				logPersistErr("UpdateChildRunStatus", persistence.UpdateChildRunStatus(bgCtx, childRunID, string(domain.RunStatusCancelled), &cancelMsg))
-				// 补充 ISSUE5 修复：取消时也记录已累计的 token 消耗
-				logPersistErr("UpdateChildRunTokens", persistence.UpdateChildRunTokens(bgCtx, childRunID, totalPromptTokens, totalCompletionTokens))
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+				if err := persistence.UpdateChildRunStatus(cleanupCtx, childRunID, string(domain.RunStatusCancelled), &cancelMsg); err != nil {
+					cleanupErrors = append(cleanupErrors, fmt.Errorf("persist cancelled child status: %w", err))
+				}
+				if err := persistence.UpdateChildRunTokens(cleanupCtx, childRunID, totalPromptTokens, totalCompletionTokens); err != nil {
+					cleanupErrors = append(cleanupErrors, fmt.Errorf("persist child tokens: %w", err))
+				}
+				cleanupCancel()
+				childEmit(RuntimeEvent{Type: EventRunCancelled, RunID: childRunID, Data: ErrorData{Message: "任务已取消"}})
 			}
-			return "", childCtx.Err()
+			return "", errors.Join(append([]error{childCtx.Err()}, cleanupErrors...)...)
 		}
 
 		resp, err := llmClient.ChatWithTools(childCtx, bundle, toolSpecs)
 		if err == nil {
-			// 累计 token 消耗，并触发上下文压缩
+			// 累计 token 消耗，并按结构窗口压缩历史。
 			totalPromptTokens += resp.Usage.PromptTokens
 			totalCompletionTokens += resp.Usage.CompletionTokens
 
@@ -421,57 +472,48 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 				})
 				bundle.Task = ""
 			}
-			// ISSUE6 注释：
-			// 注意，这里的 compactWorkerBundle 逻辑与 engine.go 中的 compactMessagesLocked 不同。
-			// 主代理由于需要维护长期存在的 Session，会执行较激进的压缩（提炼 Digest、保留少数最近的对话）；
-			// 而子代理 (worker) 的生命周期较短，关注点更内聚。为了避免中间过程的细节事实在频繁提炼中丢失，
-			// 我们通常采取较温和的滑动窗口策略（例如仅截断较早轮次，而不强制使用大范围摘要压缩）。
+			// 子任务仅记录被省略的消息数量，不生成运行时语义摘要。
 			compactWorkerBundle(bundle, resp.Usage.PromptTokens)
 		}
 		if err != nil {
-			if t.Subgoals != nil && payload.GoalID != "" {
-				_ = t.Subgoals.UpdateGoalStatus(payload.GoalID, StatusPending, err.Error())
-				childEmit(WSEvent{
-					Type: EventStateSubgoalsUpdated,
-					Data: map[string]interface{}{"goals": t.Subgoals.ListAll()},
-				})
-			}
+			var stateErrors []string
 			if persistence != nil && childRunID != "" {
 				msg := err.Error()
-				logPersistErr("UpdateChildRunStatus", persistence.UpdateChildRunStatus(childCtx, childRunID, string(domain.RunStatusFailed), &msg))
-				logPersistErr("UpdateChildRunTokens", persistence.UpdateChildRunTokens(childCtx, childRunID, totalPromptTokens, totalCompletionTokens))
+				stateErrors = append(stateErrors, persistDelegateFailure(persistence, childCtx, childRunID, domain.RunStatusFailed, &msg, totalPromptTokens, totalCompletionTokens)...)
 			}
-			return delegateToolFailure(childRunID, payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "delegate_execution_failed", fmt.Sprintf("delegated agent failed: %v", err), map[string]interface{}{
-				"child_run_status": string(domain.RunStatusFailed),
-			}), nil
+			return delegateToolFailure(childRunID, payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "delegate_execution_failed", fmt.Sprintf("delegated agent failed: %v", err), delegateStatusFacts(domain.RunStatusFailed, stateErrors))
 		}
 		if len(resp.Choices) == 0 {
+			var stateErrors []string
 			if persistence != nil && childRunID != "" {
 				msg := "delegated agent returned no response"
-				logPersistErr("UpdateChildRunStatus", persistence.UpdateChildRunStatus(childCtx, childRunID, string(domain.RunStatusFailed), &msg))
+				stateErrors = append(stateErrors, persistDelegateFailure(persistence, childCtx, childRunID, domain.RunStatusFailed, &msg, totalPromptTokens, totalCompletionTokens)...)
 			}
-			return delegateToolFailure(childRunID, payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "delegate_no_response", "delegated agent returned no response", map[string]interface{}{
-				"child_run_status": string(domain.RunStatusFailed),
-			}), nil
+			return delegateToolFailure(childRunID, payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "delegate_no_response", "delegated agent returned no response", delegateStatusFacts(domain.RunStatusFailed, stateErrors))
 		}
 
 		choice := resp.Choices[0]
 		if choice.Message.Content != "" {
-			content := strings.TrimSpace(choice.Message.Content)
+			content := choice.Message.Content
 			trace = append(trace, delegateTraceItem{Kind: "assistant_status", Summary: clipText(content, 160)})
-			ev := WSEvent{Type: EventAssistantStatus, RunID: childRunID, Data: AssistantStatusData{Content: content}}
+			ev := RuntimeEvent{Type: EventAssistantStatus, RunID: childRunID, Data: AssistantStatusData{Content: content}}
 			childEmit(ev)
 		}
 
 		if choice.FinishReason == LLMFinishReasonStop && len(choice.Message.ToolCalls) == 0 {
-			result := strings.TrimSpace(choice.Message.Content)
-			childEmit(WSEvent{Type: EventRunCompleted, RunID: childRunID, Data: CompleteData{Summary: result}})
+			result := choice.Message.Content
 			if persistence != nil && childRunID != "" {
-				logPersistErr("UpdateChildRunSummary", persistence.UpdateChildRunSummary(childCtx, childRunID, result))
-				logPersistErr("UpdateChildRunStatus", persistence.UpdateChildRunStatus(childCtx, childRunID, string(domain.RunStatusCompleted), nil))
-				logPersistErr("UpdateChildRunTokens", persistence.UpdateChildRunTokens(childCtx, childRunID, totalPromptTokens, totalCompletionTokens))
+				stateErrors := persistDelegateCompletion(persistence, childCtx, childRunID, result, totalPromptTokens, totalCompletionTokens)
+				if len(stateErrors) > 0 {
+					return delegateToolFailure(childRunID, payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "child_run_persistence_failed", "delegated agent finished but its terminal state was not durably persisted", map[string]interface{}{
+						"child_result":            result,
+						"child_run_status_target": string(domain.RunStatusCompleted),
+						"persistence_errors":      stateErrors,
+					})
+				}
 			}
-			return delegateToolSuccess(childRunID, payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, result, trace), nil
+			childEmit(RuntimeEvent{Type: EventRunCompleted, RunID: childRunID, Data: CompleteData{Summary: result}})
+			return delegateToolSuccess(childRunID, payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, result, trace, evidence)
 		}
 
 		if len(choice.Message.ToolCalls) == 0 {
@@ -484,7 +526,7 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 				Kind:    "tool_call",
 				Summary: fmt.Sprintf("%s(%s)", toolCall.Function.Name, clipText(toolCall.Function.Arguments, 120)),
 			})
-			callEv := WSEvent{
+			callEv := RuntimeEvent{
 				Type:  EventToolCall,
 				RunID: childRunID,
 				Data: ToolCallData{
@@ -496,29 +538,48 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 			childEmit(callEv)
 
 			start := time.Now()
-			// 修复 #13：子代理工具调用与主代理保持一致，走 retryableToolExec 指数退避重试
+			// 子任务复用同一份类型化瞬态错误重试边界。
 			result, execErr := retryableToolExec(childCtx, subReg, toolCall.Function.Name, json.RawMessage(toolCall.Function.Arguments))
 			duration := time.Since(start).Milliseconds()
+			result, success, contractErr := normalizeToolExecutionResult(toolCall.Function.Name, result, execErr)
+			if contractErr != nil {
+				execErr = contractErr
+			}
 
-			if execErr != nil {
+			if !success {
+				detail := result
+				if execErr != nil {
+					detail = execErr.Error()
+				}
+				evidence.ToolFailures = append(evidence.ToolFailures, map[string]string{"tool": toolCall.Function.Name, "detail": clipText(detail, 300)})
 				trace = append(trace, delegateTraceItem{
 					Kind:    "tool_error",
-					Summary: fmt.Sprintf("%s failed: %s", toolCall.Function.Name, clipText(execErr.Error(), 160)),
+					Summary: fmt.Sprintf("%s failed: %s", toolCall.Function.Name, clipText(detail, 160)),
 				})
-				resultEv := WSEvent{Type: EventToolResult, RunID: childRunID, Data: ToolResultData{
+				resultEv := RuntimeEvent{Type: EventToolResult, RunID: childRunID, Data: ToolResultData{
 					ID:       toolCall.ID,
 					Name:     toolCall.Function.Name,
-					Result:   delegateChildToolFailure(toolCall.Function.Name, execErr.Error()),
+					Result:   result,
 					Success:  false,
 					Duration: duration,
 				}}
 				childEmit(resultEv)
 				bundle.History = append(bundle.History, ConversationItem{
-					Role:       LLMRoleTool,
-					Content:    delegateChildToolFailure(toolCall.Function.Name, execErr.Error()),
-					ToolCallID: toolCall.ID,
+					Role:         LLMRoleTool,
+					Content:      result,
+					ToolCallID:   toolCall.ID,
 					ToolCallName: toolCall.Function.Name,
 				})
+				continue
+			}
+			if evidenceErr := collectDelegateEvidence(result, &evidence); evidenceErr != nil {
+				evidence.ToolFailures = append(evidence.ToolFailures, map[string]string{"tool": toolCall.Function.Name, "detail": evidenceErr.Error()})
+				failureResult, marshalErr := delegateChildToolFailure(toolCall.Function.Name, "invalid structured tool result: "+evidenceErr.Error())
+				if marshalErr != nil {
+					return "", fmt.Errorf("failed to encode delegated tool contract failure: %w", marshalErr)
+				}
+				childEmit(RuntimeEvent{Type: EventToolResult, RunID: childRunID, Data: ToolResultData{ID: toolCall.ID, Name: toolCall.Function.Name, Result: failureResult, Success: false, Duration: duration}})
+				bundle.History = append(bundle.History, ConversationItem{Role: LLMRoleTool, Content: failureResult, ToolCallID: toolCall.ID, ToolCallName: toolCall.Function.Name})
 				continue
 			}
 
@@ -526,7 +587,7 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 				Kind:    "tool_result",
 				Summary: fmt.Sprintf("%s ok: %s", toolCall.Function.Name, clipDelegateToolResult(result, 160)),
 			})
-			resultEv := WSEvent{Type: EventToolResult, RunID: childRunID, Data: ToolResultData{
+			resultEv := RuntimeEvent{Type: EventToolResult, RunID: childRunID, Data: ToolResultData{
 				ID:       toolCall.ID,
 				Name:     toolCall.Function.Name,
 				Result:   result,
@@ -535,9 +596,9 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 			}}
 			childEmit(resultEv)
 			bundle.History = append(bundle.History, ConversationItem{
-				Role:       LLMRoleTool,
-				Content:    result,
-				ToolCallID: toolCall.ID,
+				Role:         LLMRoleTool,
+				Content:      result,
+				ToolCallID:   toolCall.ID,
 				ToolCallName: toolCall.Function.Name,
 			})
 		}
@@ -545,22 +606,51 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 
 	if persistence != nil && childRunID != "" {
 		msg := fmt.Sprintf("delegated agent %s max iterations reached", payload.RoleName)
-		logPersistErr("UpdateChildRunStatus", persistence.UpdateChildRunStatus(childCtx, childRunID, string(domain.RunStatusFailed), &msg))
-		logPersistErr("UpdateChildRunTokens", persistence.UpdateChildRunTokens(childCtx, childRunID, totalPromptTokens, totalCompletionTokens))
+		stateErrors := persistDelegateFailure(persistence, childCtx, childRunID, domain.RunStatusFailed, &msg, totalPromptTokens, totalCompletionTokens)
+		return delegateToolFailure(childRunID, payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "delegate_max_iterations_reached", msg, delegateStatusFacts(domain.RunStatusFailed, stateErrors))
 	}
 	return delegateToolFailure(childRunID, payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "delegate_max_iterations_reached", fmt.Sprintf("delegated agent %s max iterations reached", payload.RoleName), map[string]interface{}{
-		"child_run_status": string(domain.RunStatusFailed),
-	}), nil
+		"child_run_status_target": string(domain.RunStatusFailed),
+	})
 }
 
-func (t *DelegateTaskTool) restoreParentRegistryRuntimeTools(ctx context.Context, emit func(WSEvent)) {
-	if t.BaseRegistry == nil {
-		return
+func persistDelegateFailure(persistence DelegateRunPersistence, ctx context.Context, childRunID string, status domain.RunStatus, message *string, promptTokens, completionTokens int) []string {
+	var failures []string
+	if err := persistence.UpdateChildRunStatus(ctx, childRunID, string(status), message); err != nil {
+		failures = append(failures, "update child status: "+err.Error())
 	}
-	prepareRegistryRuntimeTools(t.BaseRegistry, ctx, emit)
+	if err := persistence.UpdateChildRunTokens(ctx, childRunID, promptTokens, completionTokens); err != nil {
+		failures = append(failures, "update child tokens: "+err.Error())
+	}
+	return failures
 }
 
-func delegateToolSuccess(childRunID, roleName, taskInstruction string, allowedTools []string, goalID, summary string, trace []delegateTraceItem) string {
+func persistDelegateCompletion(persistence DelegateRunPersistence, ctx context.Context, childRunID, summary string, promptTokens, completionTokens int) []string {
+	var failures []string
+	if err := persistence.UpdateChildRunSummary(ctx, childRunID, summary); err != nil {
+		failures = append(failures, "update child summary: "+err.Error())
+	}
+	failures = append(failures, persistDelegateFailure(persistence, ctx, childRunID, domain.RunStatusCompleted, nil, promptTokens, completionTokens)...)
+	return failures
+}
+
+func delegateStatusFacts(status domain.RunStatus, persistenceErrors []string) map[string]interface{} {
+	facts := map[string]interface{}{"child_run_status_target": string(status)}
+	if len(persistenceErrors) == 0 {
+		facts["child_run_status"] = string(status)
+	} else {
+		facts["persistence_errors"] = persistenceErrors
+	}
+	return facts
+}
+
+type delegateEvidence struct {
+	ResultIDs    []string
+	ArtifactIDs  []string
+	ToolFailures []map[string]string
+}
+
+func delegateToolSuccess(childRunID, roleName, taskInstruction string, allowedTools []string, goalID, summary string, trace []delegateTraceItem, evidence delegateEvidence) (string, error) {
 	payload := map[string]interface{}{
 		"ok":               true,
 		"tool":             "task_delegate",
@@ -570,20 +660,67 @@ func delegateToolSuccess(childRunID, roleName, taskInstruction string, allowedTo
 		"allowed_tools":    allowedTools,
 		"child_result":     summary,
 		"child_run_status": string(domain.RunStatusCompleted),
-		"ui_summary":       fmt.Sprintf("Sub-agent %s completed: %s", roleName, summary),
+		"ui_summary":       fmt.Sprintf("子智能体 %s 已完成：%s", roleName, summary),
 		"trace_count":      len(trace),
+		"result_ids":       evidence.ResultIDs,
+		"artifact_ids":     evidence.ArtifactIDs,
+		"tool_failures":    evidence.ToolFailures,
 	}
-	if strings.TrimSpace(goalID) != "" {
+	if goalID != "" {
 		payload["goal_id"] = goalID
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
-		return `{"ok":false,"tool":"task_delegate","message":"delegate response marshal failed"}`
+		return "", err
 	}
-	return string(encoded)
+	return string(encoded), nil
 }
 
-func delegateToolFailure(childRunID, roleName, taskInstruction string, allowedTools []string, goalID, code, message string, extra map[string]interface{}) string {
+func collectDelegateEvidence(raw string, evidence *delegateEvidence) error {
+	if evidence == nil {
+		return fmt.Errorf("delegate evidence collector is unavailable")
+	}
+	var payload map[string]interface{}
+	if err := jsoncontract.Decode([]byte(raw), &payload); err != nil {
+		return err
+	}
+	if value, exists := payload["result_id"]; exists {
+		id, ok := value.(string)
+		if !ok || id == "" || id != strings.TrimSpace(id) {
+			return fmt.Errorf("result_id must be a non-empty exact string")
+		}
+		evidence.ResultIDs = appendUniqueString(evidence.ResultIDs, id)
+	}
+	if value, exists := payload["artifacts"]; exists {
+		artifacts, ok := value.([]interface{})
+		if !ok {
+			return fmt.Errorf("artifacts must be an array")
+		}
+		for _, item := range artifacts {
+			object, ok := item.(map[string]interface{})
+			if !ok {
+				return fmt.Errorf("artifact entries must be objects")
+			}
+			id, ok := object["id"].(string)
+			if !ok || id == "" || id != strings.TrimSpace(id) {
+				return fmt.Errorf("artifact id must be a non-empty exact string")
+			}
+			evidence.ArtifactIDs = appendUniqueString(evidence.ArtifactIDs, id)
+		}
+	}
+	return nil
+}
+
+func appendUniqueString(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func delegateToolFailure(childRunID, roleName, taskInstruction string, allowedTools []string, goalID, code, message string, extra map[string]interface{}) (string, error) {
 	payload := map[string]interface{}{
 		"ok":               false,
 		"tool":             "task_delegate",
@@ -592,7 +729,7 @@ func delegateToolFailure(childRunID, roleName, taskInstruction string, allowedTo
 		"delegate_role":    roleName,
 		"task_instruction": taskInstruction,
 		"allowed_tools":    allowedTools,
-		"ui_summary":       fmt.Sprintf("Sub-agent %s failed.", roleName),
+		"ui_summary":       fmt.Sprintf("子智能体 %s 执行失败。", roleName),
 	}
 	if strings.TrimSpace(childRunID) != "" {
 		payload["child_run_id"] = childRunID
@@ -601,32 +738,23 @@ func delegateToolFailure(childRunID, roleName, taskInstruction string, allowedTo
 		payload["goal_id"] = goalID
 	}
 	if strings.TrimSpace(roleName) == "" {
-		payload["ui_summary"] = "Sub-agent failed."
+		payload["ui_summary"] = "子智能体执行失败。"
 	}
 	for key, value := range extra {
 		payload[key] = value
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
-		return `{"ok":false,"tool":"task_delegate","error_code":"delegate_response_marshal_failed","message":"delegate response marshal failed"}`
+		return "", err
 	}
-	return string(encoded)
+	return string(encoded), nil
 }
 
 func (t *DelegateTaskTool) buildDelegateRegistry(allowed []string) *tools.Registry {
-	if t.RegistryFactory != nil {
-		return t.RegistryFactory(allowed)
-	}
-	if t.BaseRegistry == nil {
-		return tools.NewRegistry()
-	}
-	return t.BaseRegistry.CloneFiltered(allowed)
+	return t.RegistryFactory(allowed)
 }
 
-func prepareRegistryRuntimeTools(reg *tools.Registry, ctx context.Context, emit func(WSEvent)) {
-	if reg == nil {
-		return
-	}
+func prepareRegistryRuntimeTools(reg *tools.Registry, ctx context.Context, emit func(RuntimeEvent)) {
 	for _, tool := range reg.ListTools() {
 		if next, ok := tool.(eventEmitterAware); ok {
 			next.SetEventEmitter(emit)
@@ -642,6 +770,9 @@ func validatePolicyAppendix(raw string) error {
 	if trimmed == "" {
 		return nil
 	}
+	if raw != trimmed {
+		return fmt.Errorf("policy_appendix must not contain leading or trailing whitespace")
+	}
 	if len([]rune(trimmed)) > 280 {
 		return fmt.Errorf("policy_appendix too long; it can only contain short constraints, not context dumps")
 	}
@@ -655,36 +786,10 @@ func validatePolicyAppendix(raw string) error {
 	if nonEmpty > 6 {
 		return fmt.Errorf("policy_appendix has too many lines; it can only contain a few constraint rules")
 	}
-	lower := strings.ToLower(trimmed)
-	suspiciousTokens := []string{
-		"```", "{\"", "\"tool\"", "|---", "context:", "history:", "runtime:", "schema:",
-		"背景：", "背景:", "上下文：", "上下文:", "历史：", "历史:", "已知事实", "用户原话", "表结构", "列如下",
-	}
-	for _, token := range suspiciousTokens {
-		if strings.Contains(lower, strings.ToLower(token)) {
-			return fmt.Errorf("policy_appendix can only contain constraints, not background facts, history records, or structured context dumps")
-		}
-	}
 	return nil
 }
 
-func disallowedDelegateTools(allowed []string) []string {
-	disallowedSet := map[string]struct{}{
-		"user_request_input": {},
-		"report_finalize":    {},
-		"task_delegate":      {},
-	}
-	var forbidden []string
-	for _, name := range allowed {
-		trimmed := strings.TrimSpace(name)
-		if _, ok := disallowedSet[trimmed]; ok {
-			forbidden = append(forbidden, trimmed)
-		}
-	}
-	return forbidden
-}
-
-func delegateChildToolFailure(toolName, message string) string {
+func delegateChildToolFailure(toolName, message string) (string, error) {
 	payload := map[string]interface{}{
 		"ok":         false,
 		"tool":       toolName,
@@ -693,30 +798,23 @@ func delegateChildToolFailure(toolName, message string) string {
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Sprintf(`{"ok":false,"tool":"%s","error_code":"execution_error","message":"%s"}`, toolName, clipText(message, 120))
+		return "", err
 	}
-	return string(encoded)
+	return string(encoded), nil
 }
 
 func clipDelegateToolResult(raw string, max int) string {
 	var payload map[string]interface{}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &payload); err == nil {
+	if err := jsoncontract.Decode([]byte(raw), &payload); err == nil {
 		if summary, ok := payload["ui_summary"].(string); ok && strings.TrimSpace(summary) != "" {
 			return clipText(summary, max)
 		}
-		if message, ok := payload["message"].(string); ok && strings.TrimSpace(message) != "" {
-			return clipText(message, max)
+		encoded, err := json.Marshal(payload)
+		if err == nil {
+			return clipText(string(encoded), max)
 		}
-		encoded, _ := json.Marshal(payload)
-		return clipText(string(encoded), max)
 	}
 	return clipText(raw, max)
 }
 
 // clipText 已迁移至 stringutil.go clipText
-
-func logPersistErr(op string, err error) {
-	if err != nil {
-		log.Printf("delegate persistence: %s failed: %v", op, err)
-	}
-}

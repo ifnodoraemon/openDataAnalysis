@@ -15,7 +15,7 @@ type runExecution struct {
 	Session     *session.Session
 	UserInput   string
 	RuntimeVars func() []agent.RuntimeContextBlock
-	Emit        func(agent.WSEvent)
+	Emit        func(agent.RuntimeEvent)
 	OnDone      func()
 }
 
@@ -33,7 +33,7 @@ func dispatchRunExecution(exec runExecution) error {
 	backendName := configuredRunBackend()
 	backend, ok := runBackends[backendName]
 	if !ok {
-		return fmt.Errorf("run backend %q is not implemented by this server binary; use RUN_BACKEND=inprocess for development or deploy a durable worker backend", backendName)
+		return fmt.Errorf("run backend %q is not implemented by this server binary; supported backends: inprocess", backendName)
 	}
 	return backend.Run(exec)
 }
@@ -53,9 +53,9 @@ func (inProcessRunBackend) Run(exec runExecution) error {
 			if r := recover(); r != nil {
 				log.Printf("[PANIC RECOVER] inProcessRunBackend.Run: %v", r)
 				if exec.Emit != nil {
-					exec.Emit(agent.WSEvent{
+					exec.Emit(agent.RuntimeEvent{
 						Type: agent.EventError,
-						Data: agent.ErrorData{Message: fmt.Sprintf("Internal agent error: %v", r)},
+						Data: agent.ErrorData{Message: "智能体内部错误", Code: "agent_internal_panic"},
 					})
 				}
 			}
@@ -67,10 +67,7 @@ func (inProcessRunBackend) Run(exec runExecution) error {
 
 func configuredRunBackend() string {
 	if config.Cfg == nil {
-		return "inprocess"
+		return ""
 	}
-	if backend := config.NormalizeBackend(config.Cfg.RunBackend); backend != "" {
-		return backend
-	}
-	return "inprocess"
+	return config.Cfg.RunBackend
 }

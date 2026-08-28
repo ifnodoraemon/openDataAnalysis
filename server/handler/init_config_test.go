@@ -14,7 +14,7 @@ func TestEnsureSupportedBackendsRejectsUnsupportedProvider(t *testing.T) {
 		StorageProvider:     "unsupported_provider",
 		RunBackend:          "inprocess",
 		AnalysisStore:       "session_sqlite",
-		PythonArtifactStore: "executor_local",
+		PythonArtifactStore: "object_storage",
 	}
 	t.Cleanup(func() { config.Cfg = prev })
 
@@ -31,12 +31,15 @@ func TestEnsureSupportedBackendsRejectsUnsupportedProvider(t *testing.T) {
 	ensureSupportedBackends()
 }
 
-func TestConfiguredObjectStorageUsesLocalDefault(t *testing.T) {
+func TestConfiguredObjectStorageRejectsMissingProvider(t *testing.T) {
 	prev := config.Cfg
 	config.Cfg = &config.Config{StorageRoot: t.TempDir()}
 	t.Cleanup(func() { config.Cfg = prev })
 
-	if storage := configuredObjectStorage(); storage == nil {
-		t.Fatal("expected local object storage")
-	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected missing storage provider to panic")
+		}
+	}()
+	configuredObjectStorage()
 }

@@ -12,10 +12,10 @@ export const useDataSourceStore = defineStore("dataSource", () => {
   const lastError = ref("");
 
   async function fetchSessionSources(sessionId) {
-    if (!sessionId) return { ok: false, error: "session_id is required" };
+    if (!sessionId) return { ok: false, error: "缺少会话 ID" };
     return withLoading(async () => {
       const result = await requestJSON(`/api/sessions/${sessionId}/sources`, {
-        fallback: "failed to fetch session sources",
+        defaultMessage: "加载会话数据源失败",
       });
       if (!result.ok) return result;
 
@@ -29,7 +29,7 @@ export const useDataSourceStore = defineStore("dataSource", () => {
         profile_id: p.profile_id,
         source_id: p.source_id,
         analysis_table_name: p.analysis_table_name,
-        profile_status: p.profile_status || p.semantic_status,
+        profile_status: p.profile_status,
         schema_signature: p.schema_signature,
       }));
       return result;
@@ -39,7 +39,7 @@ export const useDataSourceStore = defineStore("dataSource", () => {
   async function fetchWorkspaceDataSources() {
     return withLoading(async () => {
       const result = await requestJSON("/api/data-sources", {
-        fallback: "failed to fetch data sources",
+        defaultMessage: "加载工作区数据源失败",
       });
       if (!result.ok) return result;
 
@@ -52,7 +52,7 @@ export const useDataSourceStore = defineStore("dataSource", () => {
   async function fetchSourceTypes() {
     return withLoading(async () => {
       const result = await requestJSON("/api/data-source-types", {
-        fallback: "failed to fetch data source types",
+        defaultMessage: "加载数据源类型失败",
       });
       if (!result.ok) return result;
 
@@ -62,10 +62,10 @@ export const useDataSourceStore = defineStore("dataSource", () => {
   }
 
   async function fetchProfileDetail(profileId) {
-    if (!profileId) return { ok: false, error: "profile_id is required" };
+    if (!profileId) return { ok: false, error: "缺少画像 ID" };
     return withLoading(async () => {
       const result = await requestJSON(`/api/semantic-profiles/${profileId}`, {
-        fallback: "failed to fetch profile",
+        defaultMessage: "加载数据画像失败",
       });
       if (!result.ok) return result;
 
@@ -80,7 +80,7 @@ export const useDataSourceStore = defineStore("dataSource", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session_id: sessionId, scope, overrides }),
-      fallback: "confirm failed",
+      defaultMessage: "确认画像补丁失败",
     });
   }
 
@@ -95,7 +95,7 @@ export const useDataSourceStore = defineStore("dataSource", () => {
         config: publicConfig,
         credential,
       }),
-      fallback: "create failed",
+      defaultMessage: "创建数据源失败",
     });
     if (result.ok) {
       await fetchWorkspaceDataSources();
@@ -113,7 +113,7 @@ export const useDataSourceStore = defineStore("dataSource", () => {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      fallback: "update failed",
+      defaultMessage: "更新数据源失败",
     });
     if (result.ok) {
       await fetchWorkspaceDataSources();
@@ -124,7 +124,7 @@ export const useDataSourceStore = defineStore("dataSource", () => {
   async function deleteWorkspaceSource(sourceId) {
     const result = await requestJSON(`/api/data-sources/${sourceId}`, {
       method: "DELETE",
-      fallback: "delete failed",
+      defaultMessage: "删除数据源失败",
     });
     if (result.ok) {
       await fetchWorkspaceDataSources();
@@ -135,14 +135,14 @@ export const useDataSourceStore = defineStore("dataSource", () => {
   async function testConnection(sourceId) {
     const result = await requestJSON(`/api/data-sources/${sourceId}/test`, {
       method: "POST",
-      fallback: "请求失败",
+      defaultMessage: "请求失败",
     });
-    return result.ok ? result.data : { success: false, message: result.error };
+    return result.ok ? result.data : { success: false, error: result.error };
   }
 
   async function fetchSourceCatalog(sourceId) {
     return requestJSON(`/api/data-sources/${sourceId}/catalog`, {
-      fallback: "加载可导入对象失败",
+      defaultMessage: "加载可导入对象失败",
     });
   }
 
@@ -155,7 +155,7 @@ export const useDataSourceStore = defineStore("dataSource", () => {
         schema_name: schemaName,
         object_name: objectName,
       }),
-      fallback: "import failed",
+      defaultMessage: "导入数据失败",
     });
     if (result.ok) {
       await fetchSessionSources(sessionId);
@@ -172,7 +172,7 @@ export const useDataSourceStore = defineStore("dataSource", () => {
       `/api/sessions/${sessionId}/sources/${sourceId}?${params.toString()}`,
       {
         method: "DELETE",
-        fallback: "remove failed",
+        defaultMessage: "移除会话数据源失败",
       },
     );
     if (result.ok) {
@@ -182,7 +182,17 @@ export const useDataSourceStore = defineStore("dataSource", () => {
   }
 
   function splitSQLConfig(config = {}) {
-    const { password = "", source_type = "", ...publicConfig } = config || {};
+    const password = config?.password || "";
+    const publicConfig = {
+      host: config?.host,
+      port: config?.port,
+      database_name: config?.database_name,
+      username: config?.username,
+      allowlist: config?.allowlist,
+    };
+    if (config?.security_mode_field && config?.security_mode) {
+      publicConfig[config.security_mode_field] = config.security_mode;
+    }
     return {
       publicConfig,
       credential: { password },
@@ -194,13 +204,16 @@ export const useDataSourceStore = defineStore("dataSource", () => {
     return token ? { Authorization: `Bearer ${token}` } : {};
   }
 
-  async function readResponseError(res, fallback) {
+  async function readResponseError(res, defaultMessage) {
     const body = await res.text().catch(() => "");
-    const message = body.trim() || `${fallback} (HTTP ${res.status})`;
+    const message = body.trim() || `${defaultMessage} (HTTP ${res.status})`;
     return message.replace(/\s+$/g, "");
   }
 
-  async function requestJSON(url, { fallback, headers = {}, ...options } = {}) {
+  async function requestJSON(
+    url,
+    { defaultMessage, headers = {}, ...options } = {},
+  ) {
     try {
       const res = await fetch(url, {
         ...options,
@@ -210,11 +223,14 @@ export const useDataSourceStore = defineStore("dataSource", () => {
         if (res.status === 401) {
           useAgentStore().logout();
         }
-        return { ok: false, error: await readResponseError(res, fallback) };
+        return {
+          ok: false,
+          error: await readResponseError(res, defaultMessage),
+        };
       }
       return { ok: true, data: await readResponseJSON(res) };
     } catch (e) {
-      return { ok: false, error: e.message || "network error" };
+      return { ok: false, error: e.message || "网络请求失败" };
     }
   }
 
@@ -224,7 +240,7 @@ export const useDataSourceStore = defineStore("dataSource", () => {
     try {
       const result = await operation();
       if (result?.ok === false) {
-        lastError.value = result.error || "request failed";
+        lastError.value = result.error || "请求失败";
       }
       return result;
     } finally {

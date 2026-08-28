@@ -5,13 +5,10 @@ prompt: 请分析 SaaS 业务增长质量，覆盖 MRR 变化、流失、扩张�
 files:
   - saas_mrr_monthly.csv
   - saas_pipeline_channel_monthly.csv
-expected:
-  should_inspect_schema: true
-  should_auto_map: true
-  should_ask_user: false
-  expected_coverage: sufficient
-  required_mentions:
-    - mrr trend
-    - channel efficiency
-  forbidden_claims:
-    - exact attribution between pipeline and mrr without stating limits
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
+manual_review:
+  - MRR 趋势和渠道效率结论均可追溯到结果。
+  - 不在缺乏依据时声称 pipeline 与 MRR 的精确归因。

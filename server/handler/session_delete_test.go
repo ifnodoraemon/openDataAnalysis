@@ -3,7 +3,7 @@ package handler
 import (
 	"bytes"
 	"context"
-	"database/sql"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -12,6 +12,7 @@ import (
 	"github.com/ifnodoraemon/openDataAnalysis/config"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 	"github.com/ifnodoraemon/openDataAnalysis/metadata"
+	"github.com/ifnodoraemon/openDataAnalysis/repository"
 	sqliterepo "github.com/ifnodoraemon/openDataAnalysis/repository/sqlite"
 	"github.com/ifnodoraemon/openDataAnalysis/service"
 	"github.com/ifnodoraemon/openDataAnalysis/session"
@@ -320,7 +321,7 @@ func TestDeleteSessionDoesNotDeleteSharedFiles(t *testing.T) {
 	}
 }
 
-func TestDeleteSessionResourcesCommitsMetadataEvenIfStorageCleanupFails(t *testing.T) {
+func TestDeleteSessionResourcesKeepsMetadataUntilStorageCleanupSucceeds(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 
@@ -362,11 +363,12 @@ func TestDeleteSessionResourcesCommitsMetadataEvenIfStorageCleanupFails(t *testi
 		t.Fatalf("put object: %v", err)
 	}
 
+	flakyStorage := &flakyDeleteStorage{
+		inner:    baseStorage,
+		failKeys: map[string]bool{objectKey: true},
+	}
 	fileService = &service.FileService{
-		Storage: &flakyDeleteStorage{
-			inner:    baseStorage,
-			failKeys: map[string]bool{objectKey: true},
-		},
+		Storage:  flakyStorage,
 		FileRepo: fileRepo,
 		TempDir:  root + "/tmp",
 	}
@@ -422,18 +424,60 @@ func TestDeleteSessionResourcesCommitsMetadataEvenIfStorageCleanupFails(t *testi
 	if err != nil {
 		t.Fatalf("get session: %v", err)
 	}
-	if err := deleteSessionResources(ctx, *record); err != nil {
-		t.Fatalf("delete session resources: %v", err)
+	if err := deleteSessionResources(ctx, *record); err == nil {
+		t.Fatal("expected storage deletion failure")
 	}
 
-	if _, err := sessionRepo.GetByID(ctx, "s_1"); err == nil {
-		t.Fatal("expected session metadata to be deleted")
+	if _, err := sessionRepo.GetByID(ctx, "s_1"); err != nil {
+		t.Fatalf("expected session metadata to remain retryable: %v", err)
 	}
-	if _, err := runRepo.GetByID(ctx, "r_1"); err == nil {
-		t.Fatal("expected run metadata to be deleted")
+	if _, err := runRepo.GetByID(ctx, "r_1"); err != nil {
+		t.Fatalf("expected run metadata to remain retryable: %v", err)
 	}
 	if exists, err := baseStorage.Exists(ctx, objectKey); err != nil || !exists {
-		t.Fatalf("expected orphaned object to remain for later cleanup, exists=%t err=%v", exists, err)
+		t.Fatalf("expected failed object deletion to remain visible, exists=%t err=%v", exists, err)
+	}
+
+	delete(flakyStorage.failKeys, objectKey)
+	if err := deleteSessionResources(ctx, *record); err != nil {
+		t.Fatalf("retry session deletion: %v", err)
+	}
+	if _, err := sessionRepo.GetByID(ctx, "s_1"); err == nil {
+		t.Fatal("expected session metadata to be deleted after successful retry")
+	}
+	if _, err := runRepo.GetByID(ctx, "r_1"); err == nil {
+		t.Fatal("expected run metadata to be deleted after successful retry")
+	}
+	if exists, err := baseStorage.Exists(ctx, objectKey); err != nil || exists {
+		t.Fatalf("expected object to be deleted after successful retry, exists=%t err=%v", exists, err)
+	}
+}
+
+func TestRebindSessionDeletionQueryConvertsPlaceholdersForPostgres(t *testing.T) {
+	t.Parallel()
+
+	prevMetadataStore := metadataStore
+	t.Cleanup(func() {
+		metadataStore = prevMetadataStore
+	})
+
+	metadataStore = nil
+	query := `DELETE FROM sessions WHERE id = ? AND workspace_id = ?`
+	if got := rebindSessionDeletionQuery(query); got != query {
+		t.Fatalf("expected unchanged query without metadata store, got %q", got)
+	}
+
+	metadataStore = &metadata.Store{Dialect: metadata.DialectSQLite}
+	if got := rebindSessionDeletionQuery(query); got != query {
+		t.Fatalf("expected unchanged query for sqlite, got %q", got)
+	}
+
+	metadataStore = &metadata.Store{Dialect: metadata.DialectPostgres}
+	if got := rebindSessionDeletionQuery(query); got != `DELETE FROM sessions WHERE id = $1 AND workspace_id = $2` {
+		t.Fatalf("expected postgres placeholders, got %q", got)
+	}
+	if got := rebindSessionDeletionQuery(`DELETE FROM files WHERE id IN (?,?,?)`); got != `DELETE FROM files WHERE id IN ($1,$2,$3)` {
+		t.Fatalf("expected postgres placeholders for IN list, got %q", got)
 	}
 }
 
@@ -469,7 +513,8 @@ func assertNotFound(t *testing.T, err error) {
 	if err == nil {
 		t.Fatal("expected not found error")
 	}
-	if err == sql.ErrNoRows {
+	if errors.Is(err, repository.ErrNotFound) {
 		return
 	}
+	t.Fatalf("expected repository.ErrNotFound, got %v", err)
 }

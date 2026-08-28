@@ -1,107 +1,87 @@
 # Agentic Principles
 
-更新日期：2026-06-22
+Updated: 2026-08-11
 
-本文档定义本项目的 agent runtime 边界。详细、持久、面向工具实现的规则放在 `AGENTS.md`；这里保留设计原则和取舍。
+This document defines the boundary of the project's agent runtime. Detailed and durable implementation rules live in `AGENTS.md`; this document records the design principles and trade-offs.
 
-## 目标
+## Goal
 
-后端是 agent runtime，不是隐藏 workflow engine。
+The backend is an agent runtime, not a hidden workflow engine.
 
-Runtime 负责：
+The runtime is responsible for:
 
-- 暴露目标、工具、状态和薄 guardrail。
-- 管理上下文、并发、取消、持久化和 trace。
-- 校验最终产物结构是否可交付。
+- Exposing goals, tools, state, and thin guardrails.
+- Managing context, concurrency, cancellation, persistence, and traces.
+- Validating whether final output is structurally deliverable.
 
-模型负责：
+The model is responsible for:
 
-- 判断下一步行动。
-- 决定是否探索、提问、委派、写报告或收尾。
-- 在不确定时基于事实向用户确认或显式说明假设。
+- Choosing the next action.
+- Deciding whether to explore, ask, delegate, write a report, or finish.
+- Asking the user or stating an explicit assumption when facts are ambiguous.
 
-## 核心原则
+## Principles
 
-### 1. 不预设路径
+### 1. Do not prescribe a path
 
-系统可以定义目标和边界，但不能把 `analyze -> write -> finalize` 这类固定步骤编码进 prompt、工具描述或 handler 拼接消息。
+The system may define goals and boundaries, but it must not encode fixed sequences such as `analyze -> write -> finalize` in prompts, tool descriptions, or handler-assembled messages.
 
-### 2. 状态只暴露事实
+### 2. State tools expose facts only
 
-`state_*` 工具返回当前世界状态，例如数据源、语义画像、工作记忆、目标树、报告结构和时间上下文。它们不能返回“下一步应该做什么”。
+`state_*` tools report current facts such as data sources, semantic profiles, working memory, goals, report structure, and time context. They do not tell the model what to do next.
 
-### 3. Judge 属于模型
+### 3. Judgment belongs to the model
 
-Runtime 不替模型判断：
+The runtime does not decide whether delegation is needed, evidence is sufficient, one report section has priority, or the user should be asked a question. The model makes those decisions after inspecting facts.
 
-- 是否应该 delegate
-- 证据是否足以写结论
-- 哪个章节应该先补
-- 何时应该追问用户
+### 4. Tool contracts are detailed but non-prescriptive
 
-这些判断应由模型读取事实后自行完成。
+A tool description may define purpose, inputs, outputs, side effects, limits, and failure conditions. It must not hide a workflow or return `next_action` advice. Human-readable display text belongs in `ui_summary`; model-relevant facts remain in separate structured fields. Do not introduce semantically mixed fields such as `summary_text`.
 
-### 4. 工具契约详细但不指路
+### 5. Guardrails block invalid results
 
-工具 description 可以说明用途、输入、输出、副作用、限制和失败条件，但不能暗含 workflow，也不能返回 `next_action`、建议调用某工具等字段。
+Valid hard constraints include blocking unsafe execution, invalid SQL, broken state, references to missing charts or sources, structurally invalid report finalization, and report previews that bypass sanitizer or CSP boundaries. Guardrails do not plan normal work.
 
-展示摘要使用 `ui_summary`；模型和工具链需要的事实放在结构化字段中。不要新增 `summary_text` 这类语义混杂字段。
+### 6. Finalization is a delivery boundary
 
-### 5. Guardrail 只拦坏结果
+After `report_finalize` returns `ok=true`, `is_finalized=true`, and `delivery_state=finalized`, the current run enters completion. The runtime may allow one tools-disabled continuation over the existing history. It must not replace the model's final response with a hardcoded template.
 
-允许的硬约束：
+### 7. Ambiguity is explicit
 
-- 阻止非法 SQL、危险执行或损坏状态。
-- 阻止引用不存在的 chart/block/source。
-- 阻止结构非法的 report finalize。
-- 阻止报告预览绕过 sanitizer、CSP 和可信脚本边界。
+When several metric definitions, join keys, time grains, units, or field mappings remain plausible, the runtime exposes the candidates as facts. The model asks the user or, when authorized, proceeds with an explicitly stated assumption.
 
-Guardrail 不应该规划正常路径。
+### 8. State access is pull-based
 
-### 6. Finalize 是交付边界
+Large file summaries, report state, working memory, and history digests are not injected into every turn. The model uses observation tools when it needs those facts.
 
-`report_finalize` 成功返回 `ok=true`、`is_finalized=true`、`delivery_state=finalized` 后，当前 run 应进入收尾。Runtime 可以给模型一次 tools-disabled 的自然续写机会，再结束 run；不要用硬编码模板替代模型最终回复。
+### 9. Structured state is scaffolding
 
-### 7. 歧义不能静默拍板
+Working memory, goal trees, and report block trees improve observability and recovery. They do not create a mandatory planning phase or a fixed report outline.
 
-当分析依赖多个合理口径时，系统应暴露候选事实，由模型判断是否需要用户确认。典型歧义包括：
+### 10. Report scripts and model content are separate
 
-- 多个收入/成本/利润口径。
-- 多个 join key。
-- 日、周、月粒度混用。
-- 元、万元、美元、百分比等单位冲突。
-- 字段名别名存在多个高相似候选。
+The model authors report content and structured chart option data. ECharts loaders and chart runtime code use trusted external scripts, preferably same-origin `/assets/echarts.min.js` and `/oda-chart-runtime.js`. Chart support is not a reason to permit broad inline script execution.
 
-用户明确允许自行假设时，模型可以继续，但必须说明假设。
+### 11. Language boundaries are explicit
 
-### 8. 状态默认 pull-based
+User-facing UI, HTTP/SSE status text, `ui_summary`, and operator CLI output use Simplified Chinese. Model-facing policy and tool contracts use English. Machine fields, enum values, protocols, product names, and library names keep their canonical spelling. English and Chinese documentation use separate `.md` and `.zh-CN.md` files.
 
-不要每轮自动注入大段文件摘要、报告结构、工作记忆或历史 digest。需要状态时，模型应通过 observation tool 拉取。
+## Prompt layering
 
-### 9. 结构化状态是脚手架
+The runtime uses four layers:
 
-Working memory、goal tree、report block tree 可以提升可观察性和恢复能力，但不能变成强制 planning phase 或固定报告章节模板。
+1. `system`: static policy and tool boundaries.
+2. `user`: the user's direct task.
+3. `runtime`: ephemeral facts for the current turn, such as edit scope or active goals.
+4. `history`: original conversation and tool results still present in the context window.
 
-### 10. 报告脚本和模型内容分层
+Window trimming exposes only factual omission counts in the `runtime` layer; the runtime does not invent semantic history summaries. Decisions that must survive the context window are written explicitly by the model to working memory. Temporary facts, history, and user preferences never move into `system`. Delegate constraints use `policy_appendix`, not context dumps.
 
-模型负责报告内容和结构化 chart option 数据。ECharts loader 与 chart runtime 使用可信外部脚本，优先同源 `/assets/echarts.min.js` 和 `/oda-chart-runtime.js`。不要为图表渲染放开宽泛 inline script。
+## Current anti-patterns
 
-## Prompt Layering
-
-本项目采用四层上下文：
-
-1. `system`：静态 policy 和工具边界。
-2. `user`：用户直接任务。
-3. `runtime`：当前轮客观事实，例如编辑范围或活跃目标。
-4. `history`：对话历史、工具结果和压缩摘要。
-
-临时事实、历史摘要和用户偏好不能提升到 `system` 层。子代理额外约束使用 `policy_appendix`，不能用它倾倒背景事实。
-
-## 当前反模式
-
-- 线性 workflow prompt。
-- 工具结果返回下一步建议。
-- handler 在用户消息里拼“请先调用某工具”。
-- runtime 把低置信候选包装成 verified fact。
-- 因为模型偶尔做错，就把判断逻辑搬进代码。
-- 为稳定性每轮自动注入大量状态。
+- Linear workflow prompts.
+- Tool results that recommend a next action.
+- Handler-generated instructions that tell the model which tool to call first.
+- Low-confidence candidates presented as verified facts.
+- Moving judgment into code because a model sometimes makes a mistake.
+- Automatically injecting large state payloads into every turn.

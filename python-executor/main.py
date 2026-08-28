@@ -15,10 +15,12 @@ Python Executor MCP Server
 """
 
 import hmac
+import base64
 import io
 import logging
 import os
 import queue
+import re
 import time
 import traceback
 import contextlib
@@ -28,7 +30,7 @@ import uuid
 import multiprocessing
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from sandbox import (
     SecurityViolation,
@@ -47,7 +49,7 @@ for _thread_env in (
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 MAX_CONCURRENT_EXECUTIONS = 4
 
@@ -63,13 +65,27 @@ _concurrency_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXECUTIONS)
 WORK_DIR = Path(
     os.environ.get("WORK_DIR") or (Path(__file__).resolve().parent / "workspace")
 ).resolve()
-MAX_TIMEOUT = int(os.environ.get("MAX_TIMEOUT", "120"))
+MAX_TIMEOUT = int(os.environ.get("PYTHON_MAX_TIMEOUT_SECONDS", "120"))
 MAX_CODE_SIZE = int(os.environ.get("MAX_CODE_SIZE", "65536"))
 MEMORY_LIMIT_MB = int(os.environ.get("MEMORY_LIMIT_MB", "512"))
 FILE_SIZE_LIMIT_MB = int(os.environ.get("FILE_SIZE_LIMIT_MB", "50"))
-PROCESS_LIMIT = int(os.environ.get("PROCESS_LIMIT", "0"))
+PROCESS_LIMIT = int(os.environ.get("PROCESS_LIMIT", "64"))
 STDOUT_LIMIT = int(os.environ.get("STDOUT_LIMIT", "10000"))
 STDERR_LIMIT = int(os.environ.get("STDERR_LIMIT", "5000"))
+
+if MAX_TIMEOUT < 5:
+    raise RuntimeError("PYTHON_MAX_TIMEOUT_SECONDS must be at least 5")
+for _name, _value in {
+    "MAX_CODE_SIZE": MAX_CODE_SIZE,
+    "MEMORY_LIMIT_MB": MEMORY_LIMIT_MB,
+    "FILE_SIZE_LIMIT_MB": FILE_SIZE_LIMIT_MB,
+    "STDOUT_LIMIT": STDOUT_LIMIT,
+    "STDERR_LIMIT": STDERR_LIMIT,
+}.items():
+    if _value <= 0:
+        raise RuntimeError(f"{_name} must be greater than zero")
+if PROCESS_LIMIT < 0:
+    raise RuntimeError("PROCESS_LIMIT must be zero or greater")
 
 
 
@@ -109,37 +125,62 @@ import matplotlib.pyplot as plt
 plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 """
-    try:
-        exec(imports, ns)
-    except Exception as e:
-        logger.warning("Some libraries not available: %s", e)
+    exec(imports, ns)
     ns["WORK_DIR"] = work_dir
 
 
-def sanitize_path_component(val: str | None) -> str:
-    if not val:
-        return "common"
-    cleaned = re.sub(r"[^a-zA-Z0-9_-]", "_", val.strip())
-    return cleaned or "common"
+class InputFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str
+    content_base64: str
+
+    @field_validator("filename")
+    @classmethod
+    def validate_filename(cls, value: str) -> str:
+        if not re.fullmatch(r"[a-zA-Z0-9_.-]+", value or ""):
+            raise ValueError("input filename must be a plain safe filename")
+        return value
 
 
 class ExecuteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     code: str
-    timeout: int = 30
-    session_id: str | None = None
-    workspace_id: str | None = None
+    timeout: int
+    session_id: str
+    workspace_id: str
+    inputs: list[InputFile] = Field(default_factory=list)
 
     @field_validator("timeout")
     @classmethod
-    def clamp_timeout(cls, v: int) -> int:
-        return max(5, min(v, MAX_TIMEOUT))
+    def validate_timeout(cls, v: int) -> int:
+        if v < 5 or v > MAX_TIMEOUT:
+            raise ValueError(f"timeout must be between 5 and {MAX_TIMEOUT} seconds")
+        return v
 
     @field_validator("code")
     @classmethod
     def validate_code_size(cls, v: str) -> str:
-        if len(v) > MAX_CODE_SIZE:
+        if not v:
+            raise ValueError("code must not be empty")
+        if len(v.encode("utf-8")) > MAX_CODE_SIZE:
             raise ValueError(f"Code exceeds maximum size of {MAX_CODE_SIZE} bytes")
         return v
+
+    @field_validator("session_id", "workspace_id")
+    @classmethod
+    def validate_identity(cls, value: str) -> str:
+        if not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", value or ""):
+            raise ValueError("execution identity must be an exact safe identifier")
+        return value
+
+
+class ToolExecuteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: Literal["code_run_python"]
+    args: ExecuteRequest
 
 
 class ExecuteResponse(BaseModel):
@@ -147,7 +188,7 @@ class ExecuteResponse(BaseModel):
     stdout: str
     stderr: str
     error: str | None = None
-    files: list[str] = []
+    files: list[str] = Field(default_factory=list)
     duration_ms: int = 0
     truncated: bool = False
 
@@ -165,8 +206,8 @@ def _verify_proxy_token(request: Request) -> None:
 async def lifespan(application):
     try:
         multiprocessing.set_start_method("spawn", force=True)
-    except RuntimeError:
-        pass
+    except RuntimeError as exc:
+        logger.warning("multiprocessing start method was already initialized: %s", exc)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     _cleanup_old_files()
     yield
@@ -208,6 +249,7 @@ def list_tools() -> dict:
                 ),
                 "parameters": {
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "code": {
                             "type": "string",
@@ -215,11 +257,22 @@ def list_tools() -> dict:
                         },
                         "timeout": {
                             "type": "integer",
-                            "description": f"Timeout in seconds, default 30, max {MAX_TIMEOUT}",
-                            "default": 30,
+                            "description": f"Explicit timeout in seconds, min 5, max {MAX_TIMEOUT}",
+                            "minimum": 5,
+                            "maximum": MAX_TIMEOUT,
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "Exact runtime session identifier",
+                            "pattern": "^[a-zA-Z0-9_-]{1,128}$",
+                        },
+                        "workspace_id": {
+                            "type": "string",
+                            "description": "Exact runtime workspace identifier",
+                            "pattern": "^[a-zA-Z0-9_-]{1,128}$",
                         },
                     },
-                    "required": ["code"],
+                    "required": ["code", "timeout", "session_id", "workspace_id"],
                 },
             }
         ]
@@ -236,36 +289,24 @@ async def execute_tool(request: Request) -> dict:
     """
     _verify_proxy_token(request)
 
-    body = await request.json()
-    tool_name = body.get("tool_name", "")
-    args = body.get("args", {})
-
-    if tool_name != "code_run_python":
-        raise HTTPException(400, f"Unknown tool: {tool_name}")
-
-    code = args.get("code", "")
-    timeout = args.get("timeout", 30)
-
-    req = ExecuteRequest(code=code, timeout=timeout)
+    body = ToolExecuteRequest.model_validate(await request.json())
+    req = body.args
     trace_id = request.headers.get("X-Request-ID", "-")
     async with _concurrency_semaphore:
         return await asyncio.get_event_loop().run_in_executor(None, _execute_sync, req, trace_id)
 
 
 def _apply_resource_limits() -> None:
-    try:
-        mem = MEMORY_LIMIT_MB * 1024 * 1024
-        fsize = FILE_SIZE_LIMIT_MB * 1024 * 1024
-        resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
-        if PROCESS_LIMIT > 0:
-            nproc = max(PROCESS_LIMIT, _current_user_task_count() + 32)
-            _, hard = resource.getrlimit(resource.RLIMIT_NPROC)
-            if hard != resource.RLIM_INFINITY:
-                nproc = min(nproc, hard)
-            resource.setrlimit(resource.RLIMIT_NPROC, (nproc, nproc))
-        resource.setrlimit(resource.RLIMIT_FSIZE, (fsize, fsize))
-    except (ValueError, OSError):
-        pass
+    mem = MEMORY_LIMIT_MB * 1024 * 1024
+    fsize = FILE_SIZE_LIMIT_MB * 1024 * 1024
+    resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+    if PROCESS_LIMIT > 0:
+        nproc = _current_user_task_count() + PROCESS_LIMIT
+        _, hard = resource.getrlimit(resource.RLIMIT_NPROC)
+        if hard != resource.RLIM_INFINITY:
+            nproc = min(nproc, hard)
+        resource.setrlimit(resource.RLIMIT_NPROC, (nproc, nproc))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (fsize, fsize))
 
 
 def _current_user_task_count() -> int:
@@ -308,7 +349,16 @@ def run_in_process(code: str, req_dir_path: str, q: multiprocessing.Queue) -> No
     req_dir = Path(req_dir_path)
     os.chdir(req_dir)
 
-    _apply_resource_limits()
+    try:
+        _apply_resource_limits()
+    except (ValueError, OSError) as exc:
+        q.put({
+            "success": False,
+            "stdout": "",
+            "stderr": "",
+            "error": f"Failed to apply execution resource limits: {exc}",
+        })
+        return
 
     try:
         check_code(code)
@@ -322,7 +372,16 @@ def run_in_process(code: str, req_dir_path: str, q: multiprocessing.Queue) -> No
         return
 
     local_ns: dict = {}
-    init_namespace(local_ns, str(req_dir))
+    try:
+        init_namespace(local_ns, str(req_dir))
+    except Exception as exc:
+        q.put({
+            "success": False,
+            "stdout": "",
+            "stderr": "",
+            "error": f"Failed to initialize analysis libraries: {exc}",
+        })
+        return
     local_ns["__builtins__"] = create_sandboxed_builtins(req_dir)
 
     stdout_buf = io.StringIO()
@@ -346,8 +405,8 @@ def run_in_process(code: str, req_dir_path: str, q: multiprocessing.Queue) -> No
         import matplotlib.pyplot as plt
 
         plt.close("all")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("failed to close matplotlib figures: %s", exc)
 
     q.put(
         {
@@ -359,18 +418,35 @@ def run_in_process(code: str, req_dir_path: str, q: multiprocessing.Queue) -> No
     )
 
 
-def _collect_output_files(req_dir: Path, session_dir: Path, req_id: str) -> list[str]:
+def _collect_output_files(req_dir: Path, input_names: set[str]) -> list[str]:
     if not req_dir.exists():
         return []
     new_files = []
-    session_dir.mkdir(parents=True, exist_ok=True)
-    for f in req_dir.glob("*"):
+    for f in req_dir.rglob("*"):
         if f.is_file():
-            dest_name = f"{req_id}_{f.name}"
-            shutil.move(str(f), str(session_dir / dest_name))
-            new_files.append(dest_name)
-    shutil.rmtree(req_dir, ignore_errors=True)
+            relative_name = str(f.relative_to(req_dir))
+            if relative_name in input_names:
+                f.unlink()
+                continue
+            if f.is_symlink() or not _is_path_within(f, req_dir):
+                raise RuntimeError(f"output path escapes request directory: {relative_name}")
+            new_files.append(str(f.relative_to(WORK_DIR)))
+    if not new_files:
+        cleanup_error = _remove_request_dir(req_dir)
+        if cleanup_error:
+            raise RuntimeError(f"failed to clean empty request directory: {cleanup_error}")
     return new_files
+
+
+def _remove_request_dir(req_dir: Path) -> str | None:
+    try:
+        shutil.rmtree(req_dir)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logger.error("failed to remove request directory %s: %s", req_dir, exc)
+        return str(exc)
+    return None
 
 
 @app.post("/execute", response_model=ExecuteResponse)
@@ -388,14 +464,29 @@ async def execute_code(req: ExecuteRequest, request: Request):
 def _execute_sync(req: ExecuteRequest, trace_id: str) -> ExecuteResponse:
     start = time.time()
 
-    ws_comp = sanitize_path_component(req.workspace_id)
-    sess_comp = sanitize_path_component(req.session_id)
-    session_dir = WORK_DIR / ws_comp / sess_comp
+    session_dir = WORK_DIR / req.workspace_id / req.session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
     req_id = f"req_{uuid.uuid4().hex[:8]}"
     req_dir = session_dir / req_id
     req_dir.mkdir(parents=True, exist_ok=True)
+
+    for input_file in req.inputs:
+        try:
+            payload = base64.b64decode(input_file.content_base64, validate=True)
+        except Exception as exc:
+            cleanup_error = _remove_request_dir(req_dir)
+            detail = f"Invalid input payload: {exc}"
+            if cleanup_error:
+                detail += f"; cleanup failed: {cleanup_error}"
+            return ExecuteResponse(success=False, stdout="", stderr="", error=detail)
+        if len(payload) > FILE_SIZE_LIMIT_MB * 1024 * 1024:
+            cleanup_error = _remove_request_dir(req_dir)
+            detail = "Input payload exceeds the configured file-size limit"
+            if cleanup_error:
+                detail += f"; cleanup failed: {cleanup_error}"
+            return ExecuteResponse(success=False, stdout="", stderr="", error=detail)
+        (req_dir / input_file.filename).write_bytes(payload)
 
     q: multiprocessing.Queue = multiprocessing.Queue()
     p = multiprocessing.Process(target=run_in_process, args=(req.code, str(req_dir), q))
@@ -408,22 +499,25 @@ def _execute_sync(req: ExecuteRequest, trace_id: str) -> ExecuteResponse:
         if p.is_alive():
             p.kill()
             p.join(5)
-        shutil.rmtree(req_dir, ignore_errors=True)
+        cleanup_error = _remove_request_dir(req_dir)
+        detail = f"Execution timed out after {req.timeout} seconds."
+        if cleanup_error:
+            detail += f" Cleanup failed: {cleanup_error}"
         return ExecuteResponse(
             success=False,
             stdout="",
             stderr="",
-            error=f"Execution timed out after {req.timeout} seconds.",
+            error=detail,
             files=[],
             duration_ms=int((time.time() - start) * 1000),
         )
 
     try:
-        result = q.get_nowait()
+        result = q.get(timeout=1)
     except queue.Empty:
         result = CRASH_RESULT
 
-    new_files = _collect_output_files(req_dir, session_dir, req_id)
+    new_files = _collect_output_files(req_dir, {item.filename for item in req.inputs})
     duration_ms = int((time.time() - start) * 1000)
     raw_stdout = result["stdout"]
     raw_stderr = result["stderr"]
@@ -451,14 +545,16 @@ def _execute_sync(req: ExecuteRequest, trace_id: str) -> ExecuteResponse:
     )
 
 
-@app.get("/files/{filename}")
-def get_file(filename: str, request: Request):
+@app.get("/files/{file_path:path}")
+def get_file(file_path: str, request: Request):
     _verify_proxy_token(request)
 
-    if not re.match(r"^req_[a-f0-9]{8}_", filename):
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+/req_[a-f0-9]{8}/[a-zA-Z0-9_./-]+", file_path):
         raise HTTPException(400, "Invalid filename format")
+    if any(part in {"", ".", ".."} for part in Path(file_path).parts):
+        raise HTTPException(400, "Invalid filename path segments")
 
-    filepath = (WORK_DIR / filename).resolve()
+    filepath = (WORK_DIR / file_path).resolve()
     if not _is_path_within(filepath, WORK_DIR):
         raise HTTPException(400, "Invalid file path")
     if not filepath.exists():
@@ -468,19 +564,28 @@ def get_file(filename: str, request: Request):
 
 def _cleanup_old_files(max_age_hours: int = 24) -> None:
     cutoff = time.time() - max_age_hours * 3600
-    for f in WORK_DIR.glob("*"):
+    for f in WORK_DIR.rglob("*"):
         if f.is_file() and f.stat().st_mtime < cutoff:
             try:
                 f.unlink()
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.error("failed to remove expired executor file %s: %s", f, exc)
+    directories = sorted(
+        (path for path in WORK_DIR.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for directory in directories:
+        try:
+            directory.rmdir()
+        except OSError:
+            continue
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    try:
-        port = int(os.environ.get("PORT", "8081"))
-    except ValueError:
-        port = 8081
+    port = int(os.environ.get("PORT", "8081"))
+    if port < 1 or port > 65535:
+        raise RuntimeError("PORT must be between 1 and 65535")
     uvicorn.run(app, host="0.0.0.0", port=port, access_log=False)

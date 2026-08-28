@@ -1,8 +1,7 @@
 package handler
 
 import (
-	"database/sql"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,6 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/ifnodoraemon/openDataAnalysis/auth"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
+	"github.com/ifnodoraemon/openDataAnalysis/repository"
+	"golang.org/x/time/rate"
 )
 
 type loginRequest struct {
@@ -31,7 +32,16 @@ var (
 	loginRateLimit   = 5
 	loginRateWindow  = 5 * time.Minute
 	loginCleanupStop = make(chan struct{})
+
+	authIPRatePerMinute  = 10
+	authIPRateBurst      = 10
+	loginIPLimiterMap    = NewRateLimiterMap(rate.Limit(float64(authIPRatePerMinute)/60.0), authIPRateBurst)
+	registerIPLimiterMap = NewRateLimiterMap(rate.Limit(float64(authIPRatePerMinute)/60.0), authIPRateBurst)
 )
+
+func checkIPRateLimit(limiterMap *RateLimiterMap, r *http.Request) bool {
+	return limiterMap.getLimiter(getClientIP(r)).Allow()
+}
 
 func init() {
 	go func() {
@@ -99,44 +109,48 @@ func recordLoginAttempt(email string) {
 }
 
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
+	if !checkIPRateLimit(loginIPLimiterMap, r) {
+		http.Error(w, "请求过于频繁，请稍后重试", http.StatusTooManyRequests)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req loginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request format", http.StatusBadRequest)
+	if err := decodeRequestJSON(r, &req); err != nil {
+		http.Error(w, "请求格式无效", http.StatusBadRequest)
 		return
 	}
 
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
 	if req.Email == "" || req.Password == "" {
-		http.Error(w, "email and password cannot be empty", http.StatusBadRequest)
+		http.Error(w, "邮箱和密码不能为空", http.StatusBadRequest)
 		return
 	}
 
 	if !checkLoginRate(req.Email) {
-		http.Error(w, "too many login attempts, please try again later", http.StatusTooManyRequests)
+		http.Error(w, "登录尝试过于频繁，请稍后重试", http.StatusTooManyRequests)
 		return
 	}
 
 	user, err := userRepo.GetByEmail(r.Context(), req.Email)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, repository.ErrNotFound) {
 			recordLoginAttempt(req.Email)
-			http.Error(w, "invalid email or password", http.StatusUnauthorized)
+			http.Error(w, "邮箱或密码错误", http.StatusUnauthorized)
 			return
 		}
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		http.Error(w, "服务器内部错误", http.StatusInternalServerError)
 		return
 	}
 
 	if !auth.VerifyPassword(req.Password, user.PasswordHash) {
 		recordLoginAttempt(req.Email)
-		http.Error(w, "invalid email or password", http.StatusUnauthorized)
+		http.Error(w, "邮箱或密码错误", http.StatusUnauthorized)
 		return
 	}
 
 	workspaces, err := workspaceRepo.ListByUser(r.Context(), user.ID)
 	if err != nil || len(workspaces) == 0 {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		http.Error(w, "服务器内部错误", http.StatusInternalServerError)
 		return
 	}
 
@@ -154,7 +168,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	token, err := tokenManager.Sign(identity, 7*24*time.Hour)
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		http.Error(w, "服务器内部错误", http.StatusInternalServerError)
 		return
 	}
 
@@ -182,8 +196,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		"workspaces": responseWorkspaces,
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func setAuthCookie(w http.ResponseWriter, token string) {
@@ -211,9 +224,15 @@ func clearAuthCookie(w http.ResponseWriter) {
 }
 
 func LogoutHandler(w http.ResponseWriter, r *http.Request) {
+	if tokenManager != nil {
+		if cookie, err := r.Cookie("oda_token"); err == nil && cookie.Value != "" {
+			if err := tokenManager.Revoke(cookie.Value); err != nil {
+				log.Printf("logout token revocation skipped: %v", err)
+			}
+		}
+	}
 	clearAuthCookie(w)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func selectWorkspace(workspaces []domain.Workspace, workspaceID string) (domain.Workspace, error) {
@@ -223,7 +242,10 @@ func selectWorkspace(workspaces []domain.Workspace, workspaceID string) (domain.
 				return workspace, nil
 			}
 		}
-		return domain.Workspace{}, fmt.Errorf("specified workspace does not exist or not authorized")
+		return domain.Workspace{}, fmt.Errorf("指定的工作空间不存在或无权访问")
+	}
+	if len(workspaces) != 1 {
+		return domain.Workspace{}, fmt.Errorf("账户属于多个工作空间时必须提供 workspaceId")
 	}
 	return workspaces[0], nil
 }
@@ -232,28 +254,32 @@ func SwitchWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
 	identity, _ := auth.FromContext(r.Context())
 
 	var req switchWorkspaceRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request format", http.StatusBadRequest)
+	if err := decodeRequestJSON(r, &req); err != nil {
+		http.Error(w, "请求格式无效", http.StatusBadRequest)
 		return
 	}
 	if strings.TrimSpace(req.WorkspaceID) == "" {
-		http.Error(w, "workspaceId cannot be empty", http.StatusBadRequest)
+		http.Error(w, "workspaceId 不能为空", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.WorkspaceID) != req.WorkspaceID {
+		http.Error(w, "workspaceId 必须保持原值", http.StatusBadRequest)
 		return
 	}
 
 	ok, err := workspaceRepo.IsMember(r.Context(), req.WorkspaceID, identity.UserID)
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		http.Error(w, "服务器内部错误", http.StatusInternalServerError)
 		return
 	}
 	if !ok {
-		http.Error(w, "not authorized to access this workspace", http.StatusForbidden)
+		http.Error(w, "无权访问此工作空间", http.StatusForbidden)
 		return
 	}
 
 	workspace, err := workspaceRepo.GetByID(r.Context(), req.WorkspaceID)
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		http.Error(w, "服务器内部错误", http.StatusInternalServerError)
 		return
 	}
 
@@ -266,7 +292,7 @@ func SwitchWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	token, err := tokenManager.Sign(newIdentity, 7*24*time.Hour)
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		http.Error(w, "服务器内部错误", http.StatusInternalServerError)
 		return
 	}
 
@@ -279,8 +305,7 @@ func SwitchWorkspaceHandler(w http.ResponseWriter, r *http.Request) {
 			"name": workspace.Name,
 		},
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 type registerRequest struct {
@@ -291,19 +316,25 @@ type registerRequest struct {
 }
 
 func RegisterHandler(w http.ResponseWriter, r *http.Request) {
+	if !checkIPRateLimit(registerIPLimiterMap, r) {
+		http.Error(w, "请求过于频繁，请稍后重试", http.StatusTooManyRequests)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req registerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request format", http.StatusBadRequest)
+	if err := decodeRequestJSON(r, &req); err != nil {
+		http.Error(w, "请求格式无效", http.StatusBadRequest)
 		return
 	}
 
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
-	req.Name = strings.TrimSpace(req.Name)
-	req.Password = strings.TrimSpace(req.Password)
 
-	if req.Email == "" || req.Password == "" || req.Name == "" {
-		http.Error(w, "name, email, and password cannot be empty", http.StatusBadRequest)
+	if req.Email == "" || strings.TrimSpace(req.Password) == "" || strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.WorkspaceName) == "" {
+		http.Error(w, "姓名、邮箱、密码和工作空间名称不能为空", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Name) != req.Name || strings.TrimSpace(req.WorkspaceName) != req.WorkspaceName {
+		http.Error(w, "姓名和工作空间名称必须保持原值", http.StatusBadRequest)
 		return
 	}
 
@@ -314,23 +345,24 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 
 	existing, err := userRepo.GetByEmail(r.Context(), req.Email)
 	if err == nil && existing != nil {
-		http.Error(w, "email already registered", http.StatusConflict)
+		http.Error(w, "该邮箱已注册", http.StatusConflict)
+		return
+	}
+	if err != nil && !errors.Is(err, repository.ErrNotFound) {
+		http.Error(w, "检查现有用户失败", http.StatusInternalServerError)
 		return
 	}
 
 	passwordHash, err := auth.HashPassword(req.Password)
 	if err != nil {
-		http.Error(w, "failed to process password", http.StatusInternalServerError)
+		http.Error(w, "处理密码失败", http.StatusInternalServerError)
 		return
 	}
 
 	now := time.Now()
 	userID := "usr_" + strings.ReplaceAll(uuid.New().String(), "-", "")[:12]
 	workspaceID := "ws_" + strings.ReplaceAll(uuid.New().String(), "-", "")[:12]
-	workspaceName := strings.TrimSpace(req.WorkspaceName)
-	if workspaceName == "" {
-		workspaceName = req.Name + "'s Workspace"
-	}
+	workspaceName := req.WorkspaceName
 
 	user := &domain.User{
 		ID:           userID,
@@ -343,7 +375,7 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := userRepo.Create(r.Context(), user); err != nil {
-		http.Error(w, "failed to create user", http.StatusInternalServerError)
+		http.Error(w, "创建用户失败", http.StatusInternalServerError)
 		return
 	}
 
@@ -358,7 +390,7 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := workspaceRepo.CreateWorkspace(r.Context(), workspace); err != nil {
-		http.Error(w, "failed to create workspace", http.StatusInternalServerError)
+		http.Error(w, "创建工作空间失败", http.StatusInternalServerError)
 		return
 	}
 
@@ -368,7 +400,10 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		Role:        domain.WorkspaceRoleOwner,
 		CreatedAt:   now,
 	}
-	_ = workspaceRepo.AddMember(r.Context(), member)
+	if err := workspaceRepo.AddMember(r.Context(), member); err != nil {
+		http.Error(w, "创建工作空间成员关系失败", http.StatusInternalServerError)
+		return
+	}
 
 	identity := auth.Identity{
 		UserID:      userID,
@@ -379,7 +414,7 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	token, err := tokenManager.Sign(identity, 7*24*time.Hour)
 	if err != nil {
-		http.Error(w, "failed to generate token", http.StatusInternalServerError)
+		http.Error(w, "生成登录凭证失败", http.StatusInternalServerError)
 		return
 	}
 
@@ -396,9 +431,11 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 			"id":   workspace.ID,
 			"name": workspace.Name,
 		},
+		"workspaces": []map[string]string{{
+			"id":   workspace.ID,
+			"name": workspace.Name,
+		}},
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusCreated, resp)
 }

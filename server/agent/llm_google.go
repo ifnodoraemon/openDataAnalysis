@@ -8,13 +8,17 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 
+	"github.com/google/uuid"
 	"github.com/ifnodoraemon/openDataAnalysis/config"
+	"github.com/ifnodoraemon/openDataAnalysis/internal/jsoncontract"
 	"github.com/ifnodoraemon/openDataAnalysis/tools"
 )
 
 type geminiRequest struct {
-	SystemInstruction *geminiContent `json:"systemInstruction,omitempty"`
+	SystemInstruction *geminiContent  `json:"systemInstruction,omitempty"`
 	Contents          []geminiContent `json:"contents"`
 	Tools             []geminiTool    `json:"tools,omitempty"`
 }
@@ -32,8 +36,8 @@ type geminiPart struct {
 }
 
 type geminiFunctionCall struct {
-	Name             string                 `json:"name"`
-	Args             map[string]interface{} `json:"args"`
+	Name string                 `json:"name"`
+	Args map[string]interface{} `json:"args"`
 }
 
 type geminiFunctionResponse struct {
@@ -46,13 +50,20 @@ type geminiTool struct {
 }
 
 type geminiFunctionDeclaration struct {
-	Name        string       `json:"name"`
-	Description string       `json:"description"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
 type geminiResponse struct {
-	Candidates []geminiCandidate `json:"candidates"`
+	Candidates    []geminiCandidate `json:"candidates"`
+	UsageMetadata geminiUsage       `json:"usageMetadata"`
+}
+
+type geminiUsage struct {
+	PromptTokenCount     int `json:"promptTokenCount"`
+	CandidatesTokenCount int `json:"candidatesTokenCount"`
+	TotalTokenCount      int `json:"totalTokenCount"`
 }
 
 type geminiCandidate struct {
@@ -71,89 +82,64 @@ func (l *LLMClient) chatGoogle(ctx context.Context, bundle *PromptBundle, toolSp
 			systemText += "\n\n" + bundle.PolicyAppendix
 		}
 		req.SystemInstruction = &geminiContent{
-			Role: "user",
+			Role:  "user",
 			Parts: []geminiPart{{Text: systemText}},
 		}
 	}
 
-	if bundle.Task != "" {
-		req.Contents = append(req.Contents, geminiContent{
-			Role: "user",
-			Parts: []geminiPart{{Text: bundle.Task}},
-		})
+	toolNames := make(map[string]string)
+	for _, h := range bundle.History {
+		if h.Role == LLMRoleUser {
+			req.Contents = append(req.Contents, geminiContent{
+				Role:  "user",
+				Parts: []geminiPart{{Text: h.Content}},
+			})
+		} else if h.Role == LLMRoleAssistant {
+			parts := make([]geminiPart, 0, len(h.ToolCalls)+1)
+			if strings.TrimSpace(h.Content) != "" {
+				parts = append(parts, geminiPart{Text: h.Content})
+			}
+			if len(h.ToolCalls) > 0 {
+				for _, tc := range h.ToolCalls {
+					var args map[string]interface{}
+					if err := jsoncontract.Decode([]byte(tc.Function.Arguments), &args); err != nil {
+						return nil, fmt.Errorf("Google request tool call %s has invalid arguments: %w", tc.ID, err)
+					}
+					toolNames[tc.ID] = tc.Function.Name
+					parts = append(parts, geminiPart{FunctionCall: &geminiFunctionCall{
+						Name: tc.Function.Name,
+						Args: args,
+					}, ThoughtSignature: tc.Function.ThoughtSignature})
+				}
+			}
+			req.Contents = append(req.Contents, geminiContent{
+				Role:  "model",
+				Parts: parts,
+			})
+		} else if h.Role == LLMRoleTool {
+			var response map[string]interface{}
+			if err := jsoncontract.Decode([]byte(h.Content), &response); err != nil {
+				return nil, fmt.Errorf("Google request tool result %s is not a JSON object: %w", h.ToolCallID, err)
+			}
+			toolName := h.ToolCallName
+			if strings.TrimSpace(toolName) != toolName {
+				return nil, fmt.Errorf("Google request tool result %s has a padded tool name", h.ToolCallID)
+			}
+			if toolName == "" {
+				toolName = toolNames[h.ToolCallID]
+			}
+			if toolName == "" {
+				return nil, fmt.Errorf("Google request cannot match tool result %s to a tool name", h.ToolCallID)
+			}
+			req.Contents = append(req.Contents, geminiContent{Role: "user", Parts: []geminiPart{{FunctionResponse: &geminiFunctionResponse{Name: toolName, Response: response}}}})
+		}
 	}
 
 	for _, c := range bundle.RuntimeContext {
-		req.Contents = append(req.Contents, geminiContent{
-			Role: "user",
-			Parts: []geminiPart{{Text: fmt.Sprintf("[%s]: %s", c.Name, c.Content)}},
-		})
+		req.Contents = append(req.Contents, geminiContent{Role: "user", Parts: []geminiPart{{Text: fmt.Sprintf("[%s]: %s", c.Name, c.Content)}}})
 	}
-
-	lastMessageWasToolText := false
-	for _, h := range bundle.History {
-		if h.Role == LLMRoleSystem || h.Role == LLMRoleUser {
-			req.Contents = append(req.Contents, geminiContent{
-				Role: "user",
-				Parts: []geminiPart{{Text: h.Content}},
-			})
-			lastMessageWasToolText = false
-		} else if h.Role == LLMRoleAssistant {
-			part := geminiPart{}
-			if len(h.ToolCalls) > 0 {
-				tc := h.ToolCalls[0]
-				var args map[string]interface{}
-				json.Unmarshal([]byte(tc.Function.Arguments), &args)
-
-				if tc.Function.ThoughtSignature == "" {
-					part.Text = fmt.Sprintf("I called tool '%s' with arguments: %s", tc.Function.Name, tc.Function.Arguments)
-					lastMessageWasToolText = true
-				} else {
-					part.FunctionCall = &geminiFunctionCall{
-						Name: tc.Function.Name,
-						Args: args,
-					}
-					part.ThoughtSignature = tc.Function.ThoughtSignature
-					lastMessageWasToolText = false
-				}
-			} else {
-				part.Text = h.Content
-				lastMessageWasToolText = false
-			}
-			req.Contents = append(req.Contents, geminiContent{
-				Role: "model",
-				Parts: []geminiPart{part},
-			})
-		} else if h.Role == LLMRoleTool {
-			if lastMessageWasToolText {
-				req.Contents = append(req.Contents, geminiContent{
-					Role: "user",
-					Parts: []geminiPart{{Text: fmt.Sprintf("Tool result: %s", h.Content)}},
-				})
-			} else {
-				var resp map[string]interface{}
-				err := json.Unmarshal([]byte(h.Content), &resp)
-				if err != nil {
-					resp = map[string]interface{}{"result": h.Content}
-				}
-				
-				toolName := "unknown_tool"
-				if len(bundle.History) > 0 {
-					toolName = "tool_call"
-				}
-
-				req.Contents = append(req.Contents, geminiContent{
-					Role: "function",
-					Parts: []geminiPart{{
-						FunctionResponse: &geminiFunctionResponse{
-							Name: toolName,
-							Response: resp,
-						},
-					}},
-				})
-			}
-			lastMessageWasToolText = false
-		}
+	if bundle.Task != "" {
+		req.Contents = append(req.Contents, geminiContent{Role: "user", Parts: []geminiPart{{Text: bundle.Task}}})
 	}
 
 	if len(toolSpecs) > 0 {
@@ -161,72 +147,121 @@ func (l *LLMClient) chatGoogle(ctx context.Context, bundle *PromptBundle, toolSp
 			FunctionDeclarations: []geminiFunctionDeclaration{},
 		}
 		for _, ts := range toolSpecs {
+			parameters, err := StripAdditionalProperties(ts.Function.Parameters)
+			if err != nil {
+				return nil, fmt.Errorf("Google tool %s schema: %w", ts.Function.Name, err)
+			}
 			tool.FunctionDeclarations = append(tool.FunctionDeclarations, geminiFunctionDeclaration{
-				Name: ts.Function.Name,
+				Name:        ts.Function.Name,
 				Description: ts.Function.Description,
-				Parameters: StripAdditionalProperties(ts.Function.Parameters),
+				Parameters:  parameters,
 			})
 		}
 		req.Tools = []geminiTool{tool}
 	}
 
-	reqBytes, _ := json.Marshal(req)
-	log.Printf("[DEBUG] Gemini Request Tools: %s", string(reqBytes))
-	
-	endpoint := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", l.model, config.Cfg.LLMAPIKey)
-	
-	httpReq, _ := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(reqBytes))
+	reqBytes, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize Google request: %w", err)
+	}
+	log.Printf("Gemini request model=%s contents=%d tools=%d", l.model, len(req.Contents), len(toolSpecs))
+
+	endpoint, err := googleGenerateContentEndpoint(l.model)
+	if err != nil {
+		return nil, err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(reqBytes))
+	if err != nil {
+		return nil, err
+	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	
+
 	resp, err := l.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	
-	respBytes, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Google API error: %d %s", resp.StatusCode, string(respBytes))
+
+	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read Google response: %w", err)
 	}
-	
+	if resp.StatusCode != http.StatusOK {
+		return nil, &httpStatusError{Operation: "Google API error", StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(respBytes))}
+	}
+
 	var gResp geminiResponse
+	if err := jsoncontract.Validate(respBytes); err != nil {
+		return nil, fmt.Errorf("failed to validate Google response: %w", err)
+	}
 	if err := json.Unmarshal(respBytes, &gResp); err != nil {
 		return nil, err
 	}
-	
+
 	if len(gResp.Candidates) == 0 {
 		return nil, fmt.Errorf("Google API returned no candidates")
 	}
-	
+
 	candidate := gResp.Candidates[0]
+	if candidate.FinishReason != "STOP" {
+		return nil, fmt.Errorf("Google API did not complete normally: finish_reason=%s", candidate.FinishReason)
+	}
 	llmResp := &LLMResponse{
 		Choices: []LLMChoice{{Index: 0}},
+		Usage:   LLMUsage{PromptTokens: gResp.UsageMetadata.PromptTokenCount, CompletionTokens: gResp.UsageMetadata.CandidatesTokenCount, TotalTokens: gResp.UsageMetadata.TotalTokenCount},
 	}
-	
+
 	msg := LLMMessage{Role: LLMRoleAssistant}
 	for _, part := range candidate.Content.Parts {
 		if part.Text != "" {
 			msg.Content += part.Text
 		}
 		if part.FunctionCall != nil {
-			argsBytes, _ := json.Marshal(part.FunctionCall.Args)
+			argsBytes, err := json.Marshal(part.FunctionCall.Args)
+			if err != nil {
+				return nil, fmt.Errorf("failed to serialize Google tool call %s arguments: %w", part.FunctionCall.Name, err)
+			}
 			msg.ToolCalls = append(msg.ToolCalls, LLMToolCall{
-				ID: "call_google",
+				ID:   "call_" + uuid.New().String(),
 				Type: "function",
 				Function: LLMFunctionCall{
-					Name: part.FunctionCall.Name,
-					Arguments: string(argsBytes),
+					Name:             part.FunctionCall.Name,
+					Arguments:        string(argsBytes),
 					ThoughtSignature: part.ThoughtSignature,
 				},
 			})
 		}
 	}
 	llmResp.Choices[0].Message = msg
+
 	if len(msg.ToolCalls) > 0 {
 		llmResp.Choices[0].FinishReason = "tool_calls"
 	} else {
 		llmResp.Choices[0].FinishReason = "stop"
 	}
-	
+
 	return llmResp, nil
+}
+
+func googleGenerateContentEndpoint(model string) (string, error) {
+	if config.Cfg == nil {
+		return "", fmt.Errorf("LLM config is not initialized")
+	}
+	base := config.Cfg.LLMAPIEndpoint
+	if base == "" {
+		return "", fmt.Errorf("LLM_API_ENDPOINT not configured")
+	}
+	apiKey := config.Cfg.LLMAPIKey
+	base = strings.ReplaceAll(base, "{model}", url.PathEscape(model))
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return "", fmt.Errorf("invalid Google API endpoint: %w", err)
+	}
+	if apiKey != "" && parsed.Query().Get("key") == "" {
+		query := parsed.Query()
+		query.Set("key", apiKey)
+		parsed.RawQuery = query.Encode()
+	}
+	return parsed.String(), nil
 }

@@ -10,7 +10,6 @@ import (
 
 	"github.com/ifnodoraemon/openDataAnalysis/config"
 	"github.com/ifnodoraemon/openDataAnalysis/data"
-	"github.com/ifnodoraemon/openDataAnalysis/service"
 )
 
 type stubSubgoalChecker struct {
@@ -26,11 +25,6 @@ func TestMain(m *testing.M) {
 	config.Cfg = &config.Config{
 		LLMAPIKey: "mock-key",
 	}
-	data.AnalyzeTableSemantics = func(ctx context.Context, chatFn data.LLMChatFunc, schema *data.SchemaInfo, activeTables []string) (*data.SemanticProfile, error) {
-		return &data.SemanticProfile{
-			TableSummary: "Mock test semantics",
-		}, nil
-	}
 	os.Exit(m.Run())
 }
 
@@ -43,7 +37,7 @@ func TestListTablesToolReturnsStructuredEmptyState(t *testing.T) {
 	}
 
 	tool := &ListTablesTool{Ingester: ing}
-	result, err := tool.Execute(nil)
+	result, err := tool.Execute(json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -75,7 +69,7 @@ func TestListTablesToolReturnsStructuredTableList(t *testing.T) {
 	}
 
 	tool := &ListTablesTool{Ingester: ing}
-	result, err := tool.Execute(nil)
+	result, err := tool.Execute(json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -111,7 +105,7 @@ func TestDescribeDataToolReturnsStructuredSchema(t *testing.T) {
 	}
 
 	tool := &DescribeDataTool{Ingester: ing}
-	result, err := tool.Execute(json.RawMessage(`{"table_name":"sales"}`))
+	result, err := tool.Execute(json.RawMessage(`{"table_name":"sales","sample_rows":0}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -133,7 +127,7 @@ func TestDescribeDataToolReturnsStructuredSchema(t *testing.T) {
 	}
 }
 
-func TestDescribeDataToolExposesAmbiguousMetricGroups(t *testing.T) {
+func TestDescribeDataToolDoesNotInventMetricGroupsFromNames(t *testing.T) {
 	t.Parallel()
 
 	ing := data.NewIngester(t.TempDir())
@@ -148,28 +142,24 @@ func TestDescribeDataToolExposesAmbiguousMetricGroups(t *testing.T) {
 	}
 
 	tool := &DescribeDataTool{Ingester: ing}
-	result, err := tool.Execute(json.RawMessage(`{"table_name":"revenue_metrics"}`))
+	result, err := tool.Execute(json.RawMessage(`{"table_name":"revenue_metrics","sample_rows":0}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 
-	var payload struct {
-		OK                        bool                `json:"ok"`
-		AmbiguousMetricGroupCount int                 `json:"ambiguous_metric_group_count"`
-		AmbiguousMetricGroups     map[string][]string `json:"ambiguous_metric_groups"`
-	}
+	var payload map[string]interface{}
 	if err := json.Unmarshal([]byte(result), &payload); err != nil {
 		t.Fatalf("expected json payload: %v", err)
 	}
-	if !payload.OK || payload.AmbiguousMetricGroupCount != 1 {
+	if payload["ok"] != true {
 		t.Fatalf("unexpected payload: %#v", payload)
 	}
-	if !sameStrings(payload.AmbiguousMetricGroups["revenue"], []string{"gross_revenue", "net_revenue", "recognized_revenue"}) {
-		t.Fatalf("unexpected ambiguous metric groups: %#v", payload.AmbiguousMetricGroups)
+	if _, exists := payload["ambiguous_metric_groups"]; exists {
+		t.Fatalf("column names must not create semantic metric groups: %#v", payload)
 	}
 }
 
-func TestDescribeDataToolExposesTimeCoverageFacts(t *testing.T) {
+func TestDescribeDataToolDoesNotInferTimeSemantics(t *testing.T) {
 	t.Parallel()
 
 	ing := data.NewIngester(t.TempDir())
@@ -198,34 +188,22 @@ func TestDescribeDataToolExposesTimeCoverageFacts(t *testing.T) {
 	}
 
 	tool := &DescribeDataTool{Ingester: ing}
-	result, err := tool.Execute(json.RawMessage(`{"table_name":"spend"}`))
+	result, err := tool.Execute(json.RawMessage(`{"table_name":"spend","sample_rows":0}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 
-	var payload struct {
-		OK                   bool                     `json:"ok"`
-		TimeColumnCount      int                      `json:"time_column_count"`
-		TimeColumnCandidates []map[string]interface{} `json:"time_column_candidates"`
-	}
+	var payload map[string]interface{}
 	if err := json.Unmarshal([]byte(result), &payload); err != nil {
 		t.Fatalf("expected json payload: %v", err)
 	}
-	if !payload.OK || payload.TimeColumnCount != 1 || len(payload.TimeColumnCandidates) != 1 {
+	if payload["ok"] != true {
 		t.Fatalf("unexpected payload: %#v", payload)
 	}
-	candidate := payload.TimeColumnCandidates[0]
-	name, _ := candidate["column_name"].(string)
-	grain, _ := candidate["grain"].(string)
-	isPrimary, _ := candidate["heuristic_primary"].(bool)
-	if name != "dt" || grain != "day" {
-		t.Fatalf("unexpected time column candidate: %#v", candidate)
-	}
-	if !isPrimary {
-		t.Fatalf("expected heuristic_primary=true")
-	}
-	if candidate["coverage_start"] != "2025-01-05" || candidate["coverage_end"] != "2025-02-23" {
-		t.Fatalf("unexpected time coverage: %#v", candidate)
+	for _, field := range []string{"time_column_count", "time_column_candidates", "primary_time_column", "grain"} {
+		if _, exists := payload[field]; exists {
+			t.Fatalf("runtime must not infer %s: %#v", field, payload)
+		}
 	}
 }
 
@@ -238,7 +216,7 @@ func TestDescribeDataToolReturnsStructuredFailure(t *testing.T) {
 	}
 
 	tool := &DescribeDataTool{Ingester: ing}
-	result, err := tool.Execute(json.RawMessage(`{"table_name":"missing_table"}`))
+	result, err := tool.Execute(json.RawMessage(`{"table_name":"missing_table","sample_rows":0}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -247,7 +225,7 @@ func TestDescribeDataToolReturnsStructuredFailure(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &payload); err != nil {
 		t.Fatalf("expected json payload: %v", err)
 	}
-	if payload["ok"] != false || payload["error_code"] != "row_count_failed" {
+	if payload["ok"] != false || payload["error_code"] != "schema_lookup_failed" {
 		t.Fatalf("unexpected payload: %#v", payload)
 	}
 }
@@ -267,7 +245,8 @@ func TestQueryDataToolReturnsStructuredSuccess(t *testing.T) {
 	}
 
 	tool := &QueryDataTool{Ingester: ing}
-	result, err := tool.Execute(json.RawMessage(`{"sql":"SELECT month, revenue FROM sales ORDER BY month"}`))
+	tool.SetExecutionContext(context.Background())
+	result, err := tool.Execute(json.RawMessage(`{"sql":"SELECT month, revenue FROM sales ORDER BY month","timeout_seconds":5}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -298,7 +277,8 @@ func TestQueryDataToolReturnsStructuredFailure(t *testing.T) {
 	}
 
 	tool := &QueryDataTool{Ingester: ing}
-	result, err := tool.Execute(json.RawMessage(`{"sql":"SELECT * FROM missing_table"}`))
+	tool.SetExecutionContext(context.Background())
+	result, err := tool.Execute(json.RawMessage(`{"sql":"SELECT * FROM missing_table","timeout_seconds":5}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -308,6 +288,26 @@ func TestQueryDataToolReturnsStructuredFailure(t *testing.T) {
 		t.Fatalf("expected json payload: %v", err)
 	}
 	if payload["ok"] != false || payload["error_code"] != "query_failed" {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestQueryDataToolRejectsMissingExecutionContext(t *testing.T) {
+	t.Parallel()
+
+	ing := data.NewIngester(t.TempDir())
+	if err := ing.InitDB("session_query_context"); err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	result, err := (&QueryDataTool{Ingester: ing}).Execute(json.RawMessage(`{"sql":"SELECT 1","timeout_seconds":5}`))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(result), &payload); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if payload["error_code"] != "missing_execution_context" {
 		t.Fatalf("unexpected payload: %#v", payload)
 	}
 }
@@ -331,16 +331,19 @@ func sameStrings(got, want []string) bool {
 func TestManageReportBlocksAndFinalizeReturnStructuredPayloads(t *testing.T) {
 	t.Parallel()
 
-	state := &ReportState{}
+	state := &ReportState{Results: map[string]AnalysisResult{
+		"res_growth": {ID: "res_growth", ToolName: "data_query_sql", Operation: "SELECT revenue_growth FROM sales_metrics"},
+	}}
 	blockTool := &ManageReportBlocksTool{ReportState: state}
 	finalizeTool := &FinalizeReportTool{ReportState: state}
 
 	blockResult, err := blockTool.Execute(json.RawMessage(`{
+		"action":"append",
 		"block_id":"summary",
 		"block_kind":"markdown",
 		"title":"执行摘要",
 		"content":"收入增长 20%",
-		"sources":[{"kind":"sql","sql":"SELECT revenue_growth FROM sales_metrics","summary":"收入增长率"}]
+		"sources":[{"kind":"result","result_id":"res_growth"}]
 	}`))
 	if err != nil {
 		t.Fatalf("block execute: %v", err)
@@ -374,7 +377,7 @@ func TestManageReportBlocksAndFinalizeReturnStructuredPayloads(t *testing.T) {
 	if !finalizePayload.OK || finalizePayload.ReportTitle != "销售分析" || finalizePayload.BlockCount != 1 || finalizePayload.ChartCount != 0 {
 		t.Fatalf("unexpected finalize payload: %#v", finalizePayload)
 	}
-	if finalizePayload.UISummary != "delivery_state=finalized; block_count=1; chart_count=0" {
+	if finalizePayload.UISummary != "报告已定稿，共 1 个内容块、0 个图表。" {
 		t.Fatalf("unexpected finalize ui_summary: %#v", finalizePayload.UISummary)
 	}
 	if state.NeedsFinalize {
@@ -388,7 +391,7 @@ func TestManageReportBlocksRejectsTitleBlockKind(t *testing.T) {
 	state := &ReportState{}
 	blockTool := &ManageReportBlocksTool{ReportState: state}
 
-	if _, err := blockTool.Execute(json.RawMessage(`{"block_id":"heading","block_kind":"title","title":"只写标题"}`)); err == nil {
+	if _, err := blockTool.Execute(json.RawMessage(`{"action":"append","block_id":"heading","block_kind":"title","title":"只写标题"}`)); err == nil {
 		t.Fatal("expected title block_kind to be rejected")
 	}
 }
@@ -469,35 +472,20 @@ func TestFinalizeReportRejectsInvalidReportState(t *testing.T) {
 	}
 }
 
-func TestFinalizeReportRejectsUnresolvedSemanticAmbiguity(t *testing.T) {
+func TestFinalizeReportDoesNotInterpretSemanticAmbiguityInProse(t *testing.T) {
 	t.Parallel()
 
-	tool := &FinalizeReportTool{
-		ReportState: &ReportState{
-			Blocks: []ReportBlock{
-				{
-					ID:      "analysis",
-					Kind:    "markdown",
-					Content: "收入增长 20%，净收入增长 12%。",
-					Sources: []EvidenceRef{{Kind: "sql", SQL: "SELECT net_revenue FROM revenue_metrics"}},
-				},
+	tool := &FinalizeReportTool{ReportState: &ReportState{
+		Blocks: []ReportBlock{
+			{
+				ID:      "analysis",
+				Kind:    "markdown",
+				Content: "收入增长 20%，净收入增长 12%。",
+				Sources: []EvidenceRef{{Kind: "result", ResultID: "res_1"}},
 			},
 		},
-		SessionSourcesProvider: func() ([]service.SessionSourceSummary, error) {
-			return []service.SessionSourceSummary{
-				{
-					SourceID:          "src_1",
-					AnalysisTableName: "revenue_metrics",
-					ProfileID:         "sp_1",
-					SemanticStatus:    "profiled",
-					AmbiguityCount:    1,
-				},
-			}, nil
-		},
-		ProfileDetailProvider: func(profileID string) (string, string, error) {
-			return `{"ambiguities":[{"kind":"ambiguous_metrics","candidates":["gross_revenue","net_revenue"]}]}`, "[]", nil
-		},
-	}
+		Results: map[string]AnalysisResult{"res_1": {ID: "res_1", ToolName: "data_query_sql"}},
+	}}
 
 	result, err := tool.Execute(json.RawMessage(`{"report_title":"销售分析"}`))
 	if err != nil {
@@ -507,44 +495,25 @@ func TestFinalizeReportRejectsUnresolvedSemanticAmbiguity(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &payload); err != nil {
 		t.Fatalf("expected finalize failure json payload: %v", err)
 	}
-	if payload["ok"] != false || payload["error_code"] != "report_state_invalid" {
-		t.Fatalf("unexpected finalize failure payload: %#v", payload)
-	}
-	issues, ok := payload["finalize_issues"].([]interface{})
-	if !ok || len(issues) != 1 || !strings.Contains(issues[0].(string), "unresolved_semantic_ambiguity:revenue_metrics") {
-		t.Fatalf("expected unresolved semantic ambiguity issue, got %#v", payload["finalize_issues"])
+	if payload["ok"] != true || payload["delivery_state"] != "finalized" {
+		t.Fatalf("finalize must not infer semantic state from prose, got %#v", payload)
 	}
 }
 
-func TestFinalizeReportRejectsSemanticAmbiguityWithOnlyDefinitionMarker(t *testing.T) {
+func TestFinalizeReportDoesNotTreatDefinitionMarkersAsAuthority(t *testing.T) {
 	t.Parallel()
 
-	tool := &FinalizeReportTool{
-		ReportState: &ReportState{
-			Blocks: []ReportBlock{
-				{
-					ID:      "analysis",
-					Kind:    "markdown",
-					Content: "收入 definition：按业务字段展示。口径说明：收入增长 12%。",
-					Sources: []EvidenceRef{{Kind: "table", TableName: "revenue_metrics"}},
-				},
+	tool := &FinalizeReportTool{ReportState: &ReportState{
+		Blocks: []ReportBlock{
+			{
+				ID:      "analysis",
+				Kind:    "markdown",
+				Content: "收入 definition：按业务字段展示。口径说明：收入增长 12%。",
+				Sources: []EvidenceRef{{Kind: "result", ResultID: "res_1"}},
 			},
 		},
-		SessionSourcesProvider: func() ([]service.SessionSourceSummary, error) {
-			return []service.SessionSourceSummary{
-				{
-					SourceID:          "src_1",
-					AnalysisTableName: "revenue_metrics",
-					ProfileID:         "sp_1",
-					SemanticStatus:    "profiled",
-					AmbiguityCount:    1,
-				},
-			}, nil
-		},
-		ProfileDetailProvider: func(profileID string) (string, string, error) {
-			return `{"ambiguities":[{"kind":"ambiguous_metrics","candidates":["gross_revenue","net_revenue"]}]}`, "[]", nil
-		},
-	}
+		Results: map[string]AnalysisResult{"res_1": {ID: "res_1", ToolName: "data_query_sql"}},
+	}}
 
 	result, err := tool.Execute(json.RawMessage(`{"report_title":"销售分析"}`))
 	if err != nil {
@@ -554,16 +523,12 @@ func TestFinalizeReportRejectsSemanticAmbiguityWithOnlyDefinitionMarker(t *testi
 	if err := json.Unmarshal([]byte(result), &payload); err != nil {
 		t.Fatalf("expected finalize failure json payload: %v", err)
 	}
-	if payload["ok"] != false || payload["error_code"] != "report_state_invalid" {
-		t.Fatalf("unexpected finalize failure payload: %#v", payload)
-	}
-	issues, ok := payload["finalize_issues"].([]interface{})
-	if !ok || len(issues) != 1 || !strings.Contains(issues[0].(string), "unresolved_semantic_ambiguity:revenue_metrics") {
-		t.Fatalf("expected unresolved semantic ambiguity issue, got %#v", payload["finalize_issues"])
+	if payload["ok"] != true {
+		t.Fatalf("finalize must not parse definition markers, got %#v", payload)
 	}
 }
 
-func TestFinalizeReportRejectsDocumentedSemanticAssumptionWithoutConfirmation(t *testing.T) {
+func TestFinalizeReportDoesNotParseAssumptionTextAsConfirmation(t *testing.T) {
 	t.Parallel()
 
 	state := &ReportState{
@@ -572,27 +537,12 @@ func TestFinalizeReportRejectsDocumentedSemanticAssumptionWithoutConfirmation(t 
 				ID:      "analysis",
 				Kind:    "markdown",
 				Content: "口径假设：收入采用 net_revenue。收入增长 12%。",
-				Sources: []EvidenceRef{{Kind: "sql", SQL: "SELECT net_revenue FROM revenue_metrics"}},
+				Sources: []EvidenceRef{{Kind: "result", ResultID: "res_1"}},
 			},
 		},
+		Results: map[string]AnalysisResult{"res_1": {ID: "res_1", ToolName: "data_query_sql"}},
 	}
-	tool := &FinalizeReportTool{
-		ReportState: state,
-		SessionSourcesProvider: func() ([]service.SessionSourceSummary, error) {
-			return []service.SessionSourceSummary{
-				{
-					SourceID:          "src_1",
-					AnalysisTableName: "revenue_metrics",
-					ProfileID:         "sp_1",
-					SemanticStatus:    "profiled",
-					AmbiguityCount:    1,
-				},
-			}, nil
-		},
-		ProfileDetailProvider: func(profileID string) (string, string, error) {
-			return `{"ambiguities":[{"kind":"ambiguous_metrics","candidates":["gross_revenue","net_revenue"]}]}`, "[]", nil
-		},
-	}
+	tool := &FinalizeReportTool{ReportState: state}
 
 	result, err := tool.Execute(json.RawMessage(`{"report_title":"销售分析"}`))
 	if err != nil {
@@ -602,36 +552,19 @@ func TestFinalizeReportRejectsDocumentedSemanticAssumptionWithoutConfirmation(t 
 	if err := json.Unmarshal([]byte(result), &payload); err != nil {
 		t.Fatalf("expected finalize json payload: %v", err)
 	}
-	if payload["ok"] != false || payload["error_code"] != "report_state_invalid" {
+	if payload["ok"] != true || payload["delivery_state"] != "finalized" {
 		t.Fatalf("unexpected finalize payload: %#v", payload)
-	}
-	issues, ok := payload["finalize_issues"].([]interface{})
-	if !ok || len(issues) != 1 || !strings.Contains(issues[0].(string), "unresolved_semantic_ambiguity:revenue_metrics") {
-		t.Fatalf("expected unresolved semantic ambiguity issue, got %#v", payload["finalize_issues"])
 	}
 }
 
 func TestFinalizeReportAllowsUnusedSemanticAmbiguity(t *testing.T) {
 	t.Parallel()
 
-	tool := &FinalizeReportTool{
-		ReportState: &ReportState{
-			Blocks: []ReportBlock{
-				{ID: "analysis", Kind: "markdown", Content: "库存周转率稳定，未使用收入表。"},
-			},
+	tool := &FinalizeReportTool{ReportState: &ReportState{
+		Blocks: []ReportBlock{
+			{ID: "analysis", Kind: "markdown", Content: "库存周转率稳定，未使用收入表。"},
 		},
-		SessionSourcesProvider: func() ([]service.SessionSourceSummary, error) {
-			return []service.SessionSourceSummary{
-				{
-					SourceID:          "src_1",
-					DisplayName:       "Revenue Metrics",
-					AnalysisTableName: "revenue_metrics",
-					SemanticStatus:    "profiled",
-					AmbiguityCount:    1,
-				},
-			}, nil
-		},
-	}
+	}}
 
 	result, err := tool.Execute(json.RawMessage(`{"report_title":"库存分析"}`))
 	if err != nil {
@@ -685,8 +618,9 @@ func TestFinalizeReportAllowsDuplicateBlockHeadingAndMissingChartCaption(t *test
 				{ID: "sales_chart", Kind: "chart", Title: "销售趋势", ChartID: "chart_sales"},
 			},
 			Charts: []ChartData{
-				{ID: "chart_sales", Sources: []EvidenceRef{{Kind: "sql", SQL: "SELECT month, sales FROM sales_metrics"}}},
+				{ID: "chart_sales", Sources: []EvidenceRef{{Kind: "result", ResultID: "res_1"}}},
 			},
+			Results: map[string]AnalysisResult{"res_1": {ID: "res_1", ToolName: "data_query_sql"}},
 		},
 	}
 
@@ -703,7 +637,7 @@ func TestFinalizeReportAllowsDuplicateBlockHeadingAndMissingChartCaption(t *test
 	}
 }
 
-func TestFinalizeReportRejectsAnalyticalBlockWithoutEvidence(t *testing.T) {
+func TestFinalizeReportDoesNotGuessAnalyticalBlocksFromDigits(t *testing.T) {
 	t.Parallel()
 
 	tool := &FinalizeReportTool{
@@ -722,12 +656,8 @@ func TestFinalizeReportRejectsAnalyticalBlockWithoutEvidence(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &payload); err != nil {
 		t.Fatalf("expected finalize failure json payload: %v", err)
 	}
-	if payload["ok"] != false || payload["error_code"] != "report_state_invalid" {
-		t.Fatalf("unexpected finalize failure payload: %#v", payload)
-	}
-	issues, ok := payload["finalize_issues"].([]interface{})
-	if !ok || len(issues) != 1 || issues[0] != "missing_evidence:analysis" {
-		t.Fatalf("expected missing_evidence issue, got %#v", payload["finalize_issues"])
+	if payload["ok"] != true || payload["delivery_state"] != "finalized" {
+		t.Fatalf("finalize must not interpret numeric prose, got %#v", payload)
 	}
 }
 
@@ -738,6 +668,7 @@ func TestConfigureReportToolMergeAndReset(t *testing.T) {
 	tool := &ConfigureReportTool{ReportState: state}
 
 	result, err := tool.Execute(json.RawMessage(`{
+		"action":"merge",
 		"custom_css":".hero{color:red;}",
 		"body_class":"magazine"
 	}`))
@@ -759,16 +690,8 @@ func TestConfigureReportToolMergeAndReset(t *testing.T) {
 		t.Fatal("expected layout merge to require finalize")
 	}
 
-	rejected, err := tool.Execute(json.RawMessage(`{"unknown_field":"x"}`))
-	if err != nil {
-		t.Fatalf("unsupported merge execute: %v", err)
-	}
-	var rejectedPayload map[string]interface{}
-	if err := json.Unmarshal([]byte(rejected), &rejectedPayload); err != nil {
-		t.Fatalf("expected failure payload: %v", err)
-	}
-	if rejectedPayload["ok"] != false {
-		t.Fatalf("expected ok=false for unsupported options, got %#v", rejectedPayload["ok"])
+	if _, err := tool.Execute(json.RawMessage(`{"unknown_field":"x"}`)); err == nil {
+		t.Fatal("expected strict contract error for unsupported field")
 	}
 
 	if _, err := tool.Execute(json.RawMessage(`{"action":"reset"}`)); err != nil {
@@ -782,16 +705,40 @@ func TestConfigureReportToolMergeAndReset(t *testing.T) {
 	}
 }
 
+func TestConfigureReportToolRespectsExplicitPartialScope(t *testing.T) {
+	t.Parallel()
+
+	state := &ReportState{}
+	tool := &ConfigureReportTool{
+		ReportState: state,
+		EditState:   &ReportEditState{ScopeKindValue: "partial_block", TargetBlockID: "b1"},
+	}
+	result, err := tool.Execute(json.RawMessage(`{"action":"merge","body_class":"wide"}`))
+	if err != nil {
+		t.Fatalf("expected structured scope failure: %v", err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(result), &payload); err != nil {
+		t.Fatalf("decode scope failure: %v", err)
+	}
+	if payload["ok"] != false || payload["error_code"] != "edit_scope_violation" {
+		t.Fatalf("unexpected scope failure: %#v", payload)
+	}
+	if state.Layout != (ReportLayout{}) {
+		t.Fatalf("layout changed outside explicit scope: %#v", state.Layout)
+	}
+}
+
 func TestManageReportBlocksToolSupportsCRUD(t *testing.T) {
 	t.Parallel()
 
 	state := &ReportState{}
 	tool := &ManageReportBlocksTool{ReportState: state}
 
-	if _, err := tool.Execute(json.RawMessage(`{"block_id":"intro","block_kind":"markdown","title":"导言","content":"第一段"}`)); err != nil {
+	if _, err := tool.Execute(json.RawMessage(`{"action":"append","block_id":"intro","block_kind":"markdown","title":"导言","content":"第一段"}`)); err != nil {
 		t.Fatalf("append intro: %v", err)
 	}
-	if _, err := tool.Execute(json.RawMessage(`{"block_id":"chart-1","block_kind":"chart","title":"趋势图","chart_id":"chart_sales"}`)); err != nil {
+	if _, err := tool.Execute(json.RawMessage(`{"action":"append","block_id":"chart-1","block_kind":"chart","title":"趋势图","chart_id":"chart_sales"}`)); err != nil {
 		t.Fatalf("append chart block: %v", err)
 	}
 	if len(state.Blocks) != 2 {

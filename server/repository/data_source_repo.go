@@ -49,7 +49,6 @@ type SemanticProfileRepository interface {
 	ListBySource(ctx context.Context, sourceID string) ([]domain.SemanticProfile, error)
 	UpdateStatus(ctx context.Context, id string, status domain.ProfileStatus) error
 	UpdateProfileJSON(ctx context.Context, id string, profileJSON string) error
-	FindWorkspaceConfirmation(ctx context.Context, workspaceID, schemaSignature string) (*domain.SemanticConfirmation, error)
 	Delete(ctx context.Context, id string) error
 }
 

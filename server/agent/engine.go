@@ -2,7 +2,10 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"regexp"
@@ -10,54 +13,78 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/ifnodoraemon/openDataAnalysis/internal/jsoncontract"
+	"github.com/ifnodoraemon/openDataAnalysis/metrics"
 	"github.com/ifnodoraemon/openDataAnalysis/tools"
 )
 
 // Engine Agent 主循环引擎
 type Engine struct {
-	llm           *LLMClient
-	registry      *tools.Registry
-	policy        string
-	history       []ConversationItem
-	contextDigest string
-	mu            sync.Mutex
+	llm                    *LLMClient
+	registry               *tools.Registry
+	policy                 string
+	history                []ConversationItem
+	omittedHistoryMessages int
+	confirmationReceipts   map[string]*ConfirmationReceipt
+	reportState            *tools.ReportState
+	mu                     sync.Mutex
+}
+
+// ConfirmationReceipt binds one authenticated user response to the exact
+// user_request_input context that requested it. Receipts are single-use.
+type ConfirmationReceipt struct {
+	ID           string
+	ToolCallID   string
+	ActorUserID  string
+	Scope        string
+	ContextRef   string
+	Question     string
+	ResponseText string
+	Action       string
+	ResourceRef  string
+	PayloadHash  string
+	CreatedAt    time.Time
+	ConsumedAt   *time.Time
 }
 
 const (
 	contextBudgetTokens         = 128000
 	contextCompactTriggerTokens = contextBudgetTokens * 9 / 10
 	recentContextWindow         = 12
-	historyDigestPrefix         = "=== History Digest ==="
-	maxDigestBulletCount        = 24
 	maxMainLoopIterations       = 50
 )
 
 type eventEmitterAware interface {
-	SetEventEmitter(func(WSEvent))
+	SetEventEmitter(func(RuntimeEvent))
 }
 
 type executionContextAware interface {
 	SetExecutionContext(context.Context)
 }
 
-type specialToolHandler func(context.Context, LLMToolCall, string, func(WSEvent)) (string, error, bool)
-
-// isRetryableToolError 判断工具执行错误是否属于可重试的网络临时故障。
-func isRetryableToolError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "timeout") ||
-		strings.Contains(msg, "connection refused") ||
-		strings.Contains(msg, "tls handshake") ||
-		strings.Contains(msg, "i/o timeout") ||
-		strings.Contains(msg, "eof") ||
-		strings.Contains(msg, "connection reset by peer")
+type suspensionEventTool interface {
+	SuspensionEvent(json.RawMessage) (RuntimeEvent, error)
 }
 
-// retryableToolExec 在工具执行层面对瞬态网络错误做最多 3 次指数退避重试。
-// 注意：special handler（user_request_input / report_finalize）不经过此函数。
+type userResponseTool interface {
+	AcceptsUserResponse() bool
+}
+
+func emitEngineError(emit func(RuntimeEvent), code, message string, err error) {
+	if err != nil {
+		log.Printf("engine failure code=%s err=%v", code, err)
+	}
+	emit(RuntimeEvent{Type: EventError, Data: ErrorData{Message: message, Code: code}})
+}
+
+// isRetryableToolError only retries failures that expose a typed transient
+// transport contract. Tool behavior is never inferred from error wording.
+func isRetryableToolError(err error) bool {
+	return isTransientTransportError(err)
+}
+
+// retryableToolExec retries transient execution failures within a bounded budget.
 func retryableToolExec(ctx context.Context, registry *tools.Registry, toolName string, args json.RawMessage) (string, error) {
 	delays := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 	var result string
@@ -98,221 +125,49 @@ func compactWorkerBundle(bundle *PromptBundle, promptTokens int) {
 
 	recentStart = adjustCompactionBoundary(bundle.History, recentStart)
 
-	existingDigest := ""
-	for _, ctx := range bundle.RuntimeContext {
-		if ctx.Name == "digest" {
-			existingDigest = ctx.Content
-		}
-	}
-
-	digest := buildHistoryDigest(existingDigest, bundle.History[:recentStart])
-	if digest == "" {
-		return
-	}
-
-	found := false
-	for i := range bundle.RuntimeContext {
-		if bundle.RuntimeContext[i].Name == "digest" {
-			bundle.RuntimeContext[i].Content = digest
-			if strings.TrimSpace(bundle.RuntimeContext[i].Role) == "" {
-				bundle.RuntimeContext[i].Role = "user"
-			}
-			found = true
-			break
-		}
-	}
-	if !found {
-		bundle.RuntimeContext = append(bundle.RuntimeContext, RuntimeContextBlock{Name: "digest", Role: "user", Content: digest})
-	}
-
+	bundle.RuntimeContext = append(bundle.RuntimeContext, RuntimeContextBlock{
+		Name: "history_window", Role: "user", Content: fmt.Sprintf(`{"omitted_message_count":%d}`, recentStart),
+	})
 	bundle.History = bundle.History[recentStart:]
 }
 
-// NewEngine 创建 Agent 引擎（支持多轮对话）
-func NewEngine(registry *tools.Registry, systemPrompt string) *Engine {
-	if systemPrompt == "" {
-		systemPrompt = BuildPolicyPrompt()
+// NewEngine 使用项目唯一的静态策略创建智能体引擎。
+func NewEngine(registry *tools.Registry) *Engine {
+	if registry == nil {
+		panic("tool registry is not initialized")
 	}
 	return &Engine{
-		llm:      NewLLMClient(),
-		registry: registry,
-		policy:   systemPrompt,
+		llm:                  NewLLMClient(),
+		registry:             registry,
+		policy:               BuildPolicyPrompt(),
+		confirmationReceipts: make(map[string]*ConfirmationReceipt),
 	}
+}
+
+func (e *Engine) SetReportState(state *tools.ReportState) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.reportState = state
+}
+
+func (e *Engine) reportDraftAfterMutation(startVersion uint64) (bool, uint64) {
+	e.mu.Lock()
+	state := e.reportState
+	e.mu.Unlock()
+	if state == nil {
+		return false, 0
+	}
+	state.RLock()
+	defer state.RUnlock()
+	return state.MutationVersion > startVersion && state.NeedsFinalize, state.MutationVersion
 }
 
 func (e *Engine) ResetMessages() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.history = nil
-	e.contextDigest = ""
-}
-
-// RestoreHistory 从外部持久化存储恢复 LLM 执行历史
-func (e *Engine) RestoreHistory(history []ConversationItem) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if len(e.history) == 0 {
-		e.history = history
-	}
-}
-
-// summarizeMessageForDigest 为历史摘要提取每条消息的最有价值片段。
-// - tool result：优先使用 ui_summary/message 等语义字段（由 digestSummary 提取），不截断
-// - assistant status/content：取末段结论（结论往往在末尾），而非首部截断
-// - user / tool_call：取末段，400 字上限
-func summarizeMessageForDigest(msg ConversationItem) string {
-	switch msg.Role {
-	case LLMRoleUser:
-		if text := digestSummary(msg.Content, 400); text != "" {
-			return "user: " + text
-		}
-	case LLMRoleAssistant:
-		parts := make([]string, 0, len(msg.ToolCalls)+1)
-		// 取 assistant 可见状态文本的末段结论，400 字
-		if text := digestSummary(msg.Content, 400); text != "" {
-			parts = append(parts, "assistant: "+text)
-		}
-		if len(msg.ToolCalls) > 0 {
-			names := make([]string, 0, len(msg.ToolCalls))
-			for _, tc := range msg.ToolCalls {
-				names = append(names, tc.Function.Name)
-			}
-			parts = append(parts, "tool calls: "+strings.Join(names, ", "))
-		}
-		return strings.Join(parts, " | ")
-	case LLMRoleTool:
-		// digestSummary 会优先提取 ui_summary 等语义字段，不截断语义完整的摘要
-		rawSummary := extractToolSummary(msg.Content)
-		if summary := digestSummary(rawSummary, 400); summary != "" {
-			return "tool result: " + summary
-		}
-	}
-	return ""
-}
-
-func extractToolSummary(content string) string {
-	trimmed := strings.TrimSpace(content)
-	if trimmed == "" {
-		return ""
-	}
-	var payload map[string]interface{}
-	if err := json.Unmarshal([]byte(trimmed), &payload); err == nil {
-		if summary := buildStructuredToolSummary(payload); summary != "" {
-			return summary
-		}
-		if result, ok := payload["result"].(string); ok && strings.TrimSpace(result) != "" {
-			return result
-		}
-		if message, ok := payload["message"].(string); ok && strings.TrimSpace(message) != "" {
-			return message
-		}
-		if summary, ok := payload["ui_summary"].(string); ok && strings.TrimSpace(summary) != "" {
-			return summary
-		}
-		if tool, ok := payload["tool"].(string); ok {
-			return fmt.Sprintf("tool=%s", tool)
-		}
-	}
-	return trimmed
-}
-
-func buildStructuredToolSummary(payload map[string]interface{}) string {
-	parts := make([]string, 0, 8)
-	if tool, ok := payload["tool"].(string); ok && strings.TrimSpace(tool) != "" {
-		parts = append(parts, "tool="+strings.TrimSpace(tool))
-	}
-	if ok, exists := payload["ok"].(bool); exists {
-		parts = append(parts, fmt.Sprintf("ok=%t", ok))
-	}
-	for _, key := range []string{
-		"error_code",
-		"action",
-		"status",
-		"memory_key",
-		"table_name",
-		"row_count",
-		"table_count",
-		"file_count",
-		"fact_count",
-		"goal_count",
-		"goal_id",
-		"active_branch_count",
-		"active_roots",
-		"affects_report_delivery",
-		"run_status",
-		"child_run_status",
-		"child_result",
-		"block_count",
-		"chart_count",
-		"delivery_state",
-		"finalize_issue_count",
-		"target_block_id",
-		"child_run_id",
-		"delegate_role",
-		"report_title",
-	} {
-		if value, exists := payload[key]; exists {
-			if part := formatSummaryField(key, value); part != "" {
-				parts = append(parts, part)
-			}
-		}
-	}
-	return strings.Join(parts, ", ")
-}
-
-func formatSummaryField(key string, value interface{}) string {
-	switch typed := value.(type) {
-	case string:
-		typed = strings.TrimSpace(typed)
-		if typed == "" {
-			return ""
-		}
-		return fmt.Sprintf("%s=%s", key, typed)
-	case bool:
-		return fmt.Sprintf("%s=%t", key, typed)
-	case float64:
-		if typed == float64(int64(typed)) {
-			return fmt.Sprintf("%s=%d", key, int64(typed))
-		}
-		return fmt.Sprintf("%s=%g", key, typed)
-	default:
-		return ""
-	}
-}
-
-func buildHistoryDigest(existing string, messages []ConversationItem) string {
-	// 收集本轮新增的 bullet 条目（不含已有 digest 文本）
-	bullets := make([]string, 0, len(messages))
-	for _, msg := range messages {
-		if summary := summarizeMessageForDigest(msg); summary != "" {
-			bullets = append(bullets, "- "+summary)
-		}
-	}
-
-	// 对新增 bullets 超限时截断，existing digest 整段保留不参与 bullet 计数
-	if len(bullets) > maxDigestBulletCount {
-		bullets = append(bullets[:maxDigestBulletCount-1], "- Earlier execution details have been compacted.")
-	}
-
-	// 拼接：existing digest（已有摘要）在前，新 bullets 在后
-	// 注意：此函数返回纯 digest 内容（不含 historyDigestPrefix），
-	// 由调用方在注入 RuntimeContext 时统一添加前缀，避免“摘要包摘要”的前缀累积。
-	parts := make([]string, 0, 2)
-	if trimmed := strings.TrimSpace(existing); trimmed != "" {
-		// RuntimeContext 注入时会带展示前缀；digest 正文内部保持无前缀。
-		trimmed = strings.TrimPrefix(trimmed, historyDigestPrefix)
-		trimmed = strings.TrimSpace(trimmed)
-		if trimmed != "" {
-			parts = append(parts, trimmed)
-		}
-	}
-	if len(bullets) > 0 {
-		parts = append(parts, strings.Join(bullets, "\n"))
-	}
-	if len(parts) == 0 {
-		return ""
-	}
-	return strings.Join(parts, "\n")
+	e.omittedHistoryMessages = 0
+	e.confirmationReceipts = make(map[string]*ConfirmationReceipt)
 }
 
 func (e *Engine) compactMessagesLocked(promptTokens int) {
@@ -330,12 +185,7 @@ func (e *Engine) compactMessagesLocked(promptTokens int) {
 
 	recentStart = adjustCompactionBoundary(e.history, recentStart)
 
-	digest := buildHistoryDigest(e.contextDigest, e.history[:recentStart])
-	if digest == "" {
-		return
-	}
-
-	e.contextDigest = digest
+	e.omittedHistoryMessages += recentStart
 	e.history = e.history[recentStart:]
 }
 
@@ -373,10 +223,7 @@ func adjustCompactionBoundary(history []ConversationItem, boundary int) int {
 	return boundary
 }
 
-func (e *Engine) prepareRuntimeTools(ctx context.Context, emit func(WSEvent)) {
-	if e.registry == nil {
-		return
-	}
+func (e *Engine) prepareRuntimeTools(ctx context.Context, emit func(RuntimeEvent)) {
 	for _, tool := range e.registry.ListTools() {
 		if next, ok := tool.(eventEmitterAware); ok {
 			next.SetEventEmitter(emit)
@@ -387,80 +234,53 @@ func (e *Engine) prepareRuntimeTools(ctx context.Context, emit func(WSEvent)) {
 	}
 }
 
-func (e *Engine) specialToolHandlers() map[string]specialToolHandler {
-	return map[string]specialToolHandler{
-		"user_request_input": func(ctx context.Context, toolCall LLMToolCall, assistantContent string, emit func(WSEvent)) (string, error, bool) {
-			payload, err := parseAskUserToolCallArguments(toolCall.Function.Arguments)
-			if err != nil {
-				// Fallback when question is missing from tool arguments but is provided in choice.Message.Content
-				trimmedContent := strings.TrimSpace(assistantContent)
-				if trimmedContent != "" {
-					var args askUserToolCallArguments
-					_ = json.Unmarshal([]byte(toolCall.Function.Arguments), &args)
-
-					allowCustom := true
-					if args.AllowCustom != nil {
-						allowCustom = *args.AllowCustom
-					}
-					options, _ := validateAskUserOptions(args.Options)
-					selectionMode, _ := normalizeAskUserSelectionMode(args.SelectionMode)
-
-					payload = AskUserData{
-						Question:      trimmedContent,
-						Reason:        strings.TrimSpace(args.Reason),
-						Scope:         strings.TrimSpace(args.Scope),
-						ContextRef:    strings.TrimSpace(args.ContextRef),
-						InputHint:     strings.TrimSpace(args.InputHint),
-						Required:      args.Required,
-						SelectionMode: selectionMode,
-						AllowCustom:   allowCustom,
-						Options:       options,
-					}
-					err = nil
-				}
-			}
-			if err != nil {
-				return "", err, true
-			}
-			emit(WSEvent{Type: EventUserRequestInput, Data: payload})
-			return "", nil, true
-		},
-		"report_finalize": func(ctx context.Context, toolCall LLMToolCall, assistantContent string, emit func(WSEvent)) (string, error, bool) {
-			result, err := e.registry.Execute(toolCall.Function.Name, json.RawMessage(toolCall.Function.Arguments))
-			if err == nil && result != "" {
-				result = applyReportHTMLGuardrail(result)
-			}
-			return result, err, false
-		},
+func toolCapability(tool tools.Tool) tools.ToolCapability {
+	provider, ok := tool.(tools.CapabilityTool)
+	if !ok {
+		return tools.ToolCapability{}
 	}
+	return provider.Capability()
 }
 
 // Run 执行 Agent 主循环
 // userInput 为空字符串时表示从 user_request_input 挂起点恢复执行，
 // 用户答案已通过 ProvideAskUserResult 注入历史，此时不再追加额外的 user 消息。
-func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func() []RuntimeContextBlock, emit func(WSEvent)) {
+func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func() []RuntimeContextBlock, emit func(RuntimeEvent)) {
+	if ctx == nil {
+		panic("agent run context must not be nil")
+	}
 	if emit == nil {
-		emit = func(WSEvent) {}
+		panic("agent runtime event emitter must not be nil")
 	}
 	e.prepareRuntimeTools(ctx, emit)
-	specialHandlers := e.specialToolHandlers()
 
 	e.mu.Lock()
 	toolSpecs := e.registry.GetToolSpecs()
 	e.mu.Unlock()
 
 	userTask := userInput
+	var startMutationVersion uint64
+	e.mu.Lock()
+	initialReportState := e.reportState
+	e.mu.Unlock()
+	if initialReportState != nil {
+		initialReportState.RLock()
+		startMutationVersion = initialReportState.MutationVersion
+		initialReportState.RUnlock()
+	}
+	var continuationFacts []RuntimeContextBlock
+	var injectedDeliveryVersion uint64
 
 	for i := 1; ; i++ {
 		select {
 		case <-ctx.Done():
-			emit(WSEvent{Type: EventRunCancelled, Data: ErrorData{Message: "task cancelled"}})
+			emit(RuntimeEvent{Type: EventRunCancelled, Data: ErrorData{Message: "任务已取消"}})
 			return
 		default:
 		}
 
 		if i > maxMainLoopIterations {
-			emit(WSEvent{Type: EventError, Data: ErrorData{Message: fmt.Sprintf("main loop exceeded max iterations %d", maxMainLoopIterations)}})
+			emitEngineError(emit, "iteration_limit_exceeded", fmt.Sprintf("任务超过运行轮次上限（%d）", maxMainLoopIterations), nil)
 			return
 		}
 
@@ -472,23 +292,18 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 		if getRuntimeVars != nil {
 			bundle.RuntimeContext = append(bundle.RuntimeContext, getRuntimeVars()...)
 		}
-		if e.contextDigest != "" {
-			digestBody := strings.TrimPrefix(strings.TrimSpace(e.contextDigest), historyDigestPrefix)
-			digestBody = strings.TrimSpace(digestBody)
-			if digestBody != "" {
-				bundle.RuntimeContext = append(bundle.RuntimeContext, RuntimeContextBlock{
-					Name:    "digest",
-					Role:    "user",
-					Content: historyDigestPrefix + "\n" + digestBody,
-				})
-			}
+		bundle.RuntimeContext = append(bundle.RuntimeContext, continuationFacts...)
+		if e.omittedHistoryMessages > 0 {
+			bundle.RuntimeContext = append(bundle.RuntimeContext, RuntimeContextBlock{
+				Name: "history_window", Role: "user", Content: fmt.Sprintf(`{"omitted_message_count":%d}`, e.omittedHistoryMessages),
+			})
 		}
 		bundle.History = append([]ConversationItem(nil), e.history...)
 		e.mu.Unlock()
 
-		resp, err := e.llm.ChatWithTools(ctx, bundle, toolSpecs)
-		if err != nil {
-			emit(WSEvent{Type: EventError, Data: ErrorData{Message: err.Error()}})
+		resp, llmErr := e.llm.ChatWithTools(ctx, bundle, toolSpecs)
+		if llmErr != nil {
+			emitEngineError(emit, "llm_request_failed", "模型服务调用失败", llmErr)
 			return
 		}
 
@@ -504,7 +319,7 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 		e.mu.Unlock()
 
 		if len(resp.Choices) == 0 {
-			emit(WSEvent{Type: EventError, Data: ErrorData{Message: "LLM returned empty response"}})
+			emitEngineError(emit, "empty_llm_response", "模型服务未返回响应内容", nil)
 			return
 		}
 
@@ -513,8 +328,20 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 		// 有文本内容时，推送模型面向用户的状态说明。
 		if choice.Message.Content != "" {
 			if len(choice.Message.ToolCalls) > 0 {
-				emit(WSEvent{Type: EventAssistantStatus, Data: AssistantStatusData{Content: choice.Message.Content}})
+				emit(RuntimeEvent{Type: EventAssistantStatus, Data: AssistantStatusData{Content: choice.Message.Content}})
 			} else {
+				if draft, version := e.reportDraftAfterMutation(startMutationVersion); draft && injectedDeliveryVersion != version {
+					e.mu.Lock()
+					e.history = append(e.history, ConversationItem{Role: LLMRoleAssistant, Content: choice.Message.Content, ReasoningContent: choice.Message.ReasoningContent})
+					e.mu.Unlock()
+					emit(RuntimeEvent{Type: EventAssistantStatus, Data: AssistantStatusData{Content: choice.Message.Content}})
+					injectedDeliveryVersion = version
+					continuationFacts = []RuntimeContextBlock{{
+						Name: "report_delivery_state", Role: "user",
+						Content: fmt.Sprintf("report_mutation_version=%d; needs_finalize=true; delivery_state=draft; is_finalized=false", version),
+					}}
+					continue
+				}
 				// 有文本 + 无工具调用 → 最终回复
 				e.mu.Lock()
 				e.history = append(e.history, ConversationItem{
@@ -523,7 +350,7 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 					ReasoningContent: choice.Message.ReasoningContent,
 				})
 				e.mu.Unlock()
-				emit(WSEvent{Type: EventRunCompleted, Data: CompleteData{Summary: choice.Message.Content}})
+				emit(RuntimeEvent{Type: EventRunCompleted, Data: CompleteData{Summary: choice.Message.Content}})
 				return
 			}
 		}
@@ -531,7 +358,7 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 		// 如果 finish_reason 是 stop 且没有工具调用，结束
 		if choice.FinishReason == LLMFinishReasonStop && len(choice.Message.ToolCalls) == 0 {
 			if strings.TrimSpace(choice.Message.Content) == "" {
-				emit(WSEvent{Type: EventError, Data: ErrorData{
+				emit(RuntimeEvent{Type: EventError, Data: ErrorData{
 					Message: "模型没有返回可展示的分析内容，请重试或检查当前 LLM 网关配置。",
 					Code:    "empty_llm_output",
 				}})
@@ -544,18 +371,28 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 				ReasoningContent: choice.Message.ReasoningContent,
 			})
 			e.mu.Unlock()
-			emit(WSEvent{Type: EventRunCompleted, Data: CompleteData{Summary: choice.Message.Content}})
+			emit(RuntimeEvent{Type: EventRunCompleted, Data: CompleteData{Summary: choice.Message.Content}})
 			return
 		}
 
 		// 处理工具调用
 		if len(choice.Message.ToolCalls) > 0 {
+			if err := validateToolCallBatch(e.registry, choice.Message.ToolCalls); err != nil {
+				emitEngineError(emit, "invalid_tool_call_batch", "工具调用批次不符合协议", err)
+				return
+			}
 			// 将 assistant 消息加入历史
 			e.mu.Lock()
 			e.history = append(e.history, compactAssistantMessage(choice.Message))
 			e.mu.Unlock()
 
 			for _, toolCall := range choice.Message.ToolCalls {
+				registeredTool, lookupErr := e.registry.Get(toolCall.Function.Name)
+				if lookupErr != nil {
+					emitEngineError(emit, "tool_not_available", "请求的工具不可用", lookupErr)
+					return
+				}
+				capability := toolCapability(registeredTool)
 				toolSpan := llmDebugWriter.StartSpan(
 					TraceMetadataFromContext(ctx),
 					"tool",
@@ -564,15 +401,6 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 					toolCall.ID,
 				)
 
-				// 通知前端: 工具调用
-				emit(WSEvent{
-					Type: EventToolCall,
-					Data: ToolCallData{
-						ID:        toolCall.ID,
-						Name:      toolCall.Function.Name,
-						Arguments: json.RawMessage(toolCall.Function.Arguments),
-					},
-				})
 				argPath := llmDebugWriter.WriteBlob(toolSpan, "arguments.json", []byte(toolCall.Function.Arguments))
 				llmDebugWriter.WriteEvent(toolSpan, "tool.call", map[string]interface{}{
 					"tool_name":        toolCall.Function.Name,
@@ -585,34 +413,52 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 				// 执行工具
 				start := time.Now()
 
-				var result string
-				var execErr error
-
-				if handler, ok := specialHandlers[toolCall.Function.Name]; ok {
-					var stop bool
-					result, execErr, stop = handler(ctx, toolCall, choice.Message.Content, emit)
-					if execErr != nil && toolCall.Function.Name == "user_request_input" {
-						emit(WSEvent{Type: EventError, Data: ErrorData{Message: execErr.Error()}})
+				if capability.RunControl == "suspend" {
+					provider, ok := registeredTool.(suspensionEventTool)
+					if !ok {
+						emitEngineError(emit, "invalid_suspension_contract", "工具挂起协议无效", nil)
 						return
 					}
-					if stop {
+					event, suspendErr := provider.SuspensionEvent(json.RawMessage(toolCall.Function.Arguments))
+					if suspendErr != nil {
+						emitEngineError(emit, "invalid_suspension_event", "工具挂起事件无效", suspendErr)
 						return
 					}
-				} else {
-					result, execErr = retryableToolExec(ctx, e.registry, toolCall.Function.Name, json.RawMessage(toolCall.Function.Arguments))
-				}
-
-				duration := time.Since(start).Milliseconds()
-
-				// If we got canceled during execution (or context ended), drop the result, abort tool loop, allow ctx.Done to catch in next loop
-				if ctx.Err() != nil {
+					emit(event)
 					return
 				}
 
-				success := toolCallSucceeded(result, execErr)
+				emit(RuntimeEvent{
+					Type: EventToolCall,
+					Data: ToolCallData{
+						ID:        toolCall.ID,
+						Name:      toolCall.Function.Name,
+						Arguments: json.RawMessage(toolCall.Function.Arguments),
+					},
+				})
+
+				result, execErr := retryableToolExec(ctx, e.registry, toolCall.Function.Name, json.RawMessage(toolCall.Function.Arguments))
+
+				duration := time.Since(start).Milliseconds()
+
+				// If we got canceled during execution (or context ended), drop the result and abort the tool loop.
+				if ctx.Err() != nil {
+					emit(RuntimeEvent{Type: EventRunCancelled, Data: ErrorData{Message: "任务已取消"}})
+					return
+				}
+
+				result, success, contractErr := normalizeToolExecutionResult(toolCall.Function.Name, result, execErr)
+				if contractErr != nil {
+					execErr = contractErr
+					log.Printf("Tool %s returned an invalid result contract: %v", toolCall.Function.Name, contractErr)
+				}
+				status := "success"
+				if !success {
+					status = "failure"
+				}
+				metrics.ToolCallsTotal.WithLabelValues(toolCall.Function.Name, status).Inc()
+				metrics.ToolCallDuration.WithLabelValues(toolCall.Function.Name).Observe(float64(duration) / 1000)
 				if execErr != nil {
-					sanitized := sanitizeToolError(execErr.Error())
-					result = fmt.Sprintf("tool execution error: %s", sanitized)
 					log.Printf("Tool %s error: %v", toolCall.Function.Name, execErr)
 				}
 				resultBytes := []byte(result)
@@ -630,7 +476,7 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 				})
 
 				// 通知前端: 工具结果
-				emit(WSEvent{
+				emit(RuntimeEvent{
 					Type: EventToolResult,
 					Data: ToolResultData{
 						ID:       toolCall.ID,
@@ -641,25 +487,31 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 					},
 				})
 				if ctx.Err() != nil {
+					emit(RuntimeEvent{Type: EventRunCancelled, Data: ErrorData{Message: "任务已取消"}})
 					return
 				}
 
 				// 将工具结果加入消息历史
+				compactedResult, compactErr := compactToolResult(toolCall.Function.Name, result)
+				if compactErr != nil {
+					emitEngineError(emit, "tool_result_compaction_failed", "处理工具结果失败", compactErr)
+					return
+				}
 				e.mu.Lock()
 				e.history = append(e.history, ConversationItem{
 					Role:       LLMRoleTool,
-					Content:    compactToolResult(toolCall.Function.Name, result),
+					Content:    compactedResult,
 					ToolCallID: toolCall.ID,
 				})
 				e.mu.Unlock()
 
-				if toolCall.Function.Name == "report_finalize" && isSuccessfulFinalizeResult(result) {
+				if capability.DeliveryBoundary && isSuccessfulDeliveryBoundaryResult(result) {
 					summary, summaryErr := e.finalResponseAfterFinalize(ctx, getRuntimeVars)
 					if summaryErr != nil {
-						emit(WSEvent{Type: EventError, Data: ErrorData{Message: summaryErr.Error()}})
+						emitEngineError(emit, "final_response_failed", "生成最终回复失败", summaryErr)
 						return
 					}
-					emit(WSEvent{Type: EventRunCompleted, Data: CompleteData{Summary: summary}})
+					emit(RuntimeEvent{Type: EventRunCompleted, Data: CompleteData{Summary: summary}})
 					return
 				}
 			}
@@ -669,7 +521,7 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 
 		// 保护性错误路径：正常流程不会到达此处。不要硬编码最终回复；
 		// 若模型没有给出文本或工具调用，让 run 以可诊断错误结束。
-		emit(WSEvent{Type: EventError, Data: ErrorData{
+		emit(RuntimeEvent{Type: EventError, Data: ErrorData{
 			Message: "模型没有返回可展示的分析内容，也没有请求工具调用。",
 			Code:    "empty_llm_output",
 		}})
@@ -678,7 +530,27 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 
 }
 
-func isSuccessfulFinalizeResult(result string) bool {
+func validateToolCallBatch(registry *tools.Registry, calls []LLMToolCall) error {
+	if registry == nil {
+		return fmt.Errorf("tool registry is not initialized")
+	}
+	suspending := 0
+	for _, call := range calls {
+		tool, err := registry.Get(call.Function.Name)
+		if err != nil {
+			return err
+		}
+		if toolCapability(tool).RunControl == "suspend" {
+			suspending++
+		}
+	}
+	if suspending > 0 && len(calls) != 1 {
+		return fmt.Errorf("a run-suspending tool call must be the only tool call in an assistant turn")
+	}
+	return nil
+}
+
+func isSuccessfulDeliveryBoundaryResult(result string) bool {
 	trimmed := strings.TrimSpace(result)
 	if trimmed == "" {
 		return false
@@ -687,11 +559,10 @@ func isSuccessfulFinalizeResult(result string) bool {
 	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
 		return false
 	}
-	tool, _ := payload["tool"].(string)
 	ok, _ := payload["ok"].(bool)
 	finalized, _ := payload["is_finalized"].(bool)
 	deliveryState, _ := payload["delivery_state"].(string)
-	return tool == "report_finalize" && ok && finalized && strings.EqualFold(strings.TrimSpace(deliveryState), "finalized")
+	return ok && finalized && deliveryState == "finalized"
 }
 
 func (e *Engine) finalResponseAfterFinalize(ctx context.Context, getRuntimeVars func() []RuntimeContextBlock) (string, error) {
@@ -702,16 +573,10 @@ func (e *Engine) finalResponseAfterFinalize(ctx context.Context, getRuntimeVars 
 	if getRuntimeVars != nil {
 		bundle.RuntimeContext = append(bundle.RuntimeContext, getRuntimeVars()...)
 	}
-	if e.contextDigest != "" {
-		digestBody := strings.TrimPrefix(strings.TrimSpace(e.contextDigest), historyDigestPrefix)
-		digestBody = strings.TrimSpace(digestBody)
-		if digestBody != "" {
-			bundle.RuntimeContext = append(bundle.RuntimeContext, RuntimeContextBlock{
-				Name:    "digest",
-				Role:    "user",
-				Content: historyDigestPrefix + "\n" + digestBody,
-			})
-		}
+	if e.omittedHistoryMessages > 0 {
+		bundle.RuntimeContext = append(bundle.RuntimeContext, RuntimeContextBlock{
+			Name: "history_window", Role: "user", Content: fmt.Sprintf(`{"omitted_message_count":%d}`, e.omittedHistoryMessages),
+		})
 	}
 	bundle.History = append([]ConversationItem(nil), e.history...)
 	e.mu.Unlock()
@@ -723,8 +588,8 @@ func (e *Engine) finalResponseAfterFinalize(ctx context.Context, getRuntimeVars 
 	if len(resp.Choices) == 0 {
 		return "", fmt.Errorf("LLM returned empty response")
 	}
-	summary := strings.TrimSpace(resp.Choices[0].Message.Content)
-	if summary == "" {
+	summary := resp.Choices[0].Message.Content
+	if strings.TrimSpace(summary) == "" {
 		return "", fmt.Errorf("LLM returned empty final response")
 	}
 	e.mu.Lock()
@@ -754,95 +619,24 @@ func compactAssistantMessage(message LLMMessage) ConversationItem {
 	if len(message.ToolCalls) > 0 {
 		for _, toolCall := range message.ToolCalls {
 			next := toolCall
-			next.Function.Arguments = compactToolArguments(toolCall.Function.Name, toolCall.Function.Arguments)
 			item.ToolCalls = append(item.ToolCalls, next)
 		}
 	}
 	return item
 }
 
-func compactToolArguments(toolName, raw string) string {
-	if strings.TrimSpace(raw) == "" {
-		return raw
-	}
-
-	switch toolName {
-	case "report_create_chart":
-		// report_create_chart 的参数结构会直接影响后续轮次的工具调用，
-		// 这里保留原始参数，避免把摘要字段误导回模型。
-		return raw
-	case "report_manage_blocks":
-		// report_manage_blocks 的参数也是可再次参考的报告状态变更。
-		// 保留原始参数，避免把 content_head/content_chars 这类历史摘要误导成下一轮工具参数。
-		return raw
-	case "report_finalize":
-		var payload struct {
-			ReportTitle string `json:"report_title"`
-			Author      string `json:"author"`
-		}
-		if err := json.Unmarshal([]byte(raw), &payload); err == nil {
-			summary, _ := json.Marshal(map[string]interface{}{
-				"report_title": payload.ReportTitle,
-				"author":       payload.Author,
-			})
-			return string(summary)
-		}
-	}
-
-	return raw
-}
-
 // clipHistoryText 已迁移至 stringutil.go clipText
 
-func compactToolResult(toolName, result string) string {
-	trimmed := strings.TrimSpace(result)
-	if trimmed == "" {
-		return result
+func compactToolResult(toolName string, result string) (string, error) {
+	var payload map[string]interface{}
+	if err := jsoncontract.Decode([]byte(result), &payload); err != nil {
+		return "", fmt.Errorf("tool %s result is not a strict JSON object: %w", toolName, err)
 	}
-
-	switch toolName {
-	case "data_query_sql":
-		var payload map[string]interface{}
-		if err := json.Unmarshal([]byte(trimmed), &payload); err == nil {
-			return compactQueryResult(payload)
-		}
-	case "data_describe_table":
-		var payload map[string]interface{}
-		if err := json.Unmarshal([]byte(trimmed), &payload); err == nil {
-			minified, _ := json.Marshal(stripHistorySummaryFields(payload))
-			return string(minified)
-		}
-	case "code_run_python":
-		var payload map[string]interface{}
-		if err := json.Unmarshal([]byte(trimmed), &payload); err == nil {
-			minified, _ := json.Marshal(stripHistorySummaryFields(payload))
-			return string(minified)
-		}
-	case "data_list_tables":
-		var payload map[string]interface{}
-		if err := json.Unmarshal([]byte(trimmed), &payload); err == nil {
-			minified, _ := json.Marshal(stripHistorySummaryFields(payload))
-			return string(minified)
-		}
-		return strings.Join(strings.Fields(trimmed), " ")
-	case "task_delegate":
-		var payload map[string]interface{}
-		if err := json.Unmarshal([]byte(trimmed), &payload); err == nil {
-			minified, _ := json.Marshal(map[string]interface{}{
-				"ok":            payload["ok"],
-				"tool":          payload["tool"],
-				"child_run_id":  payload["child_run_id"],
-				"delegate_role": payload["delegate_role"],
-				"goal_id":       payload["goal_id"],
-				"allowed_tools": payload["allowed_tools"],
-				"child_result":  payload["child_result"],
-				"trace_count":   delegateTraceCount(payload),
-			})
-			return string(minified)
-		}
+	minified, err := json.Marshal(stripHistorySummaryFields(payload))
+	if err != nil {
+		return "", fmt.Errorf("compact tool %s result: %w", toolName, err)
 	}
-
-	return result
+	return string(minified), nil
 }
 
 func stripHistorySummaryFields(payload map[string]interface{}) map[string]interface{} {
@@ -859,157 +653,127 @@ func stripHistorySummaryFields(payload map[string]interface{}) map[string]interf
 	return cloned
 }
 
-const queryCompactRowThreshold = 20
-const queryCompactKeepRows = 10
-
-// compactQueryResult 为 data_query_sql 的大结果添加列统计摘要，截断多余行数据。
-// 满足两个目标：提供统计摘要加速理解，同时截断数据降低上下文膨胀。
-func compactQueryResult(payload map[string]interface{}) string {
-	cloned := stripHistorySummaryFields(payload)
-
-	rows, ok := cloned["rows"].([]interface{})
-	if !ok || len(rows) <= queryCompactRowThreshold {
-		minified, _ := json.Marshal(cloned)
-		return string(minified)
-	}
-
-	// 为数值列生成统计摘要
-	cloned["_row_count"] = len(rows)
-	cloned["_original_row_count"] = cloned["row_count"]
-	cloned["row_count"] = queryCompactKeepRows
-	if columns, ok := cloned["columns"].([]interface{}); ok && len(rows) > 0 {
-		stats := buildColumnStats(columns, rows)
-		if len(stats) > 0 {
-			cloned["column_stats"] = stats
-		}
-	}
-
-	// 截断行数据，降低上下文膨胀
-	cloned["rows"] = rows[:queryCompactKeepRows]
-	cloned["_truncated"] = true
-	cloned["_note"] = "result truncated for history context; full result is saved in traces."
-
-	minified, _ := json.Marshal(cloned)
-	return string(minified)
-}
-
-// buildColumnStats 为每个数值列生成 min/max/count 摘要
-func buildColumnStats(columns []interface{}, rows []interface{}) map[string]interface{} {
-	stats := make(map[string]interface{})
-	for _, colRaw := range columns {
-		col, ok := colRaw.(string)
-		if !ok {
-			continue
-		}
-
-		var min, max float64
-		numericCount := 0
-		for _, rowRaw := range rows {
-			row, ok := rowRaw.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			val, exists := row[col]
-			if !exists || val == nil {
-				continue
-			}
-			num, ok := val.(float64)
-			if !ok {
-				continue
-			}
-			if numericCount == 0 {
-				min, max = num, num
-			} else {
-				if num < min {
-					min = num
-				}
-				if num > max {
-					max = num
-				}
-			}
-			numericCount++
-		}
-		// 只为数值列生成统计
-		if numericCount > 0 {
-			stats[col] = map[string]interface{}{
-				"min":   min,
-				"max":   max,
-				"count": numericCount,
-			}
-		}
-	}
-	return stats
-}
-
-func delegateTraceCount(payload map[string]interface{}) int {
-	if count, ok := payload["trace_count"].(float64); ok {
-		return int(count)
-	}
-	return traceCount(payload["trace"])
-}
-
-func traceCount(value interface{}) int {
-	items, ok := value.([]interface{})
-	if !ok {
-		return 0
-	}
-	return len(items)
-}
-
-func toolCallSucceeded(result string, execErr error) bool {
+func normalizeToolExecutionResult(toolName, result string, execErr error) (string, bool, error) {
 	if execErr != nil {
-		return false
+		encoded, err := json.Marshal(map[string]interface{}{
+			"ok": false, "tool": toolName, "error_code": "execution_error", "message": sanitizeToolError(execErr.Error()),
+		})
+		if err != nil {
+			return "", false, errors.Join(execErr, err)
+		}
+		return string(encoded), false, nil
 	}
 
-	var payload struct {
-		OK *bool `json:"ok"`
+	var payload map[string]interface{}
+	if err := jsoncontract.Decode([]byte(result), &payload); err != nil {
+		contractErr := fmt.Errorf("tool %s result is not a strict result object: %w", toolName, err)
+		encoded, marshalErr := json.Marshal(map[string]interface{}{
+			"ok": false, "tool": toolName, "error_code": "invalid_tool_result", "message": contractErr.Error(),
+		})
+		return string(encoded), false, errors.Join(contractErr, marshalErr)
 	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(result)), &payload); err == nil && payload.OK != nil {
-		return *payload.OK
+	ok, hasOK := payload["ok"].(bool)
+	resultTool, hasTool := payload["tool"].(string)
+	if !hasOK || !hasTool || resultTool != toolName {
+		contractErr := fmt.Errorf("tool %s result must contain exact ok and tool fields", toolName)
+		encoded, marshalErr := json.Marshal(map[string]interface{}{
+			"ok": false, "tool": toolName, "error_code": "invalid_tool_result", "message": contractErr.Error(),
+		})
+		return string(encoded), false, errors.Join(contractErr, marshalErr)
 	}
-
-	return true
+	return result, ok, nil
 }
 
-// ProvideAskUserResult 将用户回复作为 user_request_input 工具的结构化执行结果注入 LLM 对话上下文。
-// 如果同一轮有多个 user_request_input 调用，同一个用户回复会填充所有未答复的调用。
-func (e *Engine) ProvideAskUserResult(userResponse string) error {
+// ProvideAskUserResult 将已认证用户的回复作为唯一挂起工具调用的结构化执行结果注入 LLM 对话上下文。
+func (e *Engine) ProvideAskUserResult(userResponse, actorUserID string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.registry == nil {
+		return fmt.Errorf("tool registry is not initialized")
+	}
+	if actorUserID == "" || actorUserID != strings.TrimSpace(actorUserID) {
+		return fmt.Errorf("authenticated actor user id is required")
+	}
 
-	var pendingIDs []string
+	type pendingAsk struct {
+		ID   string
+		Args askUserToolCallArguments
+	}
+	var pending []pendingAsk
 	for i := len(e.history) - 1; i >= 0; i-- {
 		msg := e.history[i]
 		if msg.Role == LLMRoleAssistant && len(msg.ToolCalls) > 0 {
 			for _, tc := range msg.ToolCalls {
-				if tc.Function.Name == "user_request_input" {
-					pendingIDs = append(pendingIDs, tc.ID)
+				tool, err := e.registry.Get(tc.Function.Name)
+				provider, ok := tool.(userResponseTool)
+				if err == nil && ok && provider.AcceptsUserResponse() {
+					var args askUserToolCallArguments
+					if err := jsoncontract.Decode([]byte(tc.Function.Arguments), &args); err != nil {
+						return fmt.Errorf("pending user_request_input arguments are invalid: %w", err)
+					}
+					pending = append(pending, pendingAsk{ID: tc.ID, Args: args})
 				}
 			}
 		}
-		if len(pendingIDs) > 0 {
+		if len(pending) > 0 {
 			break
 		}
 	}
 
-	if len(pendingIDs) == 0 {
+	if len(pending) == 0 {
 		return fmt.Errorf("no pending user_request_input tool call found")
+	}
+	if len(pending) != 1 {
+		return fmt.Errorf("expected one pending user response tool call, found %d", len(pending))
 	}
 
 	appended := 0
-	for _, id := range pendingIDs {
+	for _, ask := range pending {
 		hasResult := false
 		for j := len(e.history) - 1; j >= 0; j-- {
-			if e.history[j].Role == LLMRoleTool && e.history[j].ToolCallID == id {
+			if e.history[j].Role == LLMRoleTool && e.history[j].ToolCallID == ask.ID {
 				hasResult = true
 				break
 			}
 		}
 		if !hasResult {
+			receiptID := ""
+			approved := false
+			if ask.Args.Authorization != nil {
+				var err error
+				approved, err = authorizationResponseApproved(userResponse, ask.Args.Authorization)
+				if err != nil {
+					return err
+				}
+			}
+			if approved {
+				payloadHash, err := authorizationPayloadHash(ask.Args.Authorization.PayloadJSON)
+				if err != nil {
+					return err
+				}
+				receiptID = "ucr_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:20]
+				e.confirmationReceipts[receiptID] = &ConfirmationReceipt{
+					ID:           receiptID,
+					ToolCallID:   ask.ID,
+					ActorUserID:  actorUserID,
+					Scope:        ask.Args.Scope,
+					ContextRef:   ask.Args.ContextRef,
+					Question:     ask.Args.Question,
+					ResponseText: userResponse,
+					Action:       ask.Args.Authorization.Action,
+					ResourceRef:  ask.Args.Authorization.ResourceRef,
+					PayloadHash:  payloadHash,
+					CreatedAt:    time.Now(),
+				}
+			}
+			toolResult, err := buildAskUserToolResult(userResponse, receiptID)
+			if err != nil {
+				return err
+			}
 			e.history = append(e.history, ConversationItem{
 				Role:       LLMRoleTool,
-				Content:    buildAskUserToolResult(userResponse),
-				ToolCallID: id,
+				Content:    toolResult,
+				ToolCallID: ask.ID,
 			})
 			appended++
 		}
@@ -1022,27 +786,104 @@ func (e *Engine) ProvideAskUserResult(userResponse string) error {
 	return nil
 }
 
-func buildAskUserToolResult(userResponse string) string {
-	trimmed := strings.TrimSpace(userResponse)
+// CommitWithConfirmationReceipt serializes validation, the caller's durable
+// commit, and single-use consumption so a failed commit does not burn the receipt.
+func (e *Engine) CommitWithConfirmationReceipt(receiptID, action, resourceRef, payloadJSON string, commit func(actorUserID string) error) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if commit == nil {
+		return fmt.Errorf("confirmation commit callback is required")
+	}
+	if receiptID == "" || receiptID != strings.TrimSpace(receiptID) || action == "" || action != strings.TrimSpace(action) || resourceRef == "" || resourceRef != strings.TrimSpace(resourceRef) {
+		return fmt.Errorf("confirmation receipt ID, action, and resource reference must be non-empty exact values")
+	}
+	receipt := e.confirmationReceipts[receiptID]
+	if receipt == nil {
+		return fmt.Errorf("confirmation receipt not found")
+	}
+	if receipt.ConsumedAt != nil {
+		return fmt.Errorf("confirmation receipt has already been consumed")
+	}
+	if action == "" || receipt.Action != action {
+		return fmt.Errorf("confirmation receipt action does not match %q", action)
+	}
+	if resourceRef == "" || receipt.ResourceRef != resourceRef {
+		return fmt.Errorf("confirmation receipt resource does not match %q", resourceRef)
+	}
+	payloadHash, err := authorizationPayloadHash(payloadJSON)
+	if err != nil {
+		return err
+	}
+	if receipt.PayloadHash != payloadHash {
+		return fmt.Errorf("confirmation receipt payload does not match authorized change")
+	}
+	if err := commit(receipt.ActorUserID); err != nil {
+		return err
+	}
+	now := time.Now()
+	receipt.ConsumedAt = &now
+	return nil
+}
+
+func buildAskUserToolResult(userResponse, receiptID string) (string, error) {
 	payload := map[string]interface{}{
 		"ok":            true,
 		"tool":          "user_request_input",
-		"response_text": trimmed,
+		"response_text": userResponse,
 		"response_json": false,
-		"ui_summary":    "User input received.",
+		"ui_summary":    "已收到用户输入。",
+	}
+	if receiptID != "" {
+		payload["authorization_receipt_id"] = receiptID
+		payload["confirmation_receipt_id"] = receiptID
 	}
 	var parsed interface{}
-	if trimmed != "" && json.Unmarshal([]byte(trimmed), &parsed) == nil {
+	if strings.TrimSpace(userResponse) != "" && jsoncontract.Decode([]byte(userResponse), &parsed) == nil {
 		payload["response"] = parsed
 		payload["response_json"] = true
 	} else {
-		payload["response"] = trimmed
+		payload["response"] = userResponse
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
-		return `{"ok":false,"tool":"user_request_input","error":"failed to encode user response"}`
+		return "", fmt.Errorf("failed to encode user response: %w", err)
 	}
-	return string(encoded)
+	return string(encoded), nil
+}
+
+func authorizationResponseApproved(raw string, request *ActionAuthorizationRequest) (bool, error) {
+	if request == nil {
+		return false, nil
+	}
+	var response struct {
+		ResponseType          string `json:"response_type"`
+		AuthorizationDecision string `json:"authorization_decision"`
+		Action                string `json:"action"`
+		ResourceRef           string `json:"resource_ref"`
+	}
+	if err := jsoncontract.Decode([]byte(raw), &response); err != nil {
+		return false, fmt.Errorf("authorization response must be an exact JSON decision: %w", err)
+	}
+	if response.ResponseType != "authorization" || (response.AuthorizationDecision != "approve" && response.AuthorizationDecision != "reject") {
+		return false, fmt.Errorf("authorization response_type and authorization_decision are invalid")
+	}
+	if response.Action != request.Action || response.ResourceRef != request.ResourceRef {
+		return false, fmt.Errorf("authorization response does not match the requested action and resource")
+	}
+	return response.AuthorizationDecision == "approve", nil
+}
+
+func authorizationPayloadHash(raw string) (string, error) {
+	var payload interface{}
+	if err := jsoncontract.Decode([]byte(raw), &payload); err != nil {
+		return "", fmt.Errorf("authorization payload_json must be valid JSON: %w", err)
+	}
+	canonical, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 var toolErrorSanitizePatterns = []struct {
@@ -1050,7 +891,7 @@ var toolErrorSanitizePatterns = []struct {
 	replace string
 }{
 	{regexp.MustCompile(`(?i)(password|passwd|secret|token|api[_-]?key)\s*[=:]\s*\S+`), "${1}=***"},
-	{regexp.MustCompile(`(?i)(postgresql?|mysql|mongodb)://[^\s]+`), "${1}://***"},
+	{regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*)://[^\s]+`), "${1}://***"},
 	{regexp.MustCompile(`/home/[^\s]+`), "/home/***"},
 	{regexp.MustCompile(`/tmp/[^\s]+`), "/tmp/***"},
 	{regexp.MustCompile(`/var/[^\s]+`), "/var/***"},

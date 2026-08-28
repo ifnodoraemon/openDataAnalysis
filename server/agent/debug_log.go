@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -107,6 +109,7 @@ func (w *debugWriter) WriteEvent(span SpanInfo, eventName string, payload map[st
 	}
 	line, err := json.Marshal(record)
 	if err != nil {
+		log.Printf("debug trace: encode event: %v", err)
 		return
 	}
 
@@ -120,9 +123,11 @@ func (w *debugWriter) WriteEvent(span SpanInfo, eventName string, payload map[st
 
 	w.ensureTraceMetaLocked(span)
 	w.ensureSpanMetaLocked(span)
-	_ = appendJSONL(dailyPath, line)
-	_ = appendJSONL(tracePath, line)
-	_ = appendJSONL(spanPath, line)
+	for _, path := range []string{dailyPath, tracePath, spanPath} {
+		if err := appendJSONL(path, line); err != nil {
+			log.Printf("debug trace: append %s: %v", path, err)
+		}
+	}
 }
 
 func (w *debugWriter) WriteBlob(span SpanInfo, name string, payload []byte) string {
@@ -138,15 +143,17 @@ func (w *debugWriter) WriteBlob(span SpanInfo, name string, payload []byte) stri
 	w.ensureTraceMetaLocked(span)
 	w.ensureSpanMetaLocked(span)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		log.Printf("debug trace: create blob directory: %v", err)
 		return ""
 	}
 	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		log.Printf("debug trace: write blob %s: %v", path, err)
 		return ""
 	}
 	return path
 }
 
-func appendJSONL(path string, line []byte) error {
+func appendJSONL(path string, line []byte) (resultErr error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -154,10 +161,12 @@ func appendJSONL(path string, line []byte) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		resultErr = errors.Join(resultErr, f.Close())
+	}()
 
-	_, err = fmt.Fprintln(f, string(line))
-	return err
+	_, resultErr = fmt.Fprintln(f, string(line))
+	return resultErr
 }
 
 func (w *debugWriter) ensureTraceMetaLocked(span SpanInfo) {
@@ -176,13 +185,16 @@ func (w *debugWriter) ensureTraceMetaLocked(span SpanInfo) {
 	}
 	metaBytes, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
+		log.Printf("debug trace: encode trace metadata: %v", err)
 		return
 	}
 	metaPath := filepath.Join(llmDebugDir(), span.Date, span.TraceID, "trace.json")
 	if err := os.MkdirAll(filepath.Dir(metaPath), 0o755); err != nil {
+		log.Printf("debug trace: create trace metadata directory: %v", err)
 		return
 	}
 	if err := os.WriteFile(metaPath, metaBytes, 0o644); err != nil {
+		log.Printf("debug trace: write trace metadata %s: %v", metaPath, err)
 		return
 	}
 	w.traceMetaReady[span.TraceID] = true
@@ -209,13 +221,16 @@ func (w *debugWriter) ensureSpanMetaLocked(span SpanInfo) {
 	}
 	metaBytes, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
+		log.Printf("debug trace: encode span metadata: %v", err)
 		return
 	}
 	metaPath := filepath.Join(llmDebugDir(), span.Date, span.TraceID, "spans", span.SpanID, "span.json")
 	if err := os.MkdirAll(filepath.Dir(metaPath), 0o755); err != nil {
+		log.Printf("debug trace: create span metadata directory: %v", err)
 		return
 	}
 	if err := os.WriteFile(metaPath, metaBytes, 0o644); err != nil {
+		log.Printf("debug trace: write span metadata %s: %v", metaPath, err)
 		return
 	}
 	w.spanMetaReady[span.SpanID] = true

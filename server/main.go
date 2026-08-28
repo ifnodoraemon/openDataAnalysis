@@ -34,7 +34,9 @@ func main() {
 		AllowCredentials: true,
 	}))
 
-	r.Handle("/metrics", metrics.Handler())
+	if config.Cfg.MetricsExpose {
+		r.Handle("/metrics", metrics.Handler())
+	}
 
 	r.Group(func(authGroup chi.Router) {
 		authGroup.Use(handler.IPRateLimitMiddleware(30, 10))
@@ -75,7 +77,7 @@ func main() {
 			api.Get("/api/runs", handler.ListRunsHandler)
 			api.Get("/api/runs/{runID}", handler.GetRunHandler)
 			api.Get("/api/runs/{runID}/report", handler.GetRunReportHandler)
-			api.Get("/api/python-files/{filename}", handler.ProxyPythonFileHandler)
+			api.Get("/api/files/{fileID}", handler.DownloadFileHandler)
 
 			api.Get("/api/sessions/{sessionID}/sources", handler.SessionSourcesHandler)
 			api.Delete("/api/sessions/{sessionID}/sources/{sourceID}", handler.DeleteSessionSourceHandler)
@@ -102,7 +104,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("server started addr=0.0.0.0:%s ws_path=/ws model=%s endpoint=%s llm_debug=%t llm_debug_dir=%s",
+		log.Printf("server started addr=0.0.0.0:%s event_stream_path=/api/sse model=%s endpoint=%s llm_debug=%t llm_debug_dir=%s",
 			port,
 			config.Cfg.LLMModel,
 			config.Cfg.LLMAPIEndpoint,

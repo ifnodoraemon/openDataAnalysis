@@ -21,11 +21,14 @@
 
 ```bash
 cp server/.env.example server/.env
-# 填写 LLM_PROVIDER / LLM_API_KEY / LLM_MODEL / AUTH_SECRET 等配置
+# 显式填写 LLM_PROVIDER / LLM_API_PROTOCOL / LLM_API_ENDPOINT / LLM_API_KEY / LLM_MODEL / AUTH_SECRET
 docker compose up -d --build
 ```
 
 浏览器访问 `http://localhost`。
+
+当 `LLM_PROVIDER=openai` 时，必须显式选择 `LLM_API_PROTOCOL=responses` 或
+`LLM_API_PROTOCOL=chat_completions`。运行时不会根据兼容服务的域名或模型名猜测、改写协议和 endpoint。
 
 常用命令：
 
@@ -39,7 +42,7 @@ docker compose down
 
 ## 部署模式
 
-默认 Docker Compose 是开发 profile。它使用本地 SQLite 元数据、本地对象存储、进程内 run 执行、session SQLite 分析工作库，以及 executor 本地 Python 产物。
+默认 Docker Compose 是开发 profile。它使用本地 SQLite 元数据、本地对象存储、进程内 run 执行和 session SQLite 分析工作库；Python 产物会写入已配置的对象存储接口。
 
 生产部署必须显式设置 `DEPLOYMENT_MODE=production`。在该模式下，只要仍选择以下本地或单进程后端，服务会拒绝启动：
 
@@ -47,23 +50,22 @@ docker compose down
 - `STORAGE_PROVIDER=local`
 - `RUN_BACKEND=inprocess`
 - `ANALYSIS_STORE=session_sqlite`
-- `PYTHON_ARTIFACT_STORE=executor_local`
 - wildcard 或 localhost `CORS_ALLOWED_ORIGINS`
 
-MaaS 目标架构契约见 [`docs/maas-production-architecture.md`](docs/maas-production-architecture.md)。共享本地卷和 WebSocket sticky session 不被视为生产扩展方案。
+MaaS 目标架构契约见 [`docs/maas-production-architecture.md`](docs/maas-production-architecture.md)。共享本地卷和进程内事件订阅不被视为生产扩展方案。
 
 ## 架构概览
 
 | 层 | 说明 |
 |---|---|
 | Frontend | Vue 3 + Vite + Pinia |
-| Backend | Go + Chi + Gorilla WebSocket |
+| Backend | Go + Chi + SSE |
 | Agent Runtime | Tool-calling ReAct loop，状态和工具由 runtime 暴露，路径由模型判断 |
 | Analysis DB | 开发模式：每个 session 一个 SQLite 分析工作库。生产目标：worker 可重建 scratch state，事实来自 durable snapshot manifest |
 | Metadata DB | 开发模式：SQLite。生产目标：通过 repository 接口接入 PostgreSQL |
 | Python Executor | 独立服务，用于 SQL 不适合的高级分析 |
 | Storage | 开发模式：本地对象存储。生产目标：S3-compatible 对象存储 |
-| Semantic Assets | workspace 级语义资产，用于复用用户确认的口径、时间列、单位和 join 事实 |
+| Semantic Assets | workspace 级可复用资产，保存用户授权的精确补丁及其数据结构签名 |
 | Audit | 关键数据导入、语义确认和资产变更写入审计事件 |
 
 开发模式运行期目录都收敛到 `data/`：
@@ -78,19 +80,12 @@ MaaS 目标架构契约见 [`docs/maas-production-architecture.md`](docs/maas-pr
 
 | 类型 | 当前状态 |
 |---|---|
-| CSV | 推荐用于大文件；流式批量导入，无行数硬上限 |
-| Excel | 单 sheet 100,000 行硬上限 |
+| CSV | 流式批量导入，原样保留观测到的表头和单元格文本 |
+| Excel | 只接受恰好一个 worksheet 的工作簿，流式导入并原样保留表头和单元格文本 |
 | PostgreSQL / MySQL | 工作区级只读 SQL 连接，导入为 session SQLite snapshot；默认受 `SQL_IMPORT_ROW_LIMIT=1000000` 限制 |
 | Live upstream query | 暂不支持；后续应作为独立能力设计 |
 
-数据规模分层：
-
-| 规模 | 行数 | 默认画像模式 |
-|---|---:|---|
-| small | < 10,000 | exact |
-| medium | 10,000 - 99,999 | mixed |
-| large | 100,000 - 999,999 | sampled |
-| xlarge | >= 1,000,000 | sampled；数据库导入默认使用受限快照 |
+每次导入都会写入 snapshot-scoped 分析表。只有 schema 事实和 profile 状态均已持久化后，当前 binding 才会切换；替换导入失败时，旧快照仍然可读。持久化 profile 对导入快照做精确结构观察；`data_describe_table` 是否使用 bounded sample 由模型通过 `sample_rows` 显式指定，运行时不按规模替模型选择。
 
 ## 主要 API
 
@@ -106,7 +101,7 @@ MaaS 目标架构契约见 [`docs/maas-production-architecture.md`](docs/maas-pr
 - `POST /api/data-sources/{sourceID}/test`
 - `GET /api/data-sources/{sourceID}/catalog`
 - `POST /api/data-sources/{sourceID}/import`
-- `GET /ws?token=...&session_id=...`
+- `GET /api/sse?session_id=...`
 
 Agent observation tools 还包括 `state_governance_inspect`，用于读取当前 session 的通用数据治理事实，不触发固定 workflow。
 
@@ -120,9 +115,9 @@ Agent observation tools 还包括 `state_governance_inspect`，用于读取当�
     "host": "db.example.com",
     "port": 3306,
     "database_name": "analytics",
-    "default_schema": "public",
+    "tls_mode": "verify_identity",
     "username": "reader",
-    "allowlist": [{ "name": "orders", "kind": "table" }]
+    "allowlist": [{ "schema": "analytics", "name": "orders", "kind": "table" }]
   },
   "credential": { "password": "secret" }
 }
@@ -144,11 +139,11 @@ cd python-executor && python -m pytest test_sandbox.py
 
 - `AGENTS.md`：仓库级 agent 约束和提示分层规则。
 - `docs/product-first-principles.zh-CN.md`：产品第一性原则。
-- `docs/agentic-principles.md`：agent runtime 设计原则。
+- `docs/agentic-principles.zh-CN.md`：智能体运行时设计原则。
 - `docs/maas-production-architecture.md`：生产 MaaS 后端契约和迁移顺序。
 - `docs/building-agent-lessons.zh-CN.md`：Agent runtime 实践经验。
-- `docs/database-source-mvp.md`：数据库数据源当前实现和边界。
-- `docs/benchmark.md`：回归评测方案。
+- `docs/database-source-mvp.zh-CN.md`：数据库数据源当前实现和边界。
+- `docs/benchmark.zh-CN.md`：回归评测方案。
 - `samples/coverage_scenarios/README.zh-CN.md`：覆盖场景说明。
 
 ## 许可证

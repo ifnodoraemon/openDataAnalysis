@@ -12,18 +12,20 @@
           <div class="info-grid">
             <div class="info-item">
               <span class="label">工作区名称</span>
-              <span class="value font-semibold">{{ workspace?.name || "未设置" }}</span>
+              <span class="value font-semibold">{{
+                workspace?.name || "未设置"
+              }}</span>
             </div>
             <div class="info-item">
-              <span class="label">工作区 ID</span>
+              <span class="label">工作区标识</span>
               <span class="value code">{{ workspace?.id || "-" }}</span>
             </div>
             <div class="info-item">
-              <span class="label">团队角色 (RBAC)</span>
+              <span class="label">团队角色与权限</span>
               <span class="value badge-role">{{ userRole }}</span>
             </div>
             <div class="info-item">
-              <span class="label">API 限流配额</span>
+              <span class="label">接口限流配额</span>
               <span class="value">120 次/分钟</span>
             </div>
           </div>
@@ -38,7 +40,7 @@
                 <span class="name">{{ user?.name || user?.email }}</span>
                 <span class="email">{{ user?.email }}</span>
               </div>
-              <span class="role-tag owner">Owner</span>
+              <span class="role-tag owner">所有者</span>
             </div>
           </div>
         </div>
@@ -65,11 +67,11 @@ const workspace = computed(() => store.workspace);
 const user = computed(() => store.user);
 
 const userInitial = computed(() => {
-  const name = user.value?.name || user.value?.email || "U";
+  const name = user.value?.name || user.value?.email || "用户";
   return name.charAt(0).toUpperCase();
 });
 
-const userRole = computed(() => "Owner (工作区所有者)");
+const userRole = computed(() => "工作空间所有者");
 </script>
 
 <style scoped>
@@ -87,7 +89,7 @@ const userRole = computed(() => "Owner (工作区所有者)");
 .modal-card {
   width: min(520px, 100%);
   background: var(--bg-card);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: 16px;
   padding: 24px;
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.15);
@@ -105,7 +107,7 @@ const userRole = computed(() => "Owner (工作区所有者)");
 .modal-header h2 {
   font-size: 1.2rem;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--text-main);
 
   display: flex;
   align-items: center;
@@ -139,10 +141,10 @@ const userRole = computed(() => "Owner (工作区所有者)");
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
-  background: var(--bg-primary);
+  background: var(--bg-app);
   padding: 16px;
   border-radius: 12px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
 }
 
 .info-item {
@@ -158,7 +160,7 @@ const userRole = computed(() => "Owner (工作区所有者)");
 
 .info-item .value {
   font-size: 0.88rem;
-  color: var(--text-primary);
+  color: var(--text-main);
 }
 
 .code {
@@ -167,7 +169,7 @@ const userRole = computed(() => "Owner (工作区所有者)");
 }
 
 .badge-role {
-  color: var(--accent-blue) !important;
+  color: var(--primary-blue) !important;
   font-weight: 600;
 }
 
@@ -182,16 +184,20 @@ const userRole = computed(() => "Owner (工作区所有者)");
   align-items: center;
   gap: 12px;
   padding: 10px 14px;
-  background: var(--bg-primary);
+  background: var(--bg-app);
   border-radius: 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
 }
 
 .member-avatar {
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  background: linear-gradient(
+    135deg,
+    var(--primary-blue),
+    var(--accent-purple)
+  );
   color: white;
   display: flex;
   align-items: center;
@@ -209,7 +215,7 @@ const userRole = computed(() => "Owner (工作区所有者)");
 .member-info .name {
   font-size: 0.85rem;
   font-weight: 500;
-  color: var(--text-primary);
+  color: var(--text-main);
 }
 
 .member-info .email {
@@ -226,7 +232,7 @@ const userRole = computed(() => "Owner (工作区所有者)");
 
 .role-tag.owner {
   background: rgba(37, 99, 235, 0.12);
-  color: var(--accent-blue);
+  color: var(--primary-blue);
 }
 
 .modal-footer {
@@ -236,7 +242,7 @@ const userRole = computed(() => "Owner (工作区所有者)");
 
 .btn-primary {
   padding: 8px 18px;
-  background: var(--accent-blue);
+  background: var(--primary-blue);
   color: white;
   border: none;
   border-radius: 8px;

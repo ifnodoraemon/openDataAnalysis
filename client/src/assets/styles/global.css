@@ -1,35 +1,35 @@
 :root {
-  /* 统一高级暗黑基调 (Unified Obsidian Dark Theme) */
-  --bg-app: #090d16;             /* 极黑底层 */
-  --bg-rail: #0f1422;            /* 左侧 Slim 图标轨 */
-  --bg-history: #131927;         /* 历史对话列 */
-  --bg-workspace: #0d121f;       /* 主工作区背景 */
-  --bg-card: #182032;            /* 卡片/气泡背景 */
-  --bg-card-hover: #1f2a40;      /* Hover 背景 */
-  --bg-input: #151c2e;           /* 输入框背景 */
+  /* 统一高级明亮基调 (Premium Light Theme) */
+  --bg-app: #ffffff; /* 纯白底层 */
+  --bg-rail: #f9fafb; /* 左侧 Slim 图标轨 */
+  --bg-history: #f9fafb; /* 历史对话列 (极其淡的灰白) */
+  --bg-workspace: #ffffff; /* 主工作区背景 */
+  --bg-card: #ffffff; /* 卡片/气泡背景 */
+  --bg-card-hover: #f3f4f6; /* Hover 背景 */
+  --bg-input: #ffffff; /* 输入框背景 */
 
   /* 统一边框与分割线 */
-  --border-subtle: rgba(255, 255, 255, 0.06);
-  --border-strong: rgba(255, 255, 255, 0.12);
-  --border-accent: rgba(59, 130, 246, 0.35);
+  --border-subtle: #e5e7eb; /* 极浅灰边框 */
+  --border-strong: #d1d5db; /* 较深灰边框 */
+  --border-accent: rgba(37, 99, 235, 0.35);
 
   /* 统一文字系统 */
-  --text-main: #f1f5f9;          /* 主文字 */
-  --text-sub: #94a3b8;           /* 副文字 */
-  --text-muted: #64748b;         /* 弱提示 */
+  --text-main: #111827; /* 主文字，深灰黑 */
+  --text-sub: #4b5563; /* 副文字，中灰 */
+  --text-muted: #9ca3af; /* 弱提示，浅灰 */
 
   /* 统一调和主色 (Harmonious Accents) */
-  --primary-blue: #3b82f6;
-  --primary-glow: rgba(59, 130, 246, 0.25);
-  --accent-cyan: #06b6d4;
-  --accent-purple: #8b5cf6;
-  --accent-emerald: #10b981;
-  --accent-amber: #f59e0b;
-  --accent-rose: #f43f5e;
+  --primary-blue: #2563eb;
+  --primary-glow: rgba(37, 99, 235, 0.15);
+  --accent-cyan: #0891b2;
+  --accent-purple: #7c3aed;
+  --accent-emerald: #059669;
+  --accent-amber: #d97706;
+  --accent-rose: #e11d48;
 
   /* 统一阴影 */
-  --shadow-panel: 0 4px 20px rgba(0, 0, 0, 0.4);
-  --shadow-glow: 0 0 20px rgba(59, 130, 246, 0.2);
+  --shadow-panel: 0 4px 20px rgba(0, 0, 0, 0.06);
+  --shadow-glow: 0 0 16px rgba(37, 99, 235, 0.15);
 
   /* 尺寸 */
   --rail-width: 56px;
@@ -46,7 +46,13 @@
 }
 
 body {
-  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family:
+    "Inter",
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
   background-color: var(--bg-app);
   color: var(--text-main);
   overflow: hidden;
@@ -60,30 +66,41 @@ body {
   overflow: hidden;
 }
 
-/* 全局滚动条美化 */
+/* 全局滚动条美化 (Light Theme) */
 ::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
+  background: #d1d5db;
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.25);
+  background: #9ca3af;
 }
 
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @keyframes pulseDot {
-  0%, 100% { opacity: 0.4; }
-  50% { opacity: 1; }
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 .fade-enter-active {

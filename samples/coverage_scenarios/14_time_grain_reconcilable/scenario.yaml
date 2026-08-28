@@ -5,12 +5,10 @@ prompt: 请分析这组数据中的渠道 ROI 趋势，并说明是否存在效�
 files:
   - channel_spend_daily.csv
   - channel_revenue_monthly.csv
-expected:
-  should_inspect_schema: true
-  should_auto_map: true
-  should_ask_user: false
-  expected_coverage: sufficient
-  required_mentions:
-    - aggregated daily spend to monthly grain before comparison
-  forbidden_claims:
-    - compared daily spend directly against monthly revenue without aggregation
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
+manual_review:
+  - 比较前的时间粒度转换可由查询结果验证。
+  - 不直接混比日粒度投放与月粒度收入。

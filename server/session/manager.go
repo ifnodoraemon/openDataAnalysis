@@ -2,7 +2,7 @@ package session
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -35,7 +35,7 @@ type Manager struct {
 	sessionRepo    repository.SessionRepository
 	sessions       map[string]*Session
 	mu             sync.Mutex
-	FullDeleteFunc func(ctx context.Context, sessionID string) error
+	fullDeleteFunc func(ctx context.Context, sessionID string) error
 	cleanupStop    chan struct{}
 }
 
@@ -54,27 +54,42 @@ func (m *Manager) SetSessionRepository(repo repository.SessionRepository) {
 	m.sessionRepo = repo
 }
 
-// SetFullDeleteFunc 设置全链路删除回调，用于 TTL 入口的全呼到。
+// SetFullDeleteFunc configures the complete deletion operation used by TTL cleanup.
 func (m *Manager) SetFullDeleteFunc(fn func(ctx context.Context, sessionID string) error) {
+	if fn == nil {
+		panic("session full-delete function must not be nil")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.FullDeleteFunc = fn
+	m.fullDeleteFunc = fn
 }
 
 // GetOrCreate 查找或创建 session。
 // ctx 用于限制 DB 查询时长（BUG2 修复），不传播取消语义到写操作。
+// DB IO 在 Manager 锁外执行：锁内只做 map 快照与写入，避免慢查询阻塞所有会话操作。
 func (m *Manager) GetOrCreate(ctx context.Context, sessionID, workspaceID, userID string) (*Session, bool, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	repo := m.sessionRepo
+	var cached *Session
 	if sessionID != "" {
-		if sess, ok := m.sessions[sessionID]; ok {
-			if sess.WorkspaceID != workspaceID || sess.UserID != userID {
-				return nil, false, fmt.Errorf("not authorized to access this session")
-			}
-			sess.Touch()
-			return sess, false, nil
+		cached = m.sessions[sessionID]
+	}
+	m.mu.Unlock()
+
+	if cached != nil {
+		if cached.WorkspaceID != workspaceID || cached.UserID != userID {
+			return nil, false, fmt.Errorf("not authorized to access this session")
 		}
+		cached.Touch()
+		if repo != nil {
+			wCtx, cancel := dbContext(ctx)
+			err := repo.UpdateLastSeen(wCtx, sessionID)
+			cancel()
+			if err != nil {
+				return nil, false, fmt.Errorf("failed to update session last-seen time: %w", err)
+			}
+		}
+		return cached, false, nil
 	}
 
 	id := sessionID
@@ -83,9 +98,9 @@ func (m *Manager) GetOrCreate(ctx context.Context, sessionID, workspaceID, userI
 	}
 
 	created := true
-	if sessionID != "" && m.sessionRepo != nil {
+	if sessionID != "" && repo != nil {
 		qCtx, cancel := dbContext(ctx)
-		record, err := m.sessionRepo.GetByID(qCtx, sessionID)
+		record, err := repo.GetByID(qCtx, sessionID)
 		cancel()
 		if err == nil {
 			if record.WorkspaceID != workspaceID || record.UserID != userID {
@@ -94,23 +109,36 @@ func (m *Manager) GetOrCreate(ctx context.Context, sessionID, workspaceID, userI
 			workspaceID = record.WorkspaceID
 			userID = record.UserID
 			created = false
-		} else if err != sql.ErrNoRows {
+		} else if !errors.Is(err, repository.ErrNotFound) {
 			return nil, false, err
 		}
 	}
 
+	m.mu.Lock()
+	if sess, ok := m.sessions[id]; ok {
+		m.mu.Unlock()
+		if sess.WorkspaceID != workspaceID || sess.UserID != userID {
+			return nil, false, fmt.Errorf("not authorized to access this session")
+		}
+		sess.Touch()
+		return sess, false, nil
+	}
 	sess, err := New(id, workspaceID, userID, m.cacheRoot, m.fileService, m.sourceService)
 	if err != nil {
+		m.mu.Unlock()
 		return nil, false, err
 	}
-	if created && m.sessionRepo != nil {
+	m.sessions[id] = sess
+	m.mu.Unlock()
+
+	if created && repo != nil {
 		now := time.Now()
 		wCtx, cancel := dbContext(ctx)
-		err := m.sessionRepo.Create(wCtx, &domain.Session{
+		err := repo.Create(wCtx, &domain.Session{
 			ID:          id,
 			WorkspaceID: workspaceID,
 			UserID:      userID,
-			Title:       "Untitled Analysis",
+			Title:       "",
 			Status:      domain.SessionStatusActive,
 			CreatedAt:   now,
 			UpdatedAt:   now,
@@ -118,58 +146,76 @@ func (m *Manager) GetOrCreate(ctx context.Context, sessionID, workspaceID, userI
 		})
 		cancel()
 		if err != nil {
+			m.mu.Lock()
+			if m.sessions[id] == sess {
+				delete(m.sessions, id)
+			}
+			m.mu.Unlock()
 			return nil, false, err
 		}
 	}
-	if m.sessionRepo != nil {
+	if repo != nil && !created {
 		wCtx, cancel := dbContext(ctx)
-		_ = m.sessionRepo.UpdateLastSeen(wCtx, id)
+		err := repo.UpdateLastSeen(wCtx, id)
 		cancel()
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to update session last-seen time: %w", err)
+		}
 	}
-	m.sessions[id] = sess
 	return sess, created, nil
 }
 
-// Get 返回指定 session（仅内存中存在的，或从 DB 记录重建的空 session）。
-// ctx 用于限制 DB 查询时长（BUG2 修复）。
-// ISSUE10 注意：若 session 不在内存中（例如服务重启后），将从 DB 重建一个空状态 session，
-// WorkingMemory、SubgoalManager、Engine 消息历史均为初始状态，这是设计上的权衡（无法持久化运行时状态）。
-// 调用方应意识到重建的 session 与原始 session 行为不同，勿在无持久化的重建 session 上执行复杂操作。
+// Get returns an authorized live session object. Persistent runtime state is
+// restored by the handler before the reconstructed session is used for a run.
 func (m *Manager) Get(ctx context.Context, sessionID, workspaceID, userID string) (*Session, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	repo := m.sessionRepo
 	sess, ok := m.sessions[sessionID]
+	m.mu.Unlock()
+
 	if !ok {
-		if m.sessionRepo == nil {
+		if repo == nil {
 			return nil, fmt.Errorf("session does not exist: %s", sessionID)
 		}
 		qCtx, cancel := dbContext(ctx)
-		record, err := m.sessionRepo.GetByID(qCtx, sessionID)
+		record, err := repo.GetByID(qCtx, sessionID)
 		cancel()
 		if err != nil {
-			return nil, fmt.Errorf("session does not exist: %s", sessionID)
+			if errors.Is(err, repository.ErrNotFound) {
+				return nil, fmt.Errorf("session does not exist: %s", sessionID)
+			}
+			return nil, fmt.Errorf("failed to read session %s: %w", sessionID, err)
 		}
 		if record.WorkspaceID != workspaceID || record.UserID != userID {
 			return nil, fmt.Errorf("not authorized to access this session")
 		}
-		sess, err = New(record.ID, record.WorkspaceID, record.UserID, m.cacheRoot, m.fileService, m.sourceService)
-		if err != nil {
-			return nil, err
+
+		m.mu.Lock()
+		if existing, ok := m.sessions[sessionID]; ok {
+			sess = existing
+		} else {
+			sess, err = New(record.ID, record.WorkspaceID, record.UserID, m.cacheRoot, m.fileService, m.sourceService)
+			if err != nil {
+				m.mu.Unlock()
+				return nil, err
+			}
+			log.Printf("session %s reconstructed from persistent identity workspace=%s", sessionID, workspaceID)
+			m.sessions[sessionID] = sess
 		}
-		// ISSUE10 警告：从 DB 重建的 session 运行时状态（Memory/Subgoals/Engine 历史）已重置。
-		// 这在服务重启后属于预期行为，但若在 session 仍活跃时发生则可能导致状态不一致。
-		log.Printf("[warn] session %s not in memory, rebuilt from DB (runtime state reset) workspace=%s", sessionID, workspaceID)
-		m.sessions[sessionID] = sess
+		m.mu.Unlock()
 	}
+
 	if sess.WorkspaceID != workspaceID || sess.UserID != userID {
 		return nil, fmt.Errorf("not authorized to access this session")
 	}
 	sess.Touch()
-	if m.sessionRepo != nil {
+	if repo != nil {
 		wCtx, cancel := dbContext(ctx)
-		_ = m.sessionRepo.UpdateLastSeen(wCtx, sessionID)
+		err := repo.UpdateLastSeen(wCtx, sessionID)
 		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("failed to update session last-seen time: %w", err)
+		}
 	}
 	return sess, nil
 }

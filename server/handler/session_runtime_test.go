@@ -13,6 +13,27 @@ import (
 	"github.com/ifnodoraemon/openDataAnalysis/session"
 )
 
+func TestSessionRuntimeRejectsMissingDependenciesAndIdentity(t *testing.T) {
+	previousSessionRepo := sessionRepo
+	previousSessionManager := sessionManager
+	t.Cleanup(func() {
+		sessionRepo = previousSessionRepo
+		sessionManager = previousSessionManager
+	})
+
+	sessionRepo = nil
+	if _, err := sessionExists(context.Background(), "s_1"); err == nil {
+		t.Fatal("expected missing session repository to fail")
+	}
+	sessionManager = nil
+	if _, err := shouldHydrateSessionFromPersistence(context.Background(), "w_1", "u_1", "s_1"); err == nil {
+		t.Fatal("expected missing session manager to fail")
+	}
+	if err := hydrateSessionFromPersistence(context.Background(), nil); err == nil {
+		t.Fatal("expected nil session hydration to fail")
+	}
+}
+
 func TestRecoverStaleSessionRunsMarksNestedRunsFailed(t *testing.T) {
 	ctx := context.Background()
 	prevRunRepo := runRepo
@@ -157,62 +178,27 @@ func TestHydrateSessionFromPersistenceRestoresRuntimeState(t *testing.T) {
 		t.Fatalf("create run: %v", err)
 	}
 
-	toolCallID1 := "call_1"
-	toolCallID2 := "call_2"
 	if err := messageRepo.Create(ctx, &domain.RunMessage{
 		ID:          "m_1",
 		RunID:       "r_1",
 		SessionID:   "s_1",
 		WorkspaceID: "w_1",
-		Type:        string(agent.EventToolCall),
-		Name:        "memory_save_fact",
-		ToolCallID:  &toolCallID1,
-		Content:     `{"key":"confirmed_metric","fact":"GMV uses settled orders"}`,
+		Type:        string(agent.EventStateMemoryUpdated),
+		Content:     `{"entries":{"retained_context":{"statement":"user-provided context","status":"inferred","created_by":"agent","created_at":"2026-08-11T00:00:00Z"}}}`,
 		CreatedAt:   now.Add(time.Second),
 	}); err != nil {
-		t.Fatalf("create memory tool call: %v", err)
-	}
-	success := true
-	if err := messageRepo.Create(ctx, &domain.RunMessage{
-		ID:          "m_2",
-		RunID:       "r_1",
-		SessionID:   "s_1",
-		WorkspaceID: "w_1",
-		Type:        string(agent.EventToolResult),
-		Name:        "memory_save_fact",
-		ToolCallID:  &toolCallID1,
-		Content:     `{"ok":true}`,
-		Success:     &success,
-		CreatedAt:   now.Add(2 * time.Second),
-	}); err != nil {
-		t.Fatalf("create memory tool result: %v", err)
+		t.Fatalf("create memory state event: %v", err)
 	}
 	if err := messageRepo.Create(ctx, &domain.RunMessage{
 		ID:          "m_3",
 		RunID:       "r_1",
 		SessionID:   "s_1",
 		WorkspaceID: "w_1",
-		Type:        string(agent.EventToolCall),
-		Name:        "goal_manage",
-		ToolCallID:  &toolCallID2,
-		Content:     `{"action":"add","description":"Inspect revenue quality"}`,
+		Type:        string(agent.EventStateSubgoalsUpdated),
+		Content:     `{"goals":[{"id":"goal_123","description":"Inspect source quality","status":"pending","created_at":"2026-08-11T00:00:00Z","updated_at":"2026-08-11T00:00:00Z"}]}`,
 		CreatedAt:   now.Add(3 * time.Second),
 	}); err != nil {
-		t.Fatalf("create goal tool call: %v", err)
-	}
-	if err := messageRepo.Create(ctx, &domain.RunMessage{
-		ID:          "m_4",
-		RunID:       "r_1",
-		SessionID:   "s_1",
-		WorkspaceID: "w_1",
-		Type:        string(agent.EventToolResult),
-		Name:        "goal_manage",
-		ToolCallID:  &toolCallID2,
-		Content:     `{"ok":true,"goal_id":"goal_123"}`,
-		Success:     &success,
-		CreatedAt:   now.Add(4 * time.Second),
-	}); err != nil {
-		t.Fatalf("create goal tool result: %v", err)
+		t.Fatalf("create subgoal state event: %v", err)
 	}
 
 	sess := &session.Session{
@@ -227,10 +213,10 @@ func TestHydrateSessionFromPersistenceRestoresRuntimeState(t *testing.T) {
 	}
 
 	memory, subgoals := sess.RuntimeState()
-	if memory["confirmed_metric"] != "GMV uses settled orders" {
+	if memory["retained_context"].Statement != "user-provided context" {
 		t.Fatalf("unexpected memory snapshot: %#v", memory)
 	}
-	if len(subgoals) != 1 || subgoals[0].ID != "goal_123" || subgoals[0].Description != "Inspect revenue quality" {
+	if len(subgoals) != 1 || subgoals[0].ID != "goal_123" || subgoals[0].Description != "Inspect source quality" {
 		t.Fatalf("unexpected subgoals: %#v", subgoals)
 	}
 }

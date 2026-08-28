@@ -20,7 +20,7 @@ func (r *ReportRepository) GetByRunID(ctx context.Context, runID string) (*domai
 	row := r.db.QueryRowContext(ctx, `SELECT id, run_id, workspace_id, title, author, html_storage_provider, html_bucket, html_storage_key, snapshot_json, created_at FROM reports WHERE run_id = ?`, runID)
 	var report domain.Report
 	if err := row.Scan(&report.ID, &report.RunID, &report.WorkspaceID, &report.Title, &report.Author, &report.HTMLStorageProvider, &report.HTMLBucket, &report.HTMLStorageKey, &report.SnapshotJSON, &report.CreatedAt); err != nil {
-		return nil, err
+		return nil, normalizeLookupError(err)
 	}
 	return &report, nil
 }

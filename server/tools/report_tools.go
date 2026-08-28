@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
-	"strings"
+
+	"github.com/ifnodoraemon/openDataAnalysis/metrics"
 )
 
 func init() {
@@ -13,20 +13,19 @@ func init() {
 		return &ManageReportBlocksTool{ReportState: ctx.ReportState, EditState: ctx.EditState}
 	})
 	RegisterGlobalTool(func(ctx ToolContext) Tool {
-		return &ConfigureReportTool{ReportState: ctx.ReportState}
+		return &ConfigureReportTool{ReportState: ctx.ReportState, EditState: ctx.EditState}
 	})
 	RegisterGlobalTool(func(ctx ToolContext) Tool {
 		return &FinalizeReportTool{
-			ReportState:            ctx.ReportState,
-			Subgoals:               ctx.Subgoals,
-			SessionSourcesProvider: ctx.SessionSourcesProvider,
-			ProfileDetailProvider:  ctx.ProfileDetailProvider,
+			ReportState: ctx.ReportState,
+			Subgoals:    ctx.Subgoals,
 		}
 	})
 }
 
 type ConfigureReportTool struct {
 	ReportState *ReportState
+	EditState   *ReportEditState
 }
 
 type ManageReportBlocksTool struct {
@@ -36,50 +35,39 @@ type ManageReportBlocksTool struct {
 
 // FinalizeReportTool 校验并更新报告交付状态
 type FinalizeReportTool struct {
-	ReportState            *ReportState
-	Subgoals               SubgoalChecker
-	SessionSourcesProvider SessionSourcesProvider
-	ProfileDetailProvider  ProfileDetailProvider
+	ReportState *ReportState
+	Subgoals    SubgoalChecker
 }
 
 func (t *ConfigureReportTool) Name() string { return "report_configure_layout" }
+func (t *ConfigureReportTool) Capability() ToolCapability {
+	return ToolCapability{Mode: "action", RuntimeEnabled: true, EmitsReportPreview: true}
+}
 func (t *ConfigureReportTool) Description() string {
 	return "Read and modify report layout configuration. Supports updating or resetting CSS and body class; modifies report layout state but does not directly modify blocks or charts. Returns updated layout facts and delivery_state."
 }
 func (t *ConfigureReportTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
+		"additionalProperties": false,
 		"properties": {
-			"action": {"type": "string", "enum": ["merge", "reset"], "description": "merge (default) or reset."},
+			"action": {"type": "string", "enum": ["merge", "reset"], "description": "Exact layout mutation to perform."},
 			"custom_css": {"type": "string", "description": "Custom CSS appended to the page."},
 			"body_class": {"type": "string", "description": "Class appended to the body element."}
 		},
-		"required": []
+		"required": ["action"]
 	}`)
 }
 
 func (t *ConfigureReportTool) Execute(args json.RawMessage) (string, error) {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(args, &raw); err != nil {
-		return "", fmt.Errorf("failed to parse parameters: %w", err)
+	if t.ReportState == nil {
+		return "", fmt.Errorf("report state is not initialized")
 	}
-	unsupported := make([]string, 0)
-	for key := range raw {
-		switch key {
-		case "action", "custom_css", "body_class":
-		default:
-			unsupported = append(unsupported, key)
-		}
+	if t.EditState != nil && !t.EditState.LayoutMutationAllowed() {
+		return reportEditScopeFailure("report_configure_layout", "layout", "report_layout", "layout", "report layout is outside current partial edit scope", nil, t.EditState), nil
 	}
-	if len(unsupported) > 0 {
-		return toolFailure("report_configure_layout", "unsupported_layout_fields", "unsupported layout fields", map[string]interface{}{
-			"unsupported_fields": unsupported,
-			"ui_summary":         "unsupported layout fields.",
-		}), nil
-	}
-
 	var params reportLayoutParams
-	if err := json.Unmarshal(args, &params); err != nil {
+	if err := decodeToolArgs(args, &params); err != nil {
 		return "", fmt.Errorf("failed to parse parameters: %w", err)
 	}
 
@@ -101,15 +89,19 @@ func (t *ConfigureReportTool) Execute(args json.RawMessage) (string, error) {
 }
 
 func (t *ManageReportBlocksTool) Name() string { return "report_manage_blocks" }
+func (t *ManageReportBlocksTool) Capability() ToolCapability {
+	return ToolCapability{Mode: "action", RuntimeEnabled: true, EmitsReportPreview: true}
+}
 func (t *ManageReportBlocksTool) Description() string {
-	return "Modify the current report artifact by appending, revising, removing, or reordering markdown, html, and chart blocks. Applies when the user wants the whole report or a specific section rewritten, reorganized, polished, inserted, deleted, or moved; `block_id` targets an existing section, while append inserts a new one. Markdown/html block content supports `{{chart:chart_id}}` placeholders for inline chart display, chart blocks are for standalone chart sections. Directly modifies report content structure and returns block_id, block_count, and delivery_state facts. When a partial edit scope is active, only authorized blocks can be modified."
+	return "Apply an explicit append, upsert, remove, or move mutation to one report block. action and block_id are always required; append/upsert also require block_kind. Markdown/html content may contain `{{chart:chart_id}}` references, while chart blocks use chart_id. The runtime does not choose a block kind, generate an ID, retain omitted citations, or infer an operation. Returns block_id, block_count, and delivery_state facts. Partial edit scope limits which blocks may change."
 }
 func (t *ManageReportBlocksTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
+		"additionalProperties": false,
 		"properties": {
-			"action": {"type": "string", "enum": ["append", "upsert", "remove", "move"], "description": "append (default), upsert, remove, or move"},
-			"block_id": {"type": "string", "description": "Stable block ID. Required for upsert/remove/move; optional for append (auto-generated if omitted)."},
+			"action": {"type": "string", "enum": ["append", "upsert", "remove", "move"], "description": "Exact mutation to perform."},
+			"block_id": {"type": "string", "description": "Caller-provided stable block ID."},
 			"block_kind": {"type": "string", "enum": ["markdown", "html", "chart"], "description": "Block type."},
 			"title": {"type": "string", "description": "Block title."},
 			"content": {"type": "string", "description": "Block content. Markdown/HTML blocks support {{chart:chart_id}} for inline charts; chart blocks use this as caption below the chart."},
@@ -118,33 +110,31 @@ func (t *ManageReportBlocksTool) Parameters() json.RawMessage {
 			"after_block_id": {"type": "string", "description": "Insert after this block ID."},
 			"sources": {
 				"type": "array",
-				"description": "Source citations for the block's conclusions, recording which query/chart/table the conclusions are based on.",
+				"description": "Structured citations resolving to an existing analysis result, artifact, or chart ledger ID.",
 				"items": {
 					"type": "object",
+					"additionalProperties": false,
 					"properties": {
-						"kind":       {"type": "string", "enum": ["sql", "chart", "table", "python", "tool_result"]},
-						"tool_name":  {"type": "string"},
-						"sql":        {"type": "string"},
-						"table_name": {"type": "string"},
+						"kind":       {"type": "string", "enum": ["result", "artifact", "chart"]},
+						"result_id":  {"type": "string"},
+						"artifact_id":{"type": "string"},
 						"chart_id":   {"type": "string"},
-						"summary":    {"type": "string"}
+						"label":      {"type": "string"}
 					},
 					"required": ["kind"]
 				}
 			}
 		},
-		"required": []
+		"required": ["action", "block_id"]
 	}`)
 }
 
 func (t *ManageReportBlocksTool) Execute(args json.RawMessage) (string, error) {
-	normalizedArgs, err := normalizeStringifiedJSONFields(args, "sources")
-	if err != nil {
-		return "", fmt.Errorf("failed to parse parameters: %w", err)
+	if t.ReportState == nil {
+		return "", fmt.Errorf("report state is not initialized")
 	}
-
 	var params reportBlockMutationParams
-	if err := json.Unmarshal(normalizedArgs, &params); err != nil {
+	if err := decodeToolArgs(args, &params); err != nil {
 		return "", fmt.Errorf("failed to parse parameters: %w", err)
 	}
 
@@ -173,12 +163,16 @@ func (t *ManageReportBlocksTool) Execute(args json.RawMessage) (string, error) {
 }
 
 func (t *FinalizeReportTool) Name() string { return "report_finalize" }
+func (t *FinalizeReportTool) Capability() ToolCapability {
+	return ToolCapability{Mode: "action", RuntimeEnabled: true, DeliveryBoundary: true}
+}
 func (t *FinalizeReportTool) Description() string {
-	return "Validate current report state, explicitly blocking goals, and unresolved semantic ambiguities; if valid, write final title/author and set delivery_state to finalized. On failure returns blockers or validation issues; does not auto-complete missing content or silently rewrite existing blocks or charts."
+	return "Validate report structure, active goal branches, chart references, and result/artifact citation IDs; if valid, write final title/author and set delivery_state to finalized. It does not interpret report prose, choose business semantics, auto-complete content, or silently rewrite blocks or charts."
 }
 func (t *FinalizeReportTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
+		"additionalProperties": false,
 		"properties": {
 			"report_title": {"type": "string", "description": "Report title"},
 			"author": {"type": "string", "description": "Author/analyst name"}
@@ -188,25 +182,19 @@ func (t *FinalizeReportTool) Parameters() json.RawMessage {
 }
 
 func (t *FinalizeReportTool) Execute(args json.RawMessage) (string, error) {
-	var params reportFinalizeParams
-	if err := json.Unmarshal(args, &params); err != nil {
-		return "", fmt.Errorf("failed to parse parameters: %w", err)
+	if t.ReportState == nil {
+		return "", fmt.Errorf("report state is not initialized")
 	}
-
-	var semanticIssues []string
-	if t.SessionSourcesProvider != nil {
-		sources, sourceErr := t.SessionSourcesProvider()
-		if sourceErr != nil {
-			semanticIssues = append(semanticIssues, "semantic_sources_unavailable")
-		} else {
-			semanticIssues = reportSemanticFinalizeIssues(t.ReportState, sources, t.ProfileDetailProvider)
-		}
+	var params reportFinalizeParams
+	if err := decodeToolArgs(args, &params); err != nil {
+		return "", fmt.Errorf("failed to parse parameters: %w", err)
 	}
 
 	t.ReportState.Lock()
 
-	result, err := finalizeReportState(t.ReportState, t.Subgoals, params, semanticIssues)
+	result, err := finalizeReportState(t.ReportState, t.Subgoals, params)
 	if err != nil {
+		metrics.ReportFinalizeTotal.WithLabelValues("failure").Inc()
 		var blockedErr reportFinalizeBlockedError
 		if errors.As(err, &blockedErr) {
 			failure := reportFinalizeBlockedFailure(t.ReportState, blockedErr.Blockers)
@@ -215,29 +203,6 @@ func (t *FinalizeReportTool) Execute(args json.RawMessage) (string, error) {
 		}
 		var issuesErr reportFinalizeIssuesError
 		if errors.As(err, &issuesErr) {
-			if signature := semanticFinalizeIssueSignature(issuesErr.Issues); signature != "" {
-				if t.ReportState.LastFinalizeIssueSignature == signature {
-					t.ReportState.FinalizeAttempts++
-				} else {
-					t.ReportState.LastFinalizeIssueSignature = signature
-					t.ReportState.FinalizeAttempts = 1
-				}
-				const maxFinalizeRetries = 4
-				if t.ReportState.FinalizeAttempts > maxFinalizeRetries {
-					attempts := t.ReportState.FinalizeAttempts
-					t.ReportState.Unlock()
-					return toolFailure("report_finalize", "finalize_loop_detected",
-						fmt.Sprintf("report_finalize has been called %d times with the same unresolved semantic ambiguity. User confirmation or explicit user authorization is required before delivery.", attempts),
-						map[string]interface{}{
-							"finalize_attempts":          attempts,
-							"max_retries":                maxFinalizeRetries,
-							"unresolved_ambiguity_count": len(semanticIssues),
-						}), nil
-				}
-			} else {
-				t.ReportState.FinalizeAttempts = 0
-				t.ReportState.LastFinalizeIssueSignature = ""
-			}
 			failure := reportFinalizeIssuesFailure(t.ReportState, issuesErr.Issues)
 			t.ReportState.Unlock()
 			return failure, nil
@@ -252,30 +217,14 @@ func (t *FinalizeReportTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	t.ReportState.FinalizeAttempts = 0
-	t.ReportState.LastFinalizeIssueSignature = ""
+	metrics.ReportFinalizeTotal.WithLabelValues("success").Inc()
 	success := reportFinalizeSuccess(map[string]interface{}{
 		"report_title": result.ReportTitle,
 		"author":       result.Author,
 		"block_count":  result.BlockCount,
 		"chart_count":  result.ChartCount,
-		"ui_summary":   fmt.Sprintf("delivery_state=finalized; block_count=%d; chart_count=%d", result.BlockCount, result.ChartCount),
+		"ui_summary":   fmt.Sprintf("报告已定稿，共 %d 个内容块、%d 个图表。", result.BlockCount, result.ChartCount),
 	})
 	t.ReportState.Unlock()
 	return success, nil
-}
-
-func semanticFinalizeIssueSignature(issues []string) string {
-	var semantic []string
-	for _, issue := range issues {
-		trimmed := strings.TrimSpace(issue)
-		if strings.HasPrefix(trimmed, "unresolved_semantic_ambiguity:") {
-			semantic = append(semantic, trimmed)
-		}
-	}
-	if len(semantic) == 0 {
-		return ""
-	}
-	sort.Strings(semantic)
-	return strings.Join(semantic, "\n")
 }

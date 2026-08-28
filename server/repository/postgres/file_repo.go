@@ -2,13 +2,10 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 type FileRepository struct {
@@ -38,11 +35,8 @@ func (r *FileRepository) GetByID(ctx context.Context, fileID string) (*domain.Fi
 	var file domain.File
 	var purpose, status, visibility string
 	err := row.Scan(&file.ID, &file.WorkspaceID, &file.UploadedBy, &file.DisplayName, &purpose, &file.ContentType, &file.SizeBytes, &file.StorageProvider, &file.Bucket, &file.StorageKey, &file.Checksum, &status, &visibility, &file.CreatedAt, &file.UpdatedAt, &file.DeletedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, sql.ErrNoRows
-	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get file by id: %w", err)
+		return nil, fmt.Errorf("failed to get file by id: %w", normalizeLookupError(err))
 	}
 	file.Purpose = domain.FilePurpose(purpose)
 	file.Status = domain.FileStatus(status)

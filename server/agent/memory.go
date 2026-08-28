@@ -10,54 +10,110 @@ import (
 )
 
 const (
-	maxFacts       = 50
-	maxFactLen     = 2000
-	maxGoals       = 30
-	maxGoalDescLen = 500
+	maxMemoryEntries   = 50
+	maxMemoryKeyLength = 200
+	maxStatementLength = 2000
+	maxGoals           = 30
+	maxGoalDescLen     = 500
 )
 
-// WorkingMemory 存储已经确认的事实、口径和核心发现
+// WorkingMemory stores typed statements selected by the model during a run.
 type WorkingMemory struct {
-	Facts map[string]string `json:"facts"`
-	mu    sync.RWMutex
+	Entries map[string]MemoryEntry `json:"entries"`
+	mu      sync.RWMutex
+}
+
+type MemoryEntry struct {
+	Statement       string    `json:"statement"`
+	Status          string    `json:"status"`
+	SourceResultIDs []string  `json:"source_result_ids,omitempty"`
+	Confidence      *float64  `json:"confidence,omitempty"`
+	CreatedBy       string    `json:"created_by"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 func NewWorkingMemory() *WorkingMemory {
 	return &WorkingMemory{
-		Facts: make(map[string]string),
+		Entries: make(map[string]MemoryEntry),
 	}
 }
 
-func (m *WorkingMemory) SaveFact(key, fact string) bool {
+func validateMemoryEntry(key string, entry MemoryEntry) error {
+	if key == "" || key != strings.TrimSpace(key) || len(key) > maxMemoryKeyLength {
+		return fmt.Errorf("memory key must be a non-empty exact value of at most %d bytes", maxMemoryKeyLength)
+	}
+	if strings.TrimSpace(entry.Statement) == "" || len(entry.Statement) > maxStatementLength {
+		return fmt.Errorf("memory statement must contain text and be at most %d bytes", maxStatementLength)
+	}
+	if entry.Status != "observed" && entry.Status != "inferred" && entry.Status != "assumed" {
+		return fmt.Errorf("memory status must be observed, inferred, or assumed")
+	}
+	if entry.Status == "observed" && len(entry.SourceResultIDs) == 0 {
+		return fmt.Errorf("observed memory entries require source result IDs")
+	}
+	if entry.Confidence != nil && (*entry.Confidence < 0 || *entry.Confidence > 1) {
+		return fmt.Errorf("memory confidence must be between 0 and 1")
+	}
+	seenResults := make(map[string]struct{}, len(entry.SourceResultIDs))
+	for _, resultID := range entry.SourceResultIDs {
+		if resultID == "" || resultID != strings.TrimSpace(resultID) {
+			return fmt.Errorf("memory source result IDs must be non-empty exact values")
+		}
+		if _, exists := seenResults[resultID]; exists {
+			return fmt.Errorf("memory source result ID %q is duplicated", resultID)
+		}
+		seenResults[resultID] = struct{}{}
+	}
+	return nil
+}
+
+func (m *WorkingMemory) SaveEntry(key string, entry MemoryEntry) (bool, error) {
+	if err := validateMemoryEntry(key, entry); err != nil {
+		return false, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(m.Facts) >= maxFacts {
-		if _, exists := m.Facts[key]; !exists {
-			return false
+	if len(m.Entries) >= maxMemoryEntries {
+		if _, exists := m.Entries[key]; !exists {
+			return false, nil
 		}
 	}
-	if len(fact) > maxFactLen {
-		fact = fact[:maxFactLen]
+	if entry.CreatedAt.IsZero() {
+		entry.CreatedAt = time.Now()
 	}
-	m.Facts[key] = fact
-	return true
+	if m.Entries == nil {
+		m.Entries = make(map[string]MemoryEntry)
+	}
+	m.Entries[key] = entry
+	return true, nil
 }
 
-// RemoveFact 移除一条核心记忆
-func (m *WorkingMemory) RemoveFact(key string) {
+// RemoveEntry removes one memory entry.
+func (m *WorkingMemory) RemoveEntry(key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.Facts, key)
+	delete(m.Entries, key)
 }
 
-// Snapshot 返回当前工作记忆的副本。
+func (m *WorkingMemory) EntrySnapshot() map[string]MemoryEntry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make(map[string]MemoryEntry, len(m.Entries))
+	for key, value := range m.Entries {
+		value.SourceResultIDs = append([]string(nil), value.SourceResultIDs...)
+		result[key] = value
+	}
+	return result
+}
+
+// Snapshot returns display values derived from typed memory entries.
 func (m *WorkingMemory) Snapshot() map[string]string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	res := make(map[string]string, len(m.Facts))
-	for k, v := range m.Facts {
-		res[k] = v
+	res := make(map[string]string, len(m.Entries))
+	for k, entry := range m.Entries {
+		res[k] = entry.Statement
 	}
 	return res
 }
@@ -66,18 +122,29 @@ func (m *WorkingMemory) Snapshot() map[string]string {
 func (m *WorkingMemory) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Facts = make(map[string]string)
+	m.Entries = make(map[string]MemoryEntry)
 }
 
-// ReplaceSnapshot 用持久化恢复出的事实快照整体替换当前工作记忆。
-func (m *WorkingMemory) ReplaceSnapshot(facts map[string]string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.Facts = make(map[string]string, len(facts))
-	for k, v := range facts {
-		m.Facts[k] = v
+// ReplaceEntries restores typed entries from persisted state events.
+func (m *WorkingMemory) ReplaceEntries(entries map[string]MemoryEntry) error {
+	if len(entries) > maxMemoryEntries {
+		return fmt.Errorf("persisted working memory exceeds the %d entry limit", maxMemoryEntries)
 	}
+	replacement := make(map[string]MemoryEntry, len(entries))
+	for k, entry := range entries {
+		if err := validateMemoryEntry(k, entry); err != nil {
+			return fmt.Errorf("invalid persisted memory entry %q: %w", k, err)
+		}
+		if entry.CreatedAt.IsZero() {
+			return fmt.Errorf("invalid persisted memory entry %q: created_at is required", k)
+		}
+		entry.SourceResultIDs = append([]string(nil), entry.SourceResultIDs...)
+		replacement[k] = entry
+	}
+	m.mu.Lock()
+	m.Entries = replacement
+	m.mu.Unlock()
+	return nil
 }
 
 type SubgoalStatus string
@@ -117,11 +184,6 @@ func NewSubgoalManager() *SubgoalManager {
 	}
 }
 
-// AddGoal 增加一个新的子任务
-func (s *SubgoalManager) AddGoal(description, parentGoalID string) (string, error) {
-	return s.AddGoalWithBlocking(description, parentGoalID, false)
-}
-
 func (s *SubgoalManager) AddGoalWithBlocking(description, parentGoalID string, blocking bool) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -129,14 +191,29 @@ func (s *SubgoalManager) AddGoalWithBlocking(description, parentGoalID string, b
 	if len(s.Goals) >= maxGoals {
 		return "", fmt.Errorf("subgoal limit (%d) reached", maxGoals)
 	}
-	if len(description) > maxGoalDescLen {
-		description = description[:maxGoalDescLen]
+	if strings.TrimSpace(description) == "" || len(description) > maxGoalDescLen {
+		return "", fmt.Errorf("goal description must contain text and be at most %d bytes", maxGoalDescLen)
+	}
+	if parentGoalID != strings.TrimSpace(parentGoalID) {
+		return "", fmt.Errorf("parent goal ID must be an exact value")
+	}
+	if parentGoalID != "" {
+		parentExists := false
+		for _, goal := range s.Goals {
+			if goal.ID == parentGoalID {
+				parentExists = true
+				break
+			}
+		}
+		if !parentExists {
+			return "", fmt.Errorf("parent goal %s not found", parentGoalID)
+		}
 	}
 
 	id := "goal_" + uuid.New().String()[:8]
 	s.Goals = append(s.Goals, Subgoal{
 		ID:           id,
-		ParentGoalID: strings.TrimSpace(parentGoalID),
+		ParentGoalID: parentGoalID,
 		Description:  description,
 		Status:       StatusPending,
 		Blocking:     blocking,
@@ -164,6 +241,17 @@ func (s *SubgoalManager) UpdateGoalStatus(id string, status SubgoalStatus, resul
 	return fmt.Errorf("subgoal with ID %s not found", id)
 }
 
+func (s *SubgoalManager) HasGoal(id string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, goal := range s.Goals {
+		if goal.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func isTerminalSubgoalStatus(status SubgoalStatus) bool {
 	return status == StatusComplete || status == StatusRejected
 }
@@ -177,12 +265,8 @@ func (s *SubgoalManager) snapshotLocked() finalizeSnapshot {
 	children := make(map[string][]Subgoal, len(s.Goals))
 	roots := make([]Subgoal, 0)
 	for _, g := range s.Goals {
-		parentID := strings.TrimSpace(g.ParentGoalID)
+		parentID := g.ParentGoalID
 		if parentID == "" {
-			roots = append(roots, g)
-			continue
-		}
-		if _, ok := byID[parentID]; !ok {
 			roots = append(roots, g)
 			continue
 		}
@@ -264,11 +348,54 @@ func (s *SubgoalManager) Reset() {
 	s.Goals = make([]Subgoal, 0)
 }
 
-// ReplaceAll 用持久化恢复出的目标树整体替换当前子目标状态。
-func (s *SubgoalManager) ReplaceAll(goals []Subgoal) {
+// ReplaceAll validates and atomically restores a persisted goal tree.
+func (s *SubgoalManager) ReplaceAll(goals []Subgoal) error {
+	if len(goals) > maxGoals {
+		return fmt.Errorf("persisted goal tree exceeds the %d goal limit", maxGoals)
+	}
+	byID := make(map[string]Subgoal, len(goals))
+	for _, goal := range goals {
+		if goal.ID == "" || goal.ID != strings.TrimSpace(goal.ID) {
+			return fmt.Errorf("persisted goal ID must be a non-empty exact value")
+		}
+		if _, exists := byID[goal.ID]; exists {
+			return fmt.Errorf("persisted goal ID %q is duplicated", goal.ID)
+		}
+		if strings.TrimSpace(goal.Description) == "" || len(goal.Description) > maxGoalDescLen {
+			return fmt.Errorf("persisted goal %s has an invalid description", goal.ID)
+		}
+		switch goal.Status {
+		case StatusPending, StatusRunning, StatusComplete, StatusRejected:
+		default:
+			return fmt.Errorf("persisted goal %s has invalid status %q", goal.ID, goal.Status)
+		}
+		if goal.ParentGoalID != strings.TrimSpace(goal.ParentGoalID) {
+			return fmt.Errorf("persisted goal %s has a non-exact parent ID", goal.ID)
+		}
+		if goal.CreatedAt.IsZero() || goal.UpdatedAt.IsZero() {
+			return fmt.Errorf("persisted goal %s is missing timestamps", goal.ID)
+		}
+		byID[goal.ID] = goal
+	}
+	for _, goal := range goals {
+		if goal.ParentGoalID != "" {
+			if _, exists := byID[goal.ParentGoalID]; !exists {
+				return fmt.Errorf("persisted goal %s references missing parent %s", goal.ID, goal.ParentGoalID)
+			}
+		}
+		seen := map[string]struct{}{goal.ID: {}}
+		parentID := goal.ParentGoalID
+		for parentID != "" {
+			if _, exists := seen[parentID]; exists {
+				return fmt.Errorf("persisted goal tree contains a cycle at %s", parentID)
+			}
+			seen[parentID] = struct{}{}
+			parentID = byID[parentID].ParentGoalID
+		}
+	}
+	replacement := append([]Subgoal(nil), goals...)
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.Goals = make([]Subgoal, len(goals))
-	copy(s.Goals, goals)
+	s.Goals = replacement
+	s.mu.Unlock()
+	return nil
 }

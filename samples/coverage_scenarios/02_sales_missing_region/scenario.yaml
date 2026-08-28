@@ -4,12 +4,9 @@ task_length: medium
 prompt: 请对这份销售数据做全面分析，重点说明区域差异、渠道表现和产品结构。
 files:
   - sales_detail_no_region.csv
-expected:
-  should_inspect_schema: true
-  should_auto_map: true
-  should_ask_user: false
-  expected_coverage: partial
-  required_mentions:
-    - missing region dimension
-  forbidden_claims:
-    - region comparison completed with confidence
+acceptance:
+  terminal_types: [run_completed, user_request_input]
+  no_error: true
+manual_review:
+  - 明确地区维度是否存在，不把缺失字段当成已观测事实。
+  - 不声称已可靠完成地区比较。

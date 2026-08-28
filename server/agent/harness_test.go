@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/ifnodoraemon/openDataAnalysis/tools"
@@ -52,17 +55,14 @@ func (r *retryTestRegistry) toToolsRegistry() *tools.Registry {
 func TestIsRetryableToolError(t *testing.T) {
 	t.Parallel()
 
-	retryable := []string{
-		"context deadline exceeded: connection timeout",
-		"connection refused",
-		"TLS handshake timeout",
-		"i/o timeout",
-		"EOF",
-		"read tcp xxx: connection reset by peer",
+	retryable := []error{
+		io.EOF,
+		&net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED},
+		&net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET},
 	}
-	for _, msg := range retryable {
-		if !isRetryableToolError(errors.New(msg)) {
-			t.Errorf("expected retryable for: %q", msg)
+	for _, err := range retryable {
+		if !isRetryableToolError(err) {
+			t.Errorf("expected retryable for: %v", err)
 		}
 	}
 
@@ -151,23 +151,22 @@ func TestCompactWorkerBundleCompactsLongHistory(t *testing.T) {
 	if len(bundle.History) >= originalLen {
 		t.Fatalf("expected history to be compacted, got %d (original %d)", len(bundle.History), originalLen)
 	}
-	if len(bundle.RuntimeContext) == 0 || bundle.RuntimeContext[0].Name != "digest" {
-		t.Fatalf("expected history digest in runtime context")
+	if len(bundle.RuntimeContext) == 0 || bundle.RuntimeContext[0].Name != "history_window" {
+		t.Fatalf("expected structural history-window fact in runtime context")
 	}
 	if bundle.RuntimeContext[0].Role != "user" {
-		t.Fatalf("expected digest role=user, got %q", bundle.RuntimeContext[0].Role)
+		t.Fatalf("expected history-window role=user, got %q", bundle.RuntimeContext[0].Role)
 	}
 }
 
-func TestCompactWorkerBundlePreservesExistingDigest(t *testing.T) {
+func TestCompactWorkerBundlePreservesExistingRuntimeContext(t *testing.T) {
 	t.Parallel()
 
-	existDigest := historyDigestPrefix + "\n- user: early task\n- tool result: ok"
 	bundle := &PromptBundle{
 		Policy: "system",
 		Task:   "user task",
 		RuntimeContext: []RuntimeContextBlock{
-			{Name: "digest", Role: "user", Content: existDigest},
+			{Name: "existing_fact", Role: "user", Content: `{"fact":"retained"}`},
 		},
 		History: []ConversationItem{},
 	}
@@ -185,111 +184,12 @@ func TestCompactWorkerBundlePreservesExistingDigest(t *testing.T) {
 		t.Fatalf("expected compaction with existing digest, got %d", len(bundle.History))
 	}
 	if len(bundle.RuntimeContext) == 0 {
-		t.Fatal("expected digest block")
+		t.Fatal("expected runtime context blocks")
 	}
 	if bundle.RuntimeContext[0].Role != "user" {
-		t.Fatalf("expected preserved digest role=user, got %q", bundle.RuntimeContext[0].Role)
+		t.Fatalf("expected preserved runtime-context role=user, got %q", bundle.RuntimeContext[0].Role)
 	}
-	if !strings.Contains(bundle.RuntimeContext[0].Content, "early task") {
-		t.Fatalf("expected new digest to preserve previous content")
-	}
-}
-
-// ——————————————————————————————————————————————
-// sanitizeReportHTML 测试
-// ——————————————————————————————————————————————
-
-func TestSanitizeReportHTMLStripsEventAttributes(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		input    string
-		mustDrop string
-	}{
-		{`<img src="x" onerror="alert(1)">`, `onerror`},
-		{`<div onclick="steal()" class="foo">`, `onclick`},
-		{`<body onload='evil()'>`, `onload`},
-		{`<a href="#" onmouseover="x=1">link</a>`, `onmouseover`},
-	}
-
-	for _, tc := range cases {
-		result := sanitizeReportHTML(tc.input)
-		if strings.Contains(strings.ToLower(result), strings.ToLower(tc.mustDrop)) {
-			t.Errorf("sanitizeReportHTML failed to strip %q from %q, got %q", tc.mustDrop, tc.input, result)
-		}
-	}
-}
-
-func TestSanitizeReportHTMLStripsJavascriptHref(t *testing.T) {
-	t.Parallel()
-
-	cases := []string{
-		`<a href="javascript:alert(1)">click</a>`,
-		`<a href="javascript:void(0)">click</a>`,
-		`<img src="javascript:evil()">`,
-	}
-	for _, input := range cases {
-		result := sanitizeReportHTML(input)
-		lower := strings.ToLower(result)
-		if strings.Contains(lower, "javascript:") {
-			t.Errorf("sanitizeReportHTML failed to remove javascript: in %q, got %q", input, result)
-		}
-	}
-}
-
-func TestSanitizeReportHTMLPreservesNormalContent(t *testing.T) {
-	t.Parallel()
-
-	input := `<div class="chart"><script>var x=1;</script><style>.a{color:red}</style><a href="https://example.com">link</a></div>`
-	result := sanitizeReportHTML(input)
-
-	if strings.Contains(strings.ToLower(result), "<script") || strings.Contains(result, "var x=1") {
-		t.Errorf("sanitizeReportHTML should remove script tags; ECharts loads through report runtime assets, got %q", result)
-	}
-	if !strings.Contains(result, "<style>") {
-		t.Error("sanitizeReportHTML should preserve style tags")
-	}
-	if !strings.Contains(result, `href="https://example.com"`) {
-		t.Error("sanitizeReportHTML should preserve legitimate https links")
-	}
-	if !strings.Contains(result, `class="chart"`) {
-		t.Error("sanitizeReportHTML should preserve class attributes")
-	}
-}
-
-func TestApplyReportHTMLGuardrailSanitizesHTMLField(t *testing.T) {
-	t.Parallel()
-
-	payload := map[string]interface{}{
-		"ok":   true,
-		"tool": "report_finalize",
-		"html": `<div onclick="evil()"><a href="javascript:void(0)">bad</a></div>`,
-	}
-	raw, _ := json.Marshal(payload)
-	result := applyReportHTMLGuardrail(string(raw))
-
-	var out map[string]interface{}
-	if err := json.Unmarshal([]byte(result), &out); err != nil {
-		t.Fatalf("expected valid JSON, got: %v", err)
-	}
-	htmlOut, ok := out["html"].(string)
-	if !ok {
-		t.Fatal("expected html field in result")
-	}
-	if strings.Contains(strings.ToLower(htmlOut), "onclick") {
-		t.Errorf("expected onclick to be stripped, got: %q", htmlOut)
-	}
-	if strings.Contains(strings.ToLower(htmlOut), "javascript:") {
-		t.Errorf("expected javascript: to be stripped, got: %q", htmlOut)
-	}
-}
-
-func TestApplyReportHTMLGuardrailPassthroughOnInvalidJSON(t *testing.T) {
-	t.Parallel()
-
-	invalid := `not json`
-	result := applyReportHTMLGuardrail(invalid)
-	if result != invalid {
-		t.Fatalf("expected passthrough for invalid JSON, got: %q", result)
+	if bundle.RuntimeContext[0].Content != `{"fact":"retained"}` || bundle.RuntimeContext[len(bundle.RuntimeContext)-1].Name != "history_window" {
+		t.Fatalf("expected existing facts plus structural compaction fact, got %#v", bundle.RuntimeContext)
 	}
 }

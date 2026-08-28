@@ -1,17 +1,17 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
 	"github.com/ifnodoraemon/openDataAnalysis/service"
 )
 
-type SessionSourcesProvider func() ([]service.SessionSourceSummary, error)
-type SessionProfilesProvider func() ([]service.SemanticProfileSummary, error)
-type ProfileDetailProvider func(profileID string) (profileJSON string, confirmationsJSON string, err error)
-type ProfileConfirmer func(profileID, confirmedBy, scope, overridesJSON string) error
-type GovernanceProvider func() (service.GovernanceInspection, error)
+type SessionSourcesProvider func(context.Context) ([]service.SessionSourceSummary, error)
+type ProfileDetailProvider func(context.Context, string) (profileJSON string, confirmationsJSON string, reusablePatchesJSON string, err error)
+type ProfileConfirmer func(context.Context, string, string, string, string) ([]string, error)
+type GovernanceProvider func(context.Context) (service.GovernanceInspection, error)
 
 func init() {
 	RegisterGlobalTool(func(ctx ToolContext) Tool {
@@ -32,7 +32,6 @@ func init() {
 		}
 		return &ConfirmSourceProfileTool{
 			Confirmer:   ctx.ProfileConfirmer,
-			Detail:      ctx.ProfileDetailProvider,
 			SessionID:   ctx.SessionID,
 			WorkspaceID: ctx.WorkspaceID,
 		}
@@ -46,121 +45,161 @@ func init() {
 }
 
 type InspectSessionSourcesTool struct {
-	Provider SessionSourcesProvider
+	Provider  SessionSourcesProvider
+	parentCtx context.Context
 }
 
+func (t *InspectSessionSourcesTool) SetExecutionContext(ctx context.Context) { t.parentCtx = ctx }
+
 func (t *InspectSessionSourcesTool) Name() string { return "state_session_sources_inspect" }
+func (t *InspectSessionSourcesTool) Capability() ToolCapability {
+	return ToolCapability{Mode: "observe", RuntimeEnabled: true, Delegable: true}
+}
 func (t *InspectSessionSourcesTool) Description() string {
-	return "Read current session's data source facts: each source's type, snapshot table name, row count, column count, profile status, ambiguity summary, confirmed overrides, large table flag. Does not modify any state."
+	return "Read current session data-source and snapshot facts, including source type, analysis table, observed size, import mode, profile status, and user patch count. It does not modify state."
 }
 func (t *InspectSessionSourcesTool) Parameters() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{},"required":[]}`)
+	return json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{}}`)
 }
 
 func (t *InspectSessionSourcesTool) Execute(args json.RawMessage) (string, error) {
+	if err := ValidateNoArgs(args); err != nil {
+		return "", fmt.Errorf("failed to parse parameters: %w", err)
+	}
 	if t.Provider == nil {
 		return "", fmt.Errorf("session sources provider is not initialized")
 	}
-	sources, err := t.Provider()
+	if t.parentCtx == nil {
+		return "", fmt.Errorf("tool execution context is not initialized")
+	}
+	sources, err := t.Provider(t.parentCtx)
 	if err != nil {
 		return "", err
 	}
 	payload := map[string]interface{}{
 		"source_count": len(sources),
 		"sources":      sources,
-		"ui_summary":   fmt.Sprintf("%d data sources in current session.", len(sources)),
+		"ui_summary":   fmt.Sprintf("当前会话包含 %d 个数据源。", len(sources)),
 	}
 	return toolSuccess("state_session_sources_inspect", payload), nil
 }
 
 type InspectSemanticProfileTool struct {
-	Provider ProfileDetailProvider
+	Provider  ProfileDetailProvider
+	parentCtx context.Context
 }
 
+func (t *InspectSemanticProfileTool) SetExecutionContext(ctx context.Context) { t.parentCtx = ctx }
+
 func (t *InspectSemanticProfileTool) Name() string { return "state_semantic_profile_inspect" }
+func (t *InspectSemanticProfileTool) Capability() ToolCapability {
+	return ToolCapability{Mode: "observe", RuntimeEnabled: true, Delegable: true}
+}
 func (t *InspectSemanticProfileTool) Description() string {
-	return "Read detailed facts for a specified semantic profile: schema, candidate time columns, candidate metrics, candidate joins, candidate units, ambiguity list, warnings, applied confirmation overrides. Does not modify any state."
+	return "Read a stored structural profile, its confirmation records, and reusable workspace patches with the same schema signature. Reusable patches are exposed as facts and are not auto-applied. The tool does not modify state or select an interpretation."
 }
 func (t *InspectSemanticProfileTool) Parameters() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{"profile_id":{"type":"string","description":"The semantic profile ID to inspect"}},"required":["profile_id"]}`)
+	return json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"profile_id":{"type":"string","description":"The semantic profile ID to inspect"}},"required":["profile_id"]}`)
 }
 
 func (t *InspectSemanticProfileTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
 		ProfileID string `json:"profile_id"`
 	}
-	if err := json.Unmarshal(args, &params); err != nil {
+	if err := decodeToolArgs(args, &params); err != nil {
 		return "", fmt.Errorf("failed to parse parameters: %w", err)
 	}
 	if t.Provider == nil {
 		return "", fmt.Errorf("profile detail provider is not initialized")
 	}
-	profileJSON, confirmationsJSON, err := t.Provider(params.ProfileID)
+	if t.parentCtx == nil {
+		return "", fmt.Errorf("tool execution context is not initialized")
+	}
+	profileJSON, confirmationsJSON, reusablePatchesJSON, err := t.Provider(t.parentCtx, params.ProfileID)
 	if err != nil {
 		return "", err
 	}
 	payload := map[string]interface{}{
-		"profile_id":    params.ProfileID,
-		"profile_json":  json.RawMessage(profileJSON),
-		"confirmations": json.RawMessage(confirmationsJSON),
+		"profile_id":       params.ProfileID,
+		"profile_json":     json.RawMessage(profileJSON),
+		"confirmations":    json.RawMessage(confirmationsJSON),
+		"reusable_patches": json.RawMessage(reusablePatchesJSON),
 	}
 	return toolSuccess("state_semantic_profile_inspect", payload), nil
 }
 
 type InspectGovernanceTool struct {
-	Provider GovernanceProvider
+	Provider  GovernanceProvider
+	parentCtx context.Context
 }
 
+func (t *InspectGovernanceTool) SetExecutionContext(ctx context.Context) { t.parentCtx = ctx }
+
 func (t *InspectGovernanceTool) Name() string { return "state_governance_inspect" }
+func (t *InspectGovernanceTool) Capability() ToolCapability {
+	return ToolCapability{Mode: "observe", RuntimeEnabled: true, Delegable: true}
+}
 func (t *InspectGovernanceTool) Description() string {
-	return "Read current session's general data governance facts: source coverage, snapshot status, semantic ambiguity count, profile warnings, reusable semantic asset count, and issue severities. Does not modify any state and does not prescribe follow-up actions."
+	return "Read current session source, snapshot, import, profile, warning, reusable-patch, and observation-error facts. It returns no severity ranking, issue classification, or follow-up action."
 }
 func (t *InspectGovernanceTool) Parameters() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{},"required":[]}`)
+	return json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{}}`)
 }
 
 func (t *InspectGovernanceTool) Execute(args json.RawMessage) (string, error) {
+	if err := ValidateNoArgs(args); err != nil {
+		return "", fmt.Errorf("failed to parse parameters: %w", err)
+	}
 	if t.Provider == nil {
 		return "", fmt.Errorf("governance provider is not initialized")
 	}
-	inspection, err := t.Provider()
+	if t.parentCtx == nil {
+		return "", fmt.Errorf("tool execution context is not initialized")
+	}
+	inspection, err := t.Provider(t.parentCtx)
 	if err != nil {
 		return "", err
 	}
 	payload := map[string]interface{}{
 		"source_count":         inspection.SourceCount,
 		"semantic_asset_count": inspection.SemanticAssetCount,
-		"issue_count":          inspection.IssueCount,
-		"severity_counts":      inspection.SeverityCounts,
 		"sources":              inspection.Sources,
-		"issues":               inspection.Issues,
+		"profile_warnings":     inspection.ProfileWarnings,
+		"observation_errors":   inspection.ObservationErrors,
 		"generated_at":         inspection.GeneratedAt,
-		"ui_summary":           fmt.Sprintf("%d governance facts inspected; %d issues found.", inspection.SourceCount, inspection.IssueCount),
+		"ui_summary":           fmt.Sprintf("已检查 %d 条数据源事实。", inspection.SourceCount),
 	}
 	return toolSuccess("state_governance_inspect", payload), nil
 }
 
 type ConfirmSourceProfileTool struct {
 	Confirmer   ProfileConfirmer
-	Detail      ProfileDetailProvider
 	SessionID   string
 	WorkspaceID string
+	parentCtx   context.Context
 }
 
-func (t *ConfirmSourceProfileTool) Name() string { return "state_source_confirm_profile" }
+func (t *ConfirmSourceProfileTool) SetExecutionContext(ctx context.Context) { t.parentCtx = ctx }
+
+func (t *ConfirmSourceProfileTool) Name() string { return "profile_patch_commit" }
+func (t *ConfirmSourceProfileTool) Capability() ToolCapability {
+	return ToolCapability{Mode: "action", RuntimeEnabled: true, RequiresUserReceipt: true}
+}
 func (t *ConfirmSourceProfileTool) Description() string {
-	return "Resolve semantic ambiguities detected during data profiling. Accepts a profile_id and a JSON object of overrides specifying which interpretations to confirm (e.g. primary time column, percentage unit columns, metric definitions, confirmed join candidates). Writes confirmation overrides for the requested scope and returns the confirmed profile_id and scope. This tool does not create or modify data sources."
+	return "Commit an exact user-authorized patch for one stored profile. Requires a single-use authorization receipt bound to action=profile_patch_commit, this profile_id, and the canonical scope/patch payload. Writes actor and receipt provenance; it does not modify source data or infer additional fields."
 }
 func (t *ConfirmSourceProfileTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
+		"additionalProperties": false,
 		"properties": {
-			"profile_id": {"type": "string", "description": "The semantic profile ID to confirm"},
-			"scope": {"type": "string", "enum": ["session", "workspace"], "description": "Scope of the confirmation. Use 'session' for session-level overrides."},
-			"overrides_json": {"type": "string", "description": "JSON object specifying overrides. For multiple_time_columns: {\"primary_time_column\":\"column_name\"}. For ambiguous_units: {\"percentage_columns\":[\"col1\",\"col2\"]}. For ambiguous_metrics: {\"metric_definitions\":{\"col1\":\"definition\",...}}. For ambiguous_join: {\"confirmed_join_candidates\":[\"candidate\"]}."}
-		},
-		"required": ["profile_id", "scope", "overrides_json"]
-	}`)
+				"profile_id": {"type": "string", "description": "The semantic profile ID to confirm"},
+				"scope": {"type": "string", "enum": ["session", "workspace"], "description": "Scope of the confirmation. Use 'session' for session-level overrides."},
+				"overrides_json": {"type": "string", "description": "JSON object containing exactly the authorized profile patch."},
+				"confirmation_receipt_id": {"type": "string", "description": "Single-use authorization receipt bound to this exact change."}
+			},
+			"required": ["profile_id", "scope", "overrides_json", "confirmation_receipt_id"]
+		}`)
 }
 
 func (t *ConfirmSourceProfileTool) Execute(args json.RawMessage) (string, error) {
@@ -168,19 +207,29 @@ func (t *ConfirmSourceProfileTool) Execute(args json.RawMessage) (string, error)
 		ProfileID     string `json:"profile_id"`
 		Scope         string `json:"scope"`
 		OverridesJSON string `json:"overrides_json"`
+		ReceiptID     string `json:"confirmation_receipt_id"`
 	}
-	if err := json.Unmarshal(args, &params); err != nil {
+	if err := decodeToolArgs(args, &params); err != nil {
 		return "", fmt.Errorf("failed to parse parameters: %w", err)
 	}
 	if t.Confirmer == nil {
 		return "", fmt.Errorf("profile confirmer is not initialized")
 	}
-	if err := t.Confirmer(params.ProfileID, "agent", params.Scope, params.OverridesJSON); err != nil {
+	if t.parentCtx == nil {
+		return "", fmt.Errorf("tool execution context is not initialized")
+	}
+	auditErrors, err := t.Confirmer(t.parentCtx, params.ProfileID, params.Scope, params.OverridesJSON, params.ReceiptID)
+	if err != nil {
 		return "", err
 	}
-	return toolSuccess("state_source_confirm_profile", map[string]interface{}{
-		"profile_id": params.ProfileID,
-		"scope":      params.Scope,
-		"ui_summary": fmt.Sprintf("Profile %s confirmed with scope=%s.", params.ProfileID, params.Scope),
-	}), nil
+	payload := map[string]interface{}{
+		"profile_id":              params.ProfileID,
+		"scope":                   params.Scope,
+		"confirmation_receipt_id": params.ReceiptID,
+		"ui_summary":              fmt.Sprintf("已按作用域 %s 提交画像 %s 的授权补丁。", params.Scope, params.ProfileID),
+	}
+	if len(auditErrors) > 0 {
+		payload["audit_errors"] = auditErrors
+	}
+	return toolSuccess("profile_patch_commit", payload), nil
 }

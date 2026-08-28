@@ -2,13 +2,10 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 type UserRepository struct {
@@ -27,11 +24,8 @@ func (r *UserRepository) GetByID(ctx context.Context, userID string) (*domain.Us
 	var user domain.User
 	var status string
 	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &user.AvatarURL, &status, &user.CreatedAt, &user.UpdatedAt, &user.LastLoginAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, sql.ErrNoRows
-	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get user by id: %w", err)
+		return nil, fmt.Errorf("failed to get user by id: %w", normalizeLookupError(err))
 	}
 	user.Status = domain.UserStatus(status)
 	return &user, nil
@@ -45,11 +39,8 @@ func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*domain.
 	var user domain.User
 	var status string
 	err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &user.AvatarURL, &status, &user.CreatedAt, &user.UpdatedAt, &user.LastLoginAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, sql.ErrNoRows
-	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get user by email: %w", err)
+		return nil, fmt.Errorf("failed to get user by email: %w", normalizeLookupError(err))
 	}
 	user.Status = domain.UserStatus(status)
 	return &user, nil

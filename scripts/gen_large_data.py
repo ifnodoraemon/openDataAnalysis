@@ -7,7 +7,7 @@ import math
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-BASE = Path("/home/ifnodoraemon/myagent/data-analysis/samples/coverage_scenarios")
+BASE = Path(__file__).resolve().parents[1] / "samples" / "coverage_scenarios"
 random.seed(42)
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -18,7 +18,7 @@ def write_csv(path, rows):
         w.writerow(rows[0])
         for r in rows[1:]:
             w.writerow(r)
-    print(f"  {path}  ({len(rows)-1} rows)")
+    print(f"  {path}  ({len(rows)-1} 行)")
 
 # ── 22: Daily retail transactions (~6000 rows) ───────────────────
 def gen_daily_retail():
@@ -254,9 +254,9 @@ def gen_employee_wide():
 
 # ── Run ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("Generating large test datasets...")
+    print("正在生成大规模测试数据集...")
     gen_daily_retail()
     gen_financial_ledger()
     gen_server_metrics()
     gen_employee_wide()
-    print("Done.")
+    print("完成。")

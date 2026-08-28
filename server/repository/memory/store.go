@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
+	"github.com/ifnodoraemon/openDataAnalysis/repository"
 )
 
 type UserRepository struct {
@@ -24,7 +25,7 @@ func (r *UserRepository) GetByID(ctx context.Context, userID string) (*domain.Us
 	defer r.mu.Unlock()
 	user, ok := r.users[userID]
 	if !ok {
-		return nil, fmt.Errorf("user does not exist: %s", userID)
+		return nil, fmt.Errorf("%w: user %s", repository.ErrNotFound, userID)
 	}
 	copy := *user
 	return &copy, nil
@@ -43,7 +44,7 @@ func (r *UserRepository) UpdatePasswordHash(ctx context.Context, userID, passwor
 	defer r.mu.Unlock()
 	user, ok := r.users[userID]
 	if !ok {
-		return fmt.Errorf("user does not exist: %s", userID)
+		return fmt.Errorf("%w: user %s", repository.ErrNotFound, userID)
 	}
 	user.PasswordHash = passwordHash
 	user.UpdatedAt = time.Now()
@@ -68,7 +69,7 @@ func (r *WorkspaceRepository) GetByID(ctx context.Context, workspaceID string) (
 	defer r.mu.Unlock()
 	workspace, ok := r.workspaces[workspaceID]
 	if !ok {
-		return nil, fmt.Errorf("workspace does not exist: %s", workspaceID)
+		return nil, fmt.Errorf("%w: workspace %s", repository.ErrNotFound, workspaceID)
 	}
 	copy := *workspace
 	return &copy, nil
@@ -83,6 +84,22 @@ func (r *WorkspaceRepository) IsMember(ctx context.Context, workspaceID, userID 
 	}
 	_, ok = roles[userID]
 	return ok, nil
+}
+
+func (r *WorkspaceRepository) ListByUser(ctx context.Context, userID string) ([]domain.Workspace, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	workspaces := make([]domain.Workspace, 0)
+	for workspaceID, roles := range r.members {
+		if _, ok := roles[userID]; !ok {
+			continue
+		}
+		if workspace, ok := r.workspaces[workspaceID]; ok {
+			workspaces = append(workspaces, *workspace)
+		}
+	}
+	sort.Slice(workspaces, func(i, j int) bool { return workspaces[i].ID < workspaces[j].ID })
+	return workspaces, nil
 }
 
 func (r *WorkspaceRepository) CreateWorkspace(ctx context.Context, workspace *domain.Workspace) error {
@@ -140,7 +157,7 @@ func (r *FileRepository) GetByID(ctx context.Context, fileID string) (*domain.Fi
 	defer r.mu.Unlock()
 	file, ok := r.files[fileID]
 	if !ok {
-		return nil, fmt.Errorf("file does not exist: %s", fileID)
+		return nil, fmt.Errorf("%w: file %s", repository.ErrNotFound, fileID)
 	}
 	copy := *file
 	return &copy, nil
@@ -168,6 +185,22 @@ func (r *FileRepository) AttachFilesToSession(ctx context.Context, sessionID str
 	return nil
 }
 
+func (r *FileRepository) Delete(ctx context.Context, fileID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.files, fileID)
+	for sessionID, ids := range r.sessions {
+		kept := ids[:0]
+		for _, id := range ids {
+			if id != fileID {
+				kept = append(kept, id)
+			}
+		}
+		r.sessions[sessionID] = kept
+	}
+	return nil
+}
+
 func (r *ReportRepository) Create(ctx context.Context, report *domain.Report) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -181,7 +214,7 @@ func (r *ReportRepository) GetByRunID(ctx context.Context, runID string) (*domai
 	defer r.mu.Unlock()
 	report, ok := r.reports[runID]
 	if !ok {
-		return nil, fmt.Errorf("report does not exist: %s", runID)
+		return nil, fmt.Errorf("%w: report for run %s", repository.ErrNotFound, runID)
 	}
 	copy := *report
 	return &copy, nil
@@ -212,7 +245,7 @@ func (r *RunRepository) GetByID(ctx context.Context, runID string) (*domain.Anal
 	defer r.mu.Unlock()
 	run, ok := r.runs[runID]
 	if !ok {
-		return nil, fmt.Errorf("task does not exist: %s", runID)
+		return nil, fmt.Errorf("%w: run %s", repository.ErrNotFound, runID)
 	}
 	copy := *run
 	return &copy, nil
@@ -267,7 +300,7 @@ func (r *RunRepository) UpdateStatus(ctx context.Context, runID string, status d
 	defer r.mu.Unlock()
 	run, ok := r.runs[runID]
 	if !ok {
-		return fmt.Errorf("task does not exist: %s", runID)
+		return fmt.Errorf("%w: run %s", repository.ErrNotFound, runID)
 	}
 	run.Status = status
 	run.ErrorMessage = errMsg
@@ -283,7 +316,7 @@ func (r *RunRepository) UpdateSummary(ctx context.Context, runID, summary string
 	defer r.mu.Unlock()
 	run, ok := r.runs[runID]
 	if !ok {
-		return fmt.Errorf("task does not exist: %s", runID)
+		return fmt.Errorf("%w: run %s", repository.ErrNotFound, runID)
 	}
 	run.Summary = summary
 	return nil
@@ -294,7 +327,7 @@ func (r *RunRepository) BindReportFile(ctx context.Context, runID, reportFileID 
 	defer r.mu.Unlock()
 	run, ok := r.runs[runID]
 	if !ok {
-		return fmt.Errorf("task does not exist: %s", runID)
+		return fmt.Errorf("%w: run %s", repository.ErrNotFound, runID)
 	}
 	run.ReportFileID = &reportFileID
 	return nil

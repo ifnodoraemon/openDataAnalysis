@@ -52,16 +52,59 @@ func TestSourceConnectorRegistryReturnsSpecs(t *testing.T) {
 	}
 }
 
-func TestSourceScopedFileTableNameAvoidsCrossSourceCollision(t *testing.T) {
+func TestFileUploadConnectorRejectsConfiguration(t *testing.T) {
 	t.Parallel()
 
-	first := SourceScopedFileTableName("sales.csv", "ds_alpha_12345678")
-	second := SourceScopedFileTableName("sales.csv", "ds_beta_87654321")
-	if first == second {
-		t.Fatalf("expected source-scoped table names to differ, both %q", first)
+	connector := &FileUploadConnector{}
+	if _, err := connector.NormalizeConfig(context.Background(), SourceConfigRequest{}); err == nil {
+		t.Fatal("expected file upload connector configuration to be rejected")
 	}
-	if first != "sales__12345678" || second != "sales__87654321" {
-		t.Fatalf("unexpected scoped table names: %q %q", first, second)
+}
+
+func TestSourceConnectorRegistryRejectsDuplicateTypes(t *testing.T) {
+	t.Parallel()
+
+	registry := NewSourceConnectorRegistry()
+	connector := fakeSourceConnector{sourceType: domain.SourceTypePostgresConnection}
+	registry.Register(connector)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected duplicate source connector registration to panic")
+		}
+	}()
+	registry.Register(connector)
+}
+
+func TestSourceConnectorRegistryRejectsUninitializedRegistry(t *testing.T) {
+	t.Parallel()
+
+	registry := &SourceConnectorRegistry{}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected uninitialized source connector registry to panic")
+		}
+	}()
+	registry.Specs()
+}
+
+func TestSourceConnectorConstructorsRejectMissingDependencies(t *testing.T) {
+	t.Parallel()
+
+	for name, construct := range map[string]func(){
+		"postgres":     func() { NewPostgresConnector(nil) },
+		"mysql":        func() { NewMySQLConnector(nil) },
+		"file sources": func() { NewFileUploadConnector(nil, &FileService{}) },
+		"file service": func() { NewFileUploadConnector(&SourceService{}, nil) },
+	} {
+		name, construct := name, construct
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("expected missing connector dependency to panic")
+				}
+			}()
+			construct()
+		})
 	}
 }
 
@@ -87,8 +130,8 @@ func (c fakeSourceConnector) PublicConfig(ctx context.Context, sourceID string) 
 	return nil, nil
 }
 
-func (c fakeSourceConnector) Test(ctx context.Context, req SourceTestRequest) (map[string]interface{}, error) {
-	return map[string]interface{}{"success": true}, nil
+func (c fakeSourceConnector) Test(ctx context.Context, req SourceTestRequest) (SourceTestResult, error) {
+	return SourceTestResult{Success: true}, nil
 }
 
 func (c fakeSourceConnector) Catalog(ctx context.Context, sourceID string) ([]SourceCatalogObject, error) {

@@ -13,8 +13,8 @@ const (
 type ProfileMode string
 
 const (
+	ProfileModePending ProfileMode = "pending"
 	ProfileModeSampled ProfileMode = "sampled"
-	ProfileModeMixed   ProfileMode = "mixed"
 	ProfileModeExact   ProfileMode = "exact"
 )
 

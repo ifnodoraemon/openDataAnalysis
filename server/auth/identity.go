@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -36,7 +37,7 @@ func Middleware(tokenManager *TokenManager) func(http.Handler) http.Handler {
 			if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
 				token = strings.TrimSpace(authHeader[7:])
 			}
-			if token == "" {
+			if token == "" && r.URL.Path == "/api/sse" {
 				token = strings.TrimSpace(r.URL.Query().Get("token"))
 			}
 			if token == "" {
@@ -44,27 +45,15 @@ func Middleware(tokenManager *TokenManager) func(http.Handler) http.Handler {
 					token = cookie.Value
 				}
 			}
-			if token == "" {
-				wsProtos := r.Header.Get("Sec-WebSocket-Protocol")
-				if wsProtos != "" {
-					parts := strings.Split(wsProtos, ",")
-					for _, p := range parts {
-						p = strings.TrimSpace(p)
-						if strings.HasPrefix(p, "token-") {
-							token = strings.TrimPrefix(p, "token-")
-							break
-						}
-					}
-				}
-			}
 			if token == "" || tokenManager == nil {
-				writeAuthError(w, http.StatusUnauthorized, "not authenticated")
+				writeAuthError(w, http.StatusUnauthorized, "未登录")
 				return
 			}
 
 			identity, err := tokenManager.Parse(token)
 			if err != nil {
-				writeAuthError(w, http.StatusUnauthorized, err.Error())
+				log.Printf("invalid authentication token: %v", err)
+				writeAuthError(w, http.StatusUnauthorized, "登录凭证无效或已过期")
 				return
 			}
 			ctx := WithIdentity(r.Context(), identity)
@@ -76,7 +65,9 @@ func Middleware(tokenManager *TokenManager) func(http.Handler) http.Handler {
 func writeAuthError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{
+	if err := json.NewEncoder(w).Encode(map[string]string{
 		"error": message,
-	})
+	}); err != nil {
+		log.Printf("write authentication error response: %v", err)
+	}
 }

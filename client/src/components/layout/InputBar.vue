@@ -4,12 +4,14 @@
     <div class="upload-area" v-if="dataSourceStore.sessionSources.length > 0">
       <span
         v-for="src in dataSourceStore.sessionSources"
-        :key="src.source_object_key || src.active_snapshot_id"
+        :key="src.source_object_key"
         class="source-tag"
       >
         <span class="tag-icon">🔗</span>
-        <span class="tag-name">{{ src.analysis_table_name || src.source_name }}</span>
-        <span class="source-meta" v-if="src.row_count">({{ src.row_count }} 行)</span>
+        <span class="tag-name">{{ src.analysis_table_name }}</span>
+        <span class="source-meta" v-if="src.row_count"
+          >({{ src.row_count }} 行)</span
+        >
       </span>
     </div>
 
@@ -17,7 +19,9 @@
     <div v-if="reportQuote && !isWaitingUserInput" class="quote-context">
       <div class="quote-main">
         <span class="quote-kicker">📌 引用研报段落编辑</span>
-        <span class="quote-title">{{ reportQuote.blockLabel || reportQuote.blockId || "选区" }}</span>
+        <span class="quote-title">{{
+          reportQuote.blockLabel || reportQuote.blockId || "选区"
+        }}</span>
         <p>{{ quotePreview }}</p>
       </div>
       <button
@@ -32,7 +36,28 @@
     </div>
 
     <!-- Input Box Card -->
-    <div class="input-box-card" :class="{ focused: isFocused, disabled: inputDisabled }">
+    <div
+      class="input-box-card"
+      :class="{ focused: isFocused, disabled: inputDisabled }"
+    >
+      <!-- User Request Options -->
+      <div
+        v-if="requestOptions.length > 0"
+        class="request-options"
+        :class="{ 'multi-select': isMultiSelect }"
+      >
+        <button
+          v-for="option in requestOptions"
+          :key="option.id"
+          class="request-option-btn"
+          :class="{ selected: selectedOptionIds.includes(option.id) }"
+          @click="toggleOption(option.id)"
+        >
+          <span>{{ option.label }}</span>
+          <small v-if="option.hint">{{ option.hint }}</small>
+        </button>
+      </div>
+
       <textarea
         v-model="input"
         class="input-field"
@@ -56,7 +81,7 @@
             <span class="btn-label" v-else>上传中...</span>
             <input
               type="file"
-              accept=".csv,.xlsx,.xls"
+              accept=".csv,.xlsx"
               multiple
               @change="handleFile"
               :disabled="isUploading"
@@ -76,30 +101,26 @@
 
         <div class="right-tools">
           <button
-            v-if="!inputDisabled"
+            v-if="!inputDisabled || isWaitingUserInput"
             class="send-submit-btn"
             @click="handleSend"
-            :disabled="!input.trim()"
+            :disabled="!input.trim() && selectedOptionIds.length === 0"
           >
-            <span>发送分析</span>
+            <span>{{ isWaitingUserInput ? "提交回复" : "发送分析" }}</span>
             <span class="shortcut-hint">⏎</span>
           </button>
           <button v-else-if="isRunning" class="stop-btn" @click="handleStop">
             ■ 中断分析
           </button>
-          <button v-else class="send-submit-btn" disabled>
-            等待交互确认
-          </button>
         </div>
       </div>
     </div>
 
-    <DataSourceDrawer
+    <DataSourceModal
       :open="showSourcesDrawer"
       :sessionId="store.sessionId"
       :sessionSources="dataSourceStore.sessionSources"
       :workspaceDataSources="dataSourceStore.workspaceDataSources"
-      :pendingProfiles="pendingProfiles"
       @close="showSourcesDrawer = false"
     />
   </div>
@@ -107,12 +128,12 @@
 
 <script setup>
 import { ref, computed } from "vue";
-import { useWebSocket } from "../../composables/useWebSocket.js";
+import { useAgentTransport } from "../../composables/useAgentTransport.js";
 import { useAgentStore } from "../../stores/agent.js";
 import { useDataSourceStore } from "../../stores/datasource.js";
-import DataSourceDrawer from "../datasource/DataSourceDrawer.vue";
+import DataSourceModal from "../datasource/DataSourceModal.vue";
 
-const { sendMessage, stop, ensureSession } = useWebSocket();
+const { sendMessage, stop, ensureSession } = useAgentTransport();
 const store = useAgentStore();
 const dataSourceStore = useDataSourceStore();
 
@@ -129,13 +150,14 @@ const isWaitingUserInput = computed(
   () => activeRun.value?.status === "waiting_user_input",
 );
 const inputDisabled = computed(
-  () => isRunning.value || isWaitingUserInput.value,
+  () => isRunning.value && !isWaitingUserInput.value,
 );
 
 const inputPlaceholder = computed(() => {
-  if (isWaitingUserInput.value) return "请在上方确认卡片中回复...";
+  if (isWaitingUserInput.value)
+    return "请直接在此回复，或选择上方卡片中的选项...";
   if (reportQuote.value) return "说明希望如何修改引用区域...";
-  return "输入分析目标、业务问题或筛选条件 (按 Enter 发送)...";
+  return "输入目标、上下文、约束或完成标准 (按 Enter 发送)...";
 });
 
 const quotePreview = computed(() => {
@@ -143,11 +165,46 @@ const quotePreview = computed(() => {
   return text.length > 120 ? `${text.slice(0, 120)}...` : text;
 });
 
-const pendingProfiles = computed(() =>
-  dataSourceStore.sessionSources.filter(
-    (s) => s.semantic_status === "draft" || s.semantic_status === "profiled",
-  ),
-);
+const userInputRequestMessage = computed(() => {
+  if (!isWaitingUserInput.value) return null;
+  const msgs = store.messages;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.type === "user_request_input") return m;
+  }
+  return null;
+});
+
+const requestOptions = computed(() => {
+  const msg = userInputRequestMessage.value;
+  if (!msg) return [];
+  const opts = msg.options || [];
+  return opts
+    .map((o) => ({
+      id: String(o?.id || "").trim(),
+      label: String(o?.label || "").trim(),
+      hint: String(o?.hint || "").trim(),
+    }))
+    .filter((o) => o.id && o.label);
+});
+
+const isMultiSelect = computed(() => {
+  const msg = userInputRequestMessage.value;
+  if (!msg) return false;
+  return msg.selection_mode === "multiple";
+});
+
+const selectedOptionIds = ref([]);
+
+function toggleOption(id) {
+  if (isMultiSelect.value) {
+    const idx = selectedOptionIds.value.indexOf(id);
+    if (idx >= 0) selectedOptionIds.value.splice(idx, 1);
+    else selectedOptionIds.value.push(id);
+  } else {
+    selectedOptionIds.value = [id];
+  }
+}
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
@@ -218,8 +275,31 @@ async function handleFile(e) {
 }
 
 async function handleSend() {
-  if (!input.value.trim() || isRunning.value) return;
-  const quote = reportQuote.value;
+  // Allow sending if there's text OR selected options
+  if (!input.value.trim() && selectedOptionIds.value.length === 0) return;
+  if (isRunning.value && !isWaitingUserInput.value) return;
+
+  let payloadContent = input.value.trim();
+
+  // When answering a user_request_input with options selected
+  if (
+    isWaitingUserInput.value &&
+    requestOptions.value.length > 0 &&
+    selectedOptionIds.value.length > 0
+  ) {
+    const selectedOpts = requestOptions.value.filter((o) =>
+      selectedOptionIds.value.includes(o.id),
+    );
+    const labels = selectedOpts.map((o) => `"${o.label}"`).join("、");
+    const displayText = `选择：${labels}`;
+    payloadContent = payloadContent
+      ? `${displayText}\n${payloadContent}`
+      : displayText;
+  }
+
+  if (!payloadContent) return;
+
+  // Build turnContext for report editing
   const turnContext =
     selectedRun.value?.id && selectedRun.value?.report
       ? {
@@ -227,9 +307,12 @@ async function handleSend() {
           reportTitle: selectedRun.value.report?.title || "",
         }
       : null;
+
+  // Build editContext from quote
+  const quote = reportQuote.value;
   const editContext = quote
     ? {
-        mode: quote.mode || "regenerate_selection",
+        scopeKind: quote.scopeKind || "",
         targetRunId: quote.targetRunId || "",
         blockId: quote.blockId || "",
         blockLabel: quote.blockLabel || "",
@@ -241,19 +324,39 @@ async function handleSend() {
           ? quote.selectionEnd
           : undefined,
         selectionRangeSet: quote.selectionRangeSet === true,
-        preserveOtherBlocks: quote.preserveOtherBlocks !== false,
       }
     : null;
-  const message = input.value.trim();
-  input.value = "";
-  if (quote) store.clearReportQuote();
-  const sent = await sendMessage(message, {
+
+  const request = userInputRequestMessage.value;
+  let wireResponse = payloadContent;
+  if (
+    isWaitingUserInput.value &&
+    request?.authorization &&
+    selectedOptionIds.value.length === 1
+  ) {
+    wireResponse = JSON.stringify({
+      response_type: "authorization",
+      authorization_decision: selectedOptionIds.value[0],
+      action: request.authorization.action,
+      resource_ref: request.authorization.resource_ref,
+    });
+  }
+
+  const sent = await sendMessage(payloadContent, {
+    ...(wireResponse !== payloadContent
+      ? { payloadContent: wireResponse }
+      : {}),
     ...(editContext ? { editContext } : {}),
     ...(turnContext ? { turnContext } : {}),
   });
-  if (!sent) {
-    input.value = message;
-    if (quote) store.setReportQuote(quote);
+
+  if (sent) {
+    input.value = "";
+    selectedOptionIds.value = [];
+    store.clearReportQuote();
+  } else {
+    // Restore input if send failed
+    input.value = payloadContent;
   }
 }
 
@@ -288,16 +391,24 @@ function formatSize(bytes) {
   align-items: center;
   gap: 6px;
   font-size: 0.76rem;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
   padding: 4px 10px;
   border-radius: 20px;
-  color: var(--text-secondary);
+  color: var(--text-sub);
 }
 
-.tag-icon { font-size: 0.8rem; }
-.tag-name { font-weight: 600; color: var(--text-primary); }
-.source-meta { color: var(--text-muted); font-size: 0.7rem; }
+.tag-icon {
+  font-size: 0.8rem;
+}
+.tag-name {
+  font-weight: 600;
+  color: var(--text-main);
+}
+.source-meta {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
 
 .quote-context {
   display: flex;
@@ -305,41 +416,59 @@ function formatSize(bytes) {
   gap: 12px;
   padding: 10px 14px;
   border: 1px solid rgba(59, 130, 246, 0.3);
-  border-left: 4px solid var(--accent-blue);
+  border-left: 4px solid var(--primary-blue);
   border-radius: 10px;
   background: rgba(59, 130, 246, 0.08);
 }
 
-.quote-main { flex: 1; min-width: 0; }
-.quote-kicker { font-size: 0.72rem; color: var(--accent-blue); font-weight: 700; }
-.quote-title { font-size: 0.82rem; color: var(--text-primary); font-weight: 600; }
-.quote-context p { margin-top: 2px; color: var(--text-secondary); font-size: 0.78rem; }
+.quote-main {
+  flex: 1;
+  min-width: 0;
+}
+.quote-kicker {
+  font-size: 0.72rem;
+  color: var(--primary-blue);
+  font-weight: 700;
+}
+.quote-title {
+  font-size: 0.82rem;
+  color: var(--text-main);
+  font-weight: 600;
+}
+.quote-context p {
+  margin-top: 2px;
+  color: var(--text-sub);
+  font-size: 0.78rem;
+}
 
 .quote-clear {
   width: 22px;
   height: 22px;
   border: none;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.1);
-  color: var(--text-secondary);
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text-sub);
   cursor: pointer;
 }
 
-.quote-clear:hover { background: rgba(255, 255, 255, 0.2); color: white; }
+.quote-clear:hover {
+  background: rgba(0, 0, 0, 0.1);
+  color: var(--text-main);
+}
 
 .input-box-card {
   display: flex;
   flex-direction: column;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
   border-radius: 14px;
   padding: 10px 14px;
-  transition: all var(--transition);
-  box-shadow: var(--shadow-md);
+  transition: all var(--transition-fast);
+  box-shadow: var(--shadow-panel);
 }
 
 .input-box-card.focused {
-  border-color: var(--border-glow);
+  border-color: var(--border-accent);
   box-shadow: var(--shadow-glow);
 }
 
@@ -351,7 +480,7 @@ function formatSize(bytes) {
   width: 100%;
   background: transparent;
   border: none;
-  color: var(--text-primary);
+  color: var(--text-main);
   font-size: 0.9rem;
   font-family: inherit;
   resize: none;
@@ -369,7 +498,7 @@ function formatSize(bytes) {
   justify-content: space-between;
   margin-top: 8px;
   padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  border-top: 1px solid rgba(0, 0, 0, 0.05);
 }
 
 .left-tools {
@@ -383,19 +512,19 @@ function formatSize(bytes) {
   align-items: center;
   gap: 6px;
   padding: 5px 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.02);
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  color: var(--text-secondary);
+  color: var(--text-sub);
   font-size: 0.78rem;
   font-weight: 500;
   cursor: pointer;
-  transition: all var(--transition);
+  transition: all var(--transition-fast);
 }
 
 .action-icon-btn:hover:not(.disabled) {
-  background: var(--bg-hover);
-  color: var(--text-primary);
+  background: var(--bg-card-hover);
+  color: var(--text-main);
 }
 
 .send-submit-btn {
@@ -403,14 +532,14 @@ function formatSize(bytes) {
   align-items: center;
   gap: 6px;
   padding: 7px 16px;
-  background: linear-gradient(135deg, var(--accent-blue), #2563eb);
+  background: linear-gradient(135deg, var(--primary-blue), #2563eb);
   border: none;
   border-radius: 8px;
   color: white;
   font-size: 0.82rem;
   font-weight: 600;
   cursor: pointer;
-  transition: all var(--transition);
+  transition: all var(--transition-fast);
   box-shadow: 0 2px 8px rgba(37, 99, 235, 0.3);
 }
 
@@ -433,17 +562,61 @@ function formatSize(bytes) {
 
 .stop-btn {
   padding: 7px 16px;
-  background: rgba(239, 68, 68, 0.15);
-  border: 1px solid rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.05);
+  border: 1px solid rgba(239, 68, 68, 0.2);
   border-radius: 8px;
-  color: var(--accent-red);
+  color: var(--accent-rose);
   font-size: 0.82rem;
   font-weight: 600;
   cursor: pointer;
-  transition: all var(--transition);
+  transition: all var(--transition-fast);
 }
 
 .stop-btn:hover {
-  background: rgba(239, 68, 68, 0.25);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.request-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px dashed var(--border-subtle);
+}
+
+.request-option-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  background: rgba(0, 0, 0, 0.03);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  text-align: left;
+}
+
+.request-option-btn:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--primary-blue);
+}
+
+.request-option-btn.selected {
+  background: rgba(59, 130, 246, 0.1);
+  border-color: var(--primary-blue);
+  color: var(--primary-blue);
+}
+
+.request-option-btn span {
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.request-option-btn small {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-top: 4px;
 }
 </style>

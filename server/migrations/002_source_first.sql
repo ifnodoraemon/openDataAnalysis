@@ -46,7 +46,7 @@ create table source_snapshots (
   import_duration_ms integer not null default 0,
   profile_duration_ms integer not null default 0,
   snapshot_size_bytes bigint not null default 0,
-  profile_mode varchar(32) not null default 'sampled'
+  profile_mode varchar(32) not null default 'pending'
 );
 
 create index idx_source_snapshots_session on source_snapshots(session_id);
@@ -69,7 +69,7 @@ create table semantic_profiles (
   snapshot_id varchar(64) not null references source_snapshots(id) on delete cascade,
   analysis_table_name varchar(255) not null,
   schema_signature varchar(64) not null default '',
-  profile_status varchar(32) not null default 'draft',
+  profile_status varchar(32) not null default 'profiled',
   profile_json jsonb not null default '{}',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()

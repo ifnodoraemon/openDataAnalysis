@@ -1,15 +1,23 @@
 package agent
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
 
-func StripAdditionalProperties(input []byte) []byte {
+	"github.com/ifnodoraemon/openDataAnalysis/internal/jsoncontract"
+)
+
+func StripAdditionalProperties(input []byte) ([]byte, error) {
 	var obj interface{}
-	if err := json.Unmarshal(input, &obj); err != nil {
-		return input
+	if err := jsoncontract.Decode(input, &obj); err != nil {
+		return nil, fmt.Errorf("invalid tool schema JSON: %w", err)
 	}
 	cleaned := cleanMap(obj)
-	b, _ := json.Marshal(cleaned)
-	return b
+	b, err := json.Marshal(cleaned)
+	if err != nil {
+		return nil, fmt.Errorf("encode cleaned tool schema: %w", err)
+	}
+	return b, nil
 }
 
 func cleanMap(val interface{}) interface{} {

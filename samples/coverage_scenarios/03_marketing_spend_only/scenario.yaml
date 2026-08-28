@@ -4,12 +4,9 @@ task_length: short
 prompt: 请评估各渠道 ROI，并解释投放效率差异。
 files:
   - marketing_spend_only.csv
-expected:
-  should_inspect_schema: true
-  should_auto_map: true
-  should_ask_user: false
-  expected_coverage: partial
-  required_mentions:
-    - cannot compute roi without revenue
-  forbidden_claims:
-    - attributed revenue exists
+acceptance:
+  terminal_types: [run_completed, user_request_input]
+  no_error: true
+manual_review:
+  - 说明现有字段是否足以计算 ROI。
+  - 不虚构归因收入。

@@ -6,6 +6,21 @@ import (
 	"strings"
 )
 
+var chartReferenceRegexp = regexp.MustCompile(`\{\{chart:([^{}\r\n]+)\}\}`)
+
+func validateExactReportField(field, value string, required bool) error {
+	if required && strings.TrimSpace(value) == "" {
+		return fmt.Errorf("%s is required", field)
+	}
+	if value != strings.TrimSpace(value) {
+		return fmt.Errorf("%s must not contain leading or trailing whitespace", field)
+	}
+	if strings.ContainsRune(value, 0) {
+		return fmt.Errorf("%s contains a NUL byte", field)
+	}
+	return nil
+}
+
 type reportBlockMutationParams struct {
 	Action        string        `json:"action"`
 	BlockID       string        `json:"block_id"`
@@ -40,19 +55,22 @@ func applyReportBlockMutation(state *ReportState, editState *ReportEditState, pa
 		return reportBlockMutationResult{}, fmt.Errorf("report state is not initialized")
 	}
 
-	action := strings.TrimSpace(params.Action)
-	if action == "" {
-		action = "append"
+	if err := validateExactReportField("action", params.Action, true); err != nil {
+		return reportBlockMutationResult{}, err
 	}
-	params.Action = action
-
-	blockID := strings.TrimSpace(params.BlockID)
-	if blockID == "" && action != "append" {
-		return reportBlockMutationResult{}, fmt.Errorf("block_id is required for %s action", action)
+	if err := validateExactReportField("block_id", params.BlockID, true); err != nil {
+		return reportBlockMutationResult{}, err
 	}
-	params.BlockID = blockID
+	for field, value := range map[string]string{
+		"before_block_id": params.BeforeBlockID,
+		"after_block_id":  params.AfterBlockID,
+	} {
+		if err := validateExactReportField(field, value, false); err != nil {
+			return reportBlockMutationResult{}, err
+		}
+	}
 
-	switch action {
+	switch params.Action {
 	case "append", "upsert":
 		return upsertReportBlock(state, editState, params)
 	case "remove":
@@ -60,22 +78,24 @@ func applyReportBlockMutation(state *ReportState, editState *ReportEditState, pa
 	case "move":
 		return moveReportBlock(state, editState, params)
 	default:
-		return reportBlockMutationResult{}, fmt.Errorf("unknown action: %s", action)
+		return reportBlockMutationResult{}, fmt.Errorf("unknown action: %s", params.Action)
 	}
 }
 
 func upsertReportBlock(state *ReportState, editState *ReportEditState, params reportBlockMutationParams) (reportBlockMutationResult, error) {
-	kind := strings.TrimSpace(params.BlockKind)
-	if kind == "" {
-		kind = "markdown"
+	if err := validateExactReportField("block_kind", params.BlockKind, true); err != nil {
+		return reportBlockMutationResult{}, err
 	}
-	block, err := buildReportBlock(kind, params.BlockID, strings.TrimSpace(params.Title), params.Content, strings.TrimSpace(params.ChartID), params.Sources, len(state.Blocks)+1)
+	if err := validateExactReportField("chart_id", params.ChartID, false); err != nil {
+		return reportBlockMutationResult{}, err
+	}
+	block, err := buildReportBlock(params.BlockKind, params.BlockID, params.Title, params.Content, params.ChartID, params.Sources)
 	if err != nil {
 		return reportBlockMutationResult{}, err
 	}
 	existingIndex := findReportBlockIndex(state.Blocks, block.ID)
-	if existingIndex >= 0 && len(block.Sources) == 0 && len(state.Blocks[existingIndex].Sources) > 0 {
-		block.Sources = state.Blocks[existingIndex].Sources
+	if params.Action == "append" && existingIndex >= 0 {
+		return reportBlockMutationResult{}, fmt.Errorf("block_id %s already exists", block.ID)
 	}
 	if editState != nil && !editState.BlockMutationAllowed(params.Action, block.ID) {
 		return reportBlockMutationResult{}, reportBlockScopeError{Action: params.Action, BlockID: block.ID}
@@ -84,26 +104,28 @@ func upsertReportBlock(state *ReportState, editState *ReportEditState, params re
 		return reportBlockMutationResult{}, reportBlockScopeError{Action: "partial_selection", BlockID: block.ID}
 	}
 
+	workingBlocks := append([]ReportBlock(nil), state.Blocks...)
 	insertHintIndex := -1
-	summaryText := fmt.Sprintf("block [%s] %s written to report state; delivery_state=draft", block.Kind, block.ID)
+	summaryText := fmt.Sprintf("内容块 [%s] %s 已写入报告，当前仍为草稿。", block.Kind, block.ID)
 	if existingIndex >= 0 {
-		state.Blocks = append(state.Blocks[:existingIndex], state.Blocks[existingIndex+1:]...)
+		workingBlocks = append(workingBlocks[:existingIndex], workingBlocks[existingIndex+1:]...)
 		insertHintIndex = existingIndex
-		summaryText = fmt.Sprintf("updated block [%s] %s in report state; delivery_state=draft", block.Kind, block.ID)
+		summaryText = fmt.Sprintf("内容块 [%s] %s 已更新，当前仍为草稿。", block.Kind, block.ID)
 	}
 
-	insertAt := len(state.Blocks)
-	if strings.TrimSpace(params.BeforeBlockID) == "" && strings.TrimSpace(params.AfterBlockID) == "" && insertHintIndex >= 0 {
+	insertAt := len(workingBlocks)
+	if params.BeforeBlockID == "" && params.AfterBlockID == "" && insertHintIndex >= 0 {
 		insertAt = insertHintIndex
 	} else {
-		insertAt, err = resolveReportBlockInsertIndex(state.Blocks, strings.TrimSpace(params.BeforeBlockID), strings.TrimSpace(params.AfterBlockID))
+		insertAt, err = resolveReportBlockInsertIndex(workingBlocks, params.BeforeBlockID, params.AfterBlockID)
 		if err != nil {
 			return reportBlockMutationResult{}, err
 		}
 	}
 
-	state.Blocks = insertReportBlockAt(state.Blocks, block, insertAt)
+	state.Blocks = insertReportBlockAt(workingBlocks, block, insertAt)
 	state.NeedsFinalize = true
+	state.MutationVersion++
 	return reportBlockMutationResult{
 		Action:     params.Action,
 		BlockID:    block.ID,
@@ -126,12 +148,13 @@ func removeReportBlock(state *ReportState, editState *ReportEditState, params re
 	removed := state.Blocks[index]
 	state.Blocks = append(state.Blocks[:index], state.Blocks[index+1:]...)
 	state.NeedsFinalize = true
+	state.MutationVersion++
 	return reportBlockMutationResult{
 		Action:     params.Action,
 		BlockID:    params.BlockID,
 		BlockKind:  removed.Kind,
 		BlockCount: len(state.Blocks),
-		UISummary:  fmt.Sprintf("removed block [%s] %s from report state; delivery_state=draft", removed.Kind, removed.ID),
+		UISummary:  fmt.Sprintf("内容块 [%s] %s 已从报告移除，当前仍为草稿。", removed.Kind, removed.ID),
 	}, nil
 }
 
@@ -148,44 +171,27 @@ func moveReportBlock(state *ReportState, editState *ReportEditState, params repo
 	block := state.Blocks[index]
 	blocks := append([]ReportBlock{}, state.Blocks[:index]...)
 	blocks = append(blocks, state.Blocks[index+1:]...)
-	insertAt, err := resolveReportBlockInsertIndex(blocks, strings.TrimSpace(params.BeforeBlockID), strings.TrimSpace(params.AfterBlockID))
+	insertAt, err := resolveReportBlockInsertIndex(blocks, params.BeforeBlockID, params.AfterBlockID)
 	if err != nil {
 		return reportBlockMutationResult{}, err
 	}
 
 	state.Blocks = insertReportBlockAt(blocks, block, insertAt)
 	state.NeedsFinalize = true
+	state.MutationVersion++
 	return reportBlockMutationResult{
 		Action:     params.Action,
 		BlockID:    params.BlockID,
 		BlockKind:  block.Kind,
 		BlockCount: len(state.Blocks),
-		UISummary:  fmt.Sprintf("reordered block [%s] %s in report state; delivery_state=draft", block.Kind, block.ID),
+		UISummary:  fmt.Sprintf("内容块 [%s] %s 已重新排序，当前仍为草稿。", block.Kind, block.ID),
 	}, nil
 }
 
-func buildBlockID(title string, defaultIndex int) string {
-	base := strings.ToLower(strings.TrimSpace(title))
-	base = strings.ReplaceAll(base, " ", "-")
-	base = strings.ReplaceAll(base, "_", "-")
-	base = strings.ReplaceAll(base, "/", "-")
-	base = strings.ReplaceAll(base, "\\", "-")
-	base = strings.Trim(base, "-")
-	if base == "" {
-		base = fmt.Sprintf("section-%d", defaultIndex)
-	}
-	return base
-}
-
-func buildReportBlock(kind, blockID, title, content, chartID string, sources []EvidenceRef, defaultIndex int) (ReportBlock, error) {
-	if blockID == "" {
-		switch {
-		case title != "":
-			blockID = buildBlockID(title, defaultIndex)
-		case chartID != "":
-			blockID = buildBlockID(chartID, defaultIndex)
-		default:
-			blockID = fmt.Sprintf("block-%d", defaultIndex)
+func buildReportBlock(kind, blockID, title, content, chartID string, sources []EvidenceRef) (ReportBlock, error) {
+	for index, source := range sources {
+		if err := validateEvidenceRefShape(source); err != nil {
+			return ReportBlock{}, fmt.Errorf("sources[%d]: %w", index, err)
 		}
 	}
 	block := ReportBlock{
@@ -254,16 +260,15 @@ func insertReportBlockAt(blocks []ReportBlock, block ReportBlock, index int) []R
 	return blocks
 }
 
-func chartRefsOutsideChartBlock(content string) []string {
-	re := regexp.MustCompile(`\{\{chart:(\w+)\}\}`)
-	matches := re.FindAllStringSubmatch(content, -1)
+func ChartReferences(content string) []string {
+	matches := chartReferenceRegexp.FindAllStringSubmatch(content, -1)
 	if len(matches) == 0 {
 		return nil
 	}
 	refs := make([]string, 0, len(matches))
 	for _, match := range matches {
-		if len(match) > 1 && strings.TrimSpace(match[1]) != "" {
-			refs = append(refs, strings.TrimSpace(match[1]))
+		if len(match) > 1 && match[1] != "" && match[1] == strings.TrimSpace(match[1]) {
+			refs = append(refs, match[1])
 		}
 	}
 	return refs

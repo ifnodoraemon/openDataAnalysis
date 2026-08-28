@@ -18,7 +18,7 @@ func (r *UserRepository) GetByID(ctx context.Context, userID string) (*domain.Us
 	var status string
 	var lastLogin sql.NullTime
 	if err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &avatarURL, &status, &user.CreatedAt, &user.UpdatedAt, &lastLogin); err != nil {
-		return nil, err
+		return nil, normalizeLookupError(err)
 	}
 	user.AvatarURL = avatarURL
 	user.Status = domain.UserStatus(status)
@@ -35,7 +35,7 @@ func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*domain.
 	var status string
 	var lastLogin sql.NullTime
 	if err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Name, &avatarURL, &status, &user.CreatedAt, &user.UpdatedAt, &lastLogin); err != nil {
-		return nil, err
+		return nil, normalizeLookupError(err)
 	}
 	user.AvatarURL = avatarURL
 	user.Status = domain.UserStatus(status)

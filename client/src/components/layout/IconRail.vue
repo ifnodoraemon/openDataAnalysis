@@ -2,7 +2,7 @@
   <nav class="icon-rail">
     <!-- Brand Logo -->
     <div class="rail-top">
-      <div class="logo-box" title="OpenDataAnalysis AI Platform">
+      <div class="logo-box" title="OpenDataAnalysis 数据分析平台">
         <span class="logo-icon">📊</span>
       </div>
     </div>
@@ -32,10 +32,10 @@
       <button
         class="rail-btn"
         @click="$emit('open-semantic')"
-        title="语义模型与指标库"
+        title="数据事实与用户补丁"
       >
         <span class="btn-icon">🧠</span>
-        <span class="btn-tooltip">语义模型</span>
+        <span class="btn-tooltip">数据事实</span>
       </button>
 
       <button
@@ -50,7 +50,7 @@
       <button
         class="rail-btn"
         @click="$emit('open-workspace-settings')"
-        title="工作区与 RBAC 团队设置"
+        title="工作区与团队权限设置"
       >
         <span class="btn-icon">⚙️</span>
         <span class="btn-tooltip">工作区配置</span>
@@ -71,7 +71,7 @@
 
 <script setup>
 import { computed } from "vue";
-import { useWebSocket } from "../../composables/useWebSocket.js";
+import { useAgentTransport } from "../../composables/useAgentTransport.js";
 import { useAgentStore } from "../../stores/agent.js";
 import { useDataSourceStore } from "../../stores/datasource.js";
 
@@ -87,14 +87,16 @@ defineEmits([
   "open-workspace-settings",
 ]);
 
-const { disconnect } = useWebSocket();
+const { disconnect } = useAgentTransport();
 const store = useAgentStore();
 const dataSourceStore = useDataSourceStore();
 
-const sourceCount = computed(() => dataSourceStore.workspaceDataSources?.length || 0);
+const sourceCount = computed(
+  () => dataSourceStore.workspaceDataSources?.length || 0,
+);
 
 const userName = computed(() => {
-  return store.user?.name || store.user?.username || store.user?.email || "User";
+  return store.user?.name || store.user?.email || "用户";
 });
 
 const userInitial = computed(() => {
@@ -131,7 +133,11 @@ function logout() {
   width: 38px;
   height: 38px;
   border-radius: 10px;
-  background: linear-gradient(135deg, var(--primary-blue), var(--accent-purple));
+  background: linear-gradient(
+    135deg,
+    var(--primary-blue),
+    var(--accent-purple)
+  );
   display: flex;
   align-items: center;
   justify-content: center;
@@ -168,9 +174,9 @@ function logout() {
 }
 
 .rail-btn.active {
-  background: rgba(59, 130, 246, 0.15);
-  color: #60a5fa;
-  border-color: rgba(59, 130, 246, 0.35);
+  background: var(--primary-glow);
+  color: var(--primary-blue);
+  border-color: var(--border-accent);
 }
 
 .btn-icon {

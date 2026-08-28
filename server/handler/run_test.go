@@ -48,9 +48,9 @@ func TestRenderReportHTMLFromSnapshotRegeneratesCurrentTemplate(t *testing.T) {
 		}`,
 	}
 
-	html, ok := renderReportHTMLFromSnapshot(report)
-	if !ok {
-		t.Fatal("expected snapshot to be rendered")
+	html, err := renderReportHTMLFromSnapshot(report)
+	if err != nil {
+		t.Fatalf("expected snapshot to be rendered: %v", err)
 	}
 	if !strings.Contains(html, `<h2>一、概览</h2>`) {
 		t.Fatalf("expected regenerated html to retain original prefixed titles, got: %s", html)
@@ -63,7 +63,7 @@ func TestRenderReportHTMLFromSnapshotRegeneratesCurrentTemplate(t *testing.T) {
 	}
 }
 
-func TestAttachRunRuntimeStateUsesSelectedRunFacts(t *testing.T) {
+func TestAttachRunRuntimeStateRejectsUnavailablePersistence(t *testing.T) {
 	t.Parallel()
 
 	prevSessionManager := sessionManager
@@ -86,35 +86,18 @@ func TestAttachRunRuntimeStateUsesSelectedRunFacts(t *testing.T) {
 	messageRepo = nil
 
 	resp := map[string]interface{}{}
-	attachRunRuntimeState(context.Background(), resp, domain.AnalysisRun{
+	err = attachRunRuntimeState(context.Background(), resp, domain.AnalysisRun{
 		ID:          "run_live",
 		SessionID:   "sess_live",
 		WorkspaceID: "ws_1",
 		UserID:      "user_1",
 	})
-
-	runtimeState, ok := resp["runtimeState"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected runtimeState map, got %#v", resp["runtimeState"])
-	}
-
-	reportHTML, ok := runtimeState["report_html"].(string)
-	if !ok || strings.TrimSpace(reportHTML) != "" {
-		t.Fatalf("expected selected run state to ignore live session draft, got %#v", runtimeState["report_html"])
-	}
-
-	memory, ok := runtimeState["memory"].(map[string]string)
-	if !ok || len(memory) != 0 {
-		t.Fatalf("expected empty memory map, got %#v", runtimeState["memory"])
-	}
-
-	subgoals, ok := runtimeState["subgoals"].([]agent.Subgoal)
-	if !ok || len(subgoals) != 0 {
-		t.Fatalf("expected empty subgoals slice, got %#v", runtimeState["subgoals"])
+	if err == nil || !strings.Contains(err.Error(), "repositories are not configured") {
+		t.Fatalf("expected unavailable persistence error, got %v", err)
 	}
 }
 
-func TestHandlerReportSnapshotLoaderFallsBackToPersistedSessionDraft(t *testing.T) {
+func TestHandlerReportSnapshotLoaderUsesTargetRunDraftEvents(t *testing.T) {
 	ctx := context.Background()
 	store, err := metadata.Open(t.TempDir() + "/metadata.db")
 	if err != nil {

@@ -3,7 +3,6 @@ package handler
 import (
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5/middleware"
@@ -42,7 +41,7 @@ func MaxBodySizeMiddleware(maxBytes int64) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Body != nil && r.ContentLength > maxBytes {
-				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				http.Error(w, "请求体过大", http.StatusRequestEntityTooLarge)
 				return
 			}
 			if r.Body != nil {
@@ -57,15 +56,14 @@ func shouldSkipAccessLog(path string) bool {
 	return path == "/api/health"
 }
 
+func writeHandlerError(w http.ResponseWriter, status int, message string, err error) {
+	if err != nil {
+		log.Printf("handler error status=%d message=%q err=%v", status, message, err)
+	}
+	http.Error(w, message, status)
+}
+
+// clientIP logs the resolved client IP; proxy headers only count for trusted peers.
 func clientIP(r *http.Request) string {
-	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
-		parts := strings.Split(forwarded, ",")
-		if len(parts) > 0 {
-			return strings.TrimSpace(parts[0])
-		}
-	}
-	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
-		return realIP
-	}
-	return r.RemoteAddr
+	return getClientIP(r)
 }

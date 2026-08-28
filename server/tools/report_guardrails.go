@@ -1,39 +1,35 @@
 package tools
 
 import (
-	"encoding/json"
 	"fmt"
 	"html"
-	"regexp"
 	"sort"
 	"strings"
 	"unicode"
-
-	"github.com/ifnodoraemon/openDataAnalysis/service"
-)
-
-var (
-	sectionChapterPrefixPattern = regexp.MustCompile(`^(第[一二三四五六七八九十百千0-9]+(?:章|节|部分|篇)\s*)`)
-	sectionOrdinalPrefixPattern = regexp.MustCompile(`^([一二三四五六七八九十百千0-9]+[.、)）]\s*)`)
-	sectionWhitespacePattern    = regexp.MustCompile(`\s+`)
-	reportNumberPattern         = regexp.MustCompile(`\d`)
 )
 
 func (s *ReportEditState) RefreshFromReportState(state *ReportState) {
 	if s == nil {
 		return
 	}
+	var blocks []ReportBlock
+	if state != nil {
+		state.RLock()
+		blocks = make([]ReportBlock, len(state.Blocks))
+		copy(blocks, state.Blocks)
+		state.RUnlock()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.AllowedChartIDs = collectEditableChartIDs(state, s.TargetBlockID, s.TargetChartID)
+	s.AllowedChartIDs = collectEditableChartIDs(blocks, s.TargetBlockID, s.TargetChartID)
 	s.TargetBlockContent = ""
 	s.TargetBlockKind = ""
 	s.TargetBlockTitle = ""
 	s.TargetBlockChartID = ""
 	s.TargetBlockSources = nil
-	if state != nil && strings.TrimSpace(s.TargetBlockID) != "" {
-		if index := findReportBlockIndex(state.Blocks, strings.TrimSpace(s.TargetBlockID)); index >= 0 {
-			block := state.Blocks[index]
+	if state != nil && s.TargetBlockID != "" {
+		if index := findReportBlockIndex(blocks, s.TargetBlockID); index >= 0 {
+			block := blocks[index]
 			s.TargetBlockContent = block.Content
 			s.TargetBlockKind = block.Kind
 			s.TargetBlockTitle = block.Title
@@ -49,15 +45,17 @@ func (s *ReportEditState) BlockMutationAllowed(action, blockID string) bool {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.modeLocked() == "" || !s.PreserveOtherBlocks {
+	switch s.scopeKindLocked() {
+	case "", "whole_report":
 		return true
-	}
-	if strings.TrimSpace(s.TargetChartID) != "" && strings.TrimSpace(s.TargetBlockID) == "" {
+	case "partial_block", "partial_selection":
+		// Continue with the exact target check below.
+	default:
 		return false
 	}
-	target := strings.TrimSpace(s.TargetBlockID)
-	id := strings.TrimSpace(blockID)
-	switch strings.ToLower(strings.TrimSpace(action)) {
+	target := s.TargetBlockID
+	id := blockID
+	switch action {
 	case "upsert":
 		return target != "" && id == target
 	default:
@@ -71,11 +69,28 @@ func (s *ReportEditState) ChartMutationAllowed(chartID string) bool {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.modeLocked() == "" || !s.PreserveOtherBlocks {
+	switch s.scopeKindLocked() {
+	case "", "whole_report":
+		return true
+	case "layout":
+		return false
+	}
+	_, ok := s.AllowedChartIDs[chartID]
+	return ok
+}
+
+func (s *ReportEditState) LayoutMutationAllowed() bool {
+	if s == nil {
 		return true
 	}
-	_, ok := s.AllowedChartIDs[strings.TrimSpace(chartID)]
-	return ok
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	switch s.scopeKindLocked() {
+	case "", "whole_report", "layout":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *ReportEditState) SelectionMutationAllowed(blockID, newContent string) bool {
@@ -84,10 +99,10 @@ func (s *ReportEditState) SelectionMutationAllowed(blockID, newContent string) b
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.modeLocked() == "" || s.scopeKindLocked() != "partial_selection" {
+	if s.scopeKindLocked() != "partial_selection" {
 		return true
 	}
-	if strings.TrimSpace(blockID) == "" || strings.TrimSpace(blockID) != strings.TrimSpace(s.TargetBlockID) {
+	if blockID == "" || blockID != s.TargetBlockID {
 		return false
 	}
 	original := s.TargetBlockContent
@@ -112,13 +127,13 @@ func (s *ReportEditState) SelectionBlockMutationAllowed(block ReportBlock) bool 
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.modeLocked() == "" || s.scopeKindLocked() != "partial_selection" {
+	if s.scopeKindLocked() != "partial_selection" {
 		return true
 	}
-	kindUnchanged := strings.TrimSpace(s.TargetBlockKind) == "" || strings.TrimSpace(block.Kind) == strings.TrimSpace(s.TargetBlockKind)
+	kindUnchanged := s.TargetBlockKind == "" || block.Kind == s.TargetBlockKind
 	return kindUnchanged &&
 		block.Title == s.TargetBlockTitle &&
-		strings.TrimSpace(block.ChartID) == strings.TrimSpace(s.TargetBlockChartID) &&
+		block.ChartID == s.TargetBlockChartID &&
 		evidenceRefsEqual(block.Sources, s.TargetBlockSources)
 }
 
@@ -317,23 +332,23 @@ func normalizeSelectionCompareTextWithMap(value string) (string, []int) {
 	return strings.TrimSpace(b.String()), indexMap
 }
 
-func collectEditableChartIDs(state *ReportState, blockID, chartID string) map[string]struct{} {
+func collectEditableChartIDs(blocks []ReportBlock, blockID, chartID string) map[string]struct{} {
 	refs := make(map[string]struct{})
-	if trimmedChartID := strings.TrimSpace(chartID); trimmedChartID != "" {
-		refs[trimmedChartID] = struct{}{}
+	if chartID != "" {
+		refs[chartID] = struct{}{}
 	}
-	if state == nil || strings.TrimSpace(blockID) == "" {
+	if len(blocks) == 0 || blockID == "" {
 		return refs
 	}
-	index := findReportBlockIndex(state.Blocks, strings.TrimSpace(blockID))
+	index := findReportBlockIndex(blocks, blockID)
 	if index < 0 {
 		return refs
 	}
-	block := state.Blocks[index]
-	if strings.TrimSpace(block.ChartID) != "" {
-		refs[strings.TrimSpace(block.ChartID)] = struct{}{}
+	block := blocks[index]
+	if block.ChartID != "" {
+		refs[block.ChartID] = struct{}{}
 	}
-	for _, ref := range chartRefsOutsideChartBlock(block.Content) {
+	for _, ref := range ChartReferences(block.Content) {
 		refs[ref] = struct{}{}
 	}
 	return refs
@@ -342,10 +357,10 @@ func collectEditableChartIDs(state *ReportState, blockID, chartID string) map[st
 func referencedChartsOutsideChartBlocks(blocks []ReportBlock) map[string]struct{} {
 	refs := make(map[string]struct{})
 	for _, block := range blocks {
-		if strings.EqualFold(strings.TrimSpace(block.Kind), "chart") {
+		if block.Kind == "chart" {
 			continue
 		}
-		for _, ref := range chartRefsOutsideChartBlock(block.Content) {
+		for _, ref := range ChartReferences(block.Content) {
 			refs[ref] = struct{}{}
 		}
 	}
@@ -355,7 +370,7 @@ func referencedChartsOutsideChartBlocks(blocks []ReportBlock) map[string]struct{
 func renderableReportBlockCount(blocks []ReportBlock) int {
 	count := 0
 	for _, block := range blocks {
-		switch strings.ToLower(strings.TrimSpace(block.Kind)) {
+		switch block.Kind {
 		case "markdown", "html", "chart":
 			count++
 		}
@@ -381,7 +396,7 @@ func reportFinalizeIssues(state *ReportState) []string {
 
 	chartSet := make(map[string]struct{}, len(state.Charts))
 	for _, chart := range state.Charts {
-		chartID := strings.TrimSpace(chart.ID)
+		chartID := chart.ID
 		if chartID != "" {
 			chartSet[chartID] = struct{}{}
 		}
@@ -389,8 +404,8 @@ func reportFinalizeIssues(state *ReportState) []string {
 
 	refCounts := make(map[string]int)
 	for _, block := range state.Blocks {
-		if strings.EqualFold(strings.TrimSpace(block.Kind), "chart") && strings.TrimSpace(block.ChartID) != "" {
-			refCounts[strings.TrimSpace(block.ChartID)]++
+		if block.Kind == "chart" && block.ChartID != "" {
+			refCounts[block.ChartID]++
 		}
 		for chartID := range referencedChartsOutsideChartBlocks([]ReportBlock{block}) {
 			refCounts[chartID]++
@@ -433,91 +448,72 @@ func reportEvidenceFinalizeIssues(state *ReportState) []string {
 	if state == nil {
 		return nil
 	}
-	chartByID := make(map[string]ChartData, len(state.Charts))
-	for _, chart := range state.Charts {
-		if id := strings.TrimSpace(chart.ID); id != "" {
-			chartByID[id] = chart
-		}
-	}
-
-	seen := map[string]struct{}{}
 	var issues []string
-	addIssue := func(issue string) {
-		if _, ok := seen[issue]; ok {
-			return
-		}
-		seen[issue] = struct{}{}
-		issues = append(issues, issue)
-	}
-
-	for _, block := range state.Blocks {
-		if !blockNeedsEvidence(block) {
-			continue
-		}
-		chartRefs := chartIDsForBlock(block)
-		hasEvidence := len(block.Sources) > 0
-		for _, chartID := range chartRefs {
-			if chart, ok := chartByID[chartID]; ok && len(chart.Sources) > 0 {
-				hasEvidence = true
-				break
+	validate := func(owner string, refs []EvidenceRef) {
+		for i, ref := range refs {
+			kind := ref.Kind
+			resultID := ref.ResultID
+			artifactID := ref.ArtifactID
+			chartID := ref.ChartID
+			refCount := 0
+			for _, value := range []string{resultID, artifactID, chartID} {
+				if value != "" {
+					refCount++
+				}
+			}
+			if refCount != 1 {
+				issues = append(issues, fmt.Sprintf("invalid_evidence_ref:%s:%d", owner, i))
+				continue
+			}
+			switch kind {
+			case "result":
+				if resultID == "" {
+					issues = append(issues, fmt.Sprintf("evidence_kind_mismatch:%s:%d", owner, i))
+					continue
+				}
+				if _, ok := state.Results[resultID]; !ok {
+					issues = append(issues, fmt.Sprintf("unknown_result_ref:%s:%d:%s", owner, i, resultID))
+				}
+			case "artifact":
+				if artifactID == "" {
+					issues = append(issues, fmt.Sprintf("evidence_kind_mismatch:%s:%d", owner, i))
+					continue
+				}
+				if _, ok := state.Artifacts[artifactID]; !ok {
+					issues = append(issues, fmt.Sprintf("unknown_artifact_ref:%s:%d:%s", owner, i, artifactID))
+				}
+			case "chart":
+				if chartID == "" {
+					issues = append(issues, fmt.Sprintf("evidence_kind_mismatch:%s:%d", owner, i))
+					continue
+				}
+				found := false
+				for _, chart := range state.Charts {
+					if chart.ID == chartID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					issues = append(issues, fmt.Sprintf("unknown_chart_ref:%s:%d:%s", owner, i, chartID))
+				}
+			default:
+				issues = append(issues, fmt.Sprintf("unknown_evidence_kind:%s:%d:%s", owner, i, kind))
 			}
 		}
-		if hasEvidence {
-			continue
-		}
-		blockID := strings.TrimSpace(block.ID)
-		if blockID == "" {
-			blockID = "unknown_block"
-		}
-		addIssue("missing_evidence:" + blockID)
-		for _, chartID := range chartRefs {
-			addIssue("missing_chart_evidence:" + chartID)
-		}
+	}
+	for _, block := range state.Blocks {
+		validate("block:"+block.ID, block.Sources)
+	}
+	for _, chart := range state.Charts {
+		validate("chart:"+chart.ID, chart.Sources)
 	}
 	return issues
 }
 
-func blockNeedsEvidence(block ReportBlock) bool {
-	kind := strings.ToLower(strings.TrimSpace(block.Kind))
-	if kind == "chart" && strings.TrimSpace(block.ChartID) != "" {
-		return true
-	}
-	if len(chartIDsForBlock(block)) > 0 {
-		return true
-	}
-	text := strings.ToLower(strings.Join([]string{block.Title, block.Content}, "\n"))
-	if strings.TrimSpace(text) == "" {
-		return false
-	}
-	for _, line := range strings.Split(text, "\n") {
-		claimText := normalizeSectionTitle(trimReportLinePrefix(line))
-		if strings.TrimSpace(claimText) == "" {
-			continue
-		}
-		if reportNumberPattern.MatchString(claimText) {
-			return true
-		}
-	}
-	return false
-}
-
-func trimReportLinePrefix(line string) string {
-	line = strings.TrimSpace(line)
-	line = strings.TrimLeft(line, "#>")
-	line = strings.TrimSpace(line)
-	for {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") || strings.HasPrefix(trimmed, "+ ") {
-			line = strings.TrimSpace(trimmed[2:])
-			continue
-		}
-		return trimmed
-	}
-}
-
 func chartIDsForBlock(block ReportBlock) []string {
 	ids := map[string]struct{}{}
-	if chartID := strings.TrimSpace(block.ChartID); chartID != "" {
+	if chartID := block.ChartID; chartID != "" {
 		ids[chartID] = struct{}{}
 	}
 	for chartID := range referencedChartsOutsideChartBlocks([]ReportBlock{block}) {
@@ -529,210 +525,6 @@ func chartIDsForBlock(block ReportBlock) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func chartEvidenceRefsForBlock(state *ReportState, block ReportBlock) []EvidenceRef {
-	if state == nil {
-		return nil
-	}
-	chartRefs := chartIDsForBlock(block)
-	if len(chartRefs) == 0 {
-		return nil
-	}
-	refSet := make(map[string]struct{}, len(chartRefs))
-	for _, chartID := range chartRefs {
-		refSet[chartID] = struct{}{}
-	}
-	var refs []EvidenceRef
-	for _, chart := range state.Charts {
-		if _, ok := refSet[strings.TrimSpace(chart.ID)]; ok {
-			refs = append(refs, chart.Sources...)
-		}
-	}
-	return refs
-}
-
-func reportSemanticFinalizeIssues(state *ReportState, sources []service.SessionSourceSummary, profileDetail ProfileDetailProvider) []string {
-	if state == nil || len(sources) == 0 {
-		return nil
-	}
-
-	var unresolved []service.SessionSourceSummary
-	for _, source := range sources {
-		if source.AmbiguityCount <= 0 {
-			continue
-		}
-		unresolved = append(unresolved, source)
-	}
-	if len(unresolved) == 0 {
-		return nil
-	}
-
-	issues := make([]string, 0, len(unresolved))
-	for _, source := range unresolved {
-		ref := strings.TrimSpace(source.AnalysisTableName)
-		if ref == "" {
-			ref = strings.TrimSpace(source.ProfileID)
-		}
-		if ref == "" {
-			ref = strings.TrimSpace(source.SourceID)
-		}
-		if ref == "" {
-			ref = "unknown_source"
-		}
-
-		detailText, candidateRefs := unresolvedSemanticDetail(source, profileDetail)
-		if !reportExplicitlyUsesUnresolvedSource(state, source, candidateRefs) {
-			continue
-		}
-
-		var detail strings.Builder
-		detail.WriteString(source.DisplayName)
-		detail.WriteString(fmt.Sprintf(" (profile=%s", source.ProfileID))
-		if detailText != "" {
-			detail.WriteString(", ambiguities=[")
-			detail.WriteString(detailText)
-			detail.WriteString("]")
-		}
-		detail.WriteString(")")
-		detail.WriteString(fmt.Sprintf(", unresolved_ambiguities=%d", source.AmbiguityCount))
-
-		issues = append(issues, "unresolved_semantic_ambiguity:"+ref+":"+(detail.String()))
-	}
-
-	return issues
-}
-
-func unresolvedSemanticDetail(source service.SessionSourceSummary, profileDetail ProfileDetailProvider) (string, []string) {
-	if profileDetail == nil || strings.TrimSpace(source.ProfileID) == "" {
-		return "", nil
-	}
-	profileJSON, _, err := profileDetail(source.ProfileID)
-	if err != nil || strings.TrimSpace(profileJSON) == "" {
-		return "", nil
-	}
-	var profile map[string]interface{}
-	if json.Unmarshal([]byte(profileJSON), &profile) != nil {
-		return "", nil
-	}
-	amb, ok := profile["ambiguities"].([]interface{})
-	if !ok || len(amb) == 0 {
-		return "", nil
-	}
-	var detail strings.Builder
-	var candidates []string
-	for i, a := range amb {
-		am, ok := a.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if i > 0 {
-			detail.WriteString("; ")
-		}
-		if kind, _ := am["kind"].(string); kind != "" {
-			detail.WriteString(kind)
-			detail.WriteString(": ")
-		}
-		if cands, ok := am["candidates"].([]interface{}); ok {
-			names := make([]string, 0, len(cands))
-			for _, c := range cands {
-				if s, ok := c.(string); ok && strings.TrimSpace(s) != "" {
-					names = append(names, s)
-					candidates = append(candidates, s)
-				}
-			}
-			detail.WriteString(strings.Join(names, ", "))
-		}
-	}
-	return detail.String(), candidates
-}
-
-func reportExplicitlyUsesUnresolvedSource(state *ReportState, source service.SessionSourceSummary, candidateRefs []string) bool {
-	if state == nil {
-		return false
-	}
-	table := strings.TrimSpace(source.AnalysisTableName)
-	displayName := strings.TrimSpace(source.DisplayName)
-	sourceID := strings.TrimSpace(source.SourceID)
-	for _, block := range state.Blocks {
-		if evidenceRefsUseSource(block.Sources, table, displayName, sourceID) {
-			return true
-		}
-		content := strings.Join([]string{block.ID, block.Title, block.Content, block.ChartID}, "\n")
-		if containsMeaningfulToken(content, table) || containsMeaningfulToken(content, displayName) || containsMeaningfulToken(content, sourceID) {
-			return true
-		}
-		if evidenceRefsUseSource(chartEvidenceRefsForBlock(state, block), table, displayName, sourceID) {
-			return true
-		}
-		for _, candidate := range candidateRefs {
-			if isSpecificSemanticCandidate(candidate) && containsMeaningfulToken(content, candidate) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func evidenceRefsUseSource(refs []EvidenceRef, table, displayName, sourceID string) bool {
-	for _, ref := range refs {
-		text := strings.Join([]string{ref.TableName, ref.SQL, ref.Summary, ref.ToolName, ref.ChartID}, "\n")
-		if containsMeaningfulToken(text, table) || containsMeaningfulToken(text, displayName) || containsMeaningfulToken(text, sourceID) {
-			return true
-		}
-	}
-	return false
-}
-
-func containsMeaningfulToken(text, token string) bool {
-	token = strings.TrimSpace(token)
-	if token == "" || len([]rune(token)) < 3 {
-		return false
-	}
-	return strings.Contains(strings.ToLower(text), strings.ToLower(token))
-}
-
-func isSpecificSemanticCandidate(candidate string) bool {
-	candidate = strings.TrimSpace(candidate)
-	if len([]rune(candidate)) < 5 {
-		return false
-	}
-	return strings.Contains(candidate, "_") || strings.Contains(candidate, ".")
-}
-
-func hasDuplicateLeadingHeading(block ReportBlock) bool {
-	kind := strings.ToLower(strings.TrimSpace(block.Kind))
-	if kind != "markdown" && kind != "html" {
-		return false
-	}
-	if strings.TrimSpace(block.Title) == "" || strings.TrimSpace(block.Content) == "" {
-		return false
-	}
-	lines := strings.Split(block.Content, "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if !strings.HasPrefix(trimmed, "#") {
-			return false
-		}
-		heading := strings.TrimSpace(strings.TrimLeft(trimmed, "#"))
-		return normalizeSectionTitle(heading) == normalizeSectionTitle(block.Title)
-	}
-	return false
-}
-
-func HasDuplicateLeadingHeadingForAgent(block ReportBlock) bool {
-	return hasDuplicateLeadingHeading(block)
-}
-
-func normalizeSectionTitle(value string) string {
-	normalized := strings.TrimSpace(value)
-	normalized = sectionChapterPrefixPattern.ReplaceAllString(normalized, "")
-	normalized = sectionOrdinalPrefixPattern.ReplaceAllString(normalized, "")
-	normalized = sectionWhitespacePattern.ReplaceAllString(normalized, "")
-	return normalized
 }
 
 func ReportFinalizeIssuesForAgent(state *ReportState) []string {

@@ -12,9 +12,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ifnodoraemon/openDataAnalysis/agent"
-	"github.com/ifnodoraemon/openDataAnalysis/config"
 	"github.com/ifnodoraemon/openDataAnalysis/data"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
+	"github.com/ifnodoraemon/openDataAnalysis/internal/jsoncontract"
 	"github.com/ifnodoraemon/openDataAnalysis/service"
 	"github.com/ifnodoraemon/openDataAnalysis/tools"
 )
@@ -42,7 +42,6 @@ type Session struct {
 	Engine        *agent.Engine
 	ReportState   *tools.ReportState
 	EditState     *tools.ReportEditState
-	FinalizeTool  *tools.FinalizeReportTool
 	Memory        *agent.WorkingMemory
 	Subgoals      *agent.SubgoalManager
 	ActiveRun     *RunState
@@ -56,12 +55,6 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 	ingester := data.NewIngester(cacheRoot)
 	if err := ingester.InitDB(id); err != nil {
 		return nil, err
-	}
-
-	// 当 LLM 配置可用时，将语义预分析器注入 Ingester，导入文件后自动触发
-	if config.Cfg != nil && strings.TrimSpace(config.Cfg.LLMAPIKey) != "" && !config.IsPlaceholderValue(config.Cfg.LLMAPIKey) {
-		llmClient := agent.NewLLMClient()
-		ingester.SemanticEnricher = llmClient.SimpleChatFunc()
 	}
 
 	memory := agent.NewWorkingMemory()
@@ -83,6 +76,8 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 		LastSeenAt:    time.Now(),
 	}
 
+	var buildRuntimeRegistry tools.RegistryFactory
+	var availableRuntimeTools map[string]struct{}
 	ctx := tools.ToolContext{
 		Ingester:    s.Ingester,
 		ReportState: s.ReportState,
@@ -91,180 +86,130 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 		Subgoals:    subgoals,
 		SessionID:   id,
 		WorkspaceID: workspaceID,
-		SessionSourcesProvider: func() ([]service.SessionSourceSummary, error) {
-			if sourceService == nil {
-				return nil, nil
-			}
-			return sourceService.GetSessionSources(context.Background(), id)
-		},
-		ProfileDetailProvider: func(profileID string) (string, string, error) {
-			if sourceService == nil {
-				return "{}", "[]", nil
-			}
-			profile, confirmations, err := sourceService.GetSessionProfileDetail(context.Background(), id, profileID)
-			if err != nil {
-				return "{}", "[]", err
-			}
-			confJSON, _ := json.Marshal(confirmations)
-			return profile.ProfileJSON, string(confJSON), nil
-		},
-		GovernanceProvider: func() (service.GovernanceInspection, error) {
-			if sourceService == nil {
-				return service.GovernanceInspection{}, nil
-			}
-			return sourceService.InspectSessionGovernance(context.Background(), workspaceID, id)
-		},
-		ConfirmedOverridesProvider: func(tableName string) map[string]interface{} {
-			if sourceService == nil {
-				return nil
-			}
-			profiles, err := sourceService.GetSessionProfiles(context.Background(), id)
-			if err != nil {
-				return nil
-			}
-			for _, p := range profiles {
-				if p.AnalysisTableName == tableName && p.ProfileStatus == string(domain.ProfileStatusConfirmed) {
-					fullProfile, _, err := sourceService.GetProfileDetail(context.Background(), p.ProfileID)
-					if err != nil {
-						continue
-					}
-					var profile map[string]interface{}
-					if err := json.Unmarshal([]byte(fullProfile.ProfileJSON), &profile); err == nil {
-						overrides := make(map[string]interface{})
-						if pt, ok := profile["primary_time_column"]; ok {
-							overrides["primary_time_column"] = pt
-						}
-						if cm, ok := profile["confirmed_metric_mappings"]; ok {
-							overrides["confirmed_metric_mappings"] = cm
-						}
-						if cj, ok := profile["confirmed_join_candidates"]; ok {
-							overrides["confirmed_join_candidates"] = cj
-						}
-						if ua, ok := profile["unit_annotations"]; ok {
-							overrides["unit_annotations"] = ua
-						}
-						return overrides
-					}
-				}
-			}
-			return nil
-		},
-		KnownRowCount: func(tableName string) (int, bool) {
-			if sourceService == nil {
-				return 0, false
-			}
-			sources, err := sourceService.GetSessionSources(context.Background(), id)
-			if err != nil {
-				return 0, false
-			}
-			for _, src := range sources {
-				if src.AnalysisTableName == tableName {
-					return src.RowCount, true
-				}
-			}
-			return 0, false
-		},
+		FileService: fileService,
 		QueryLocker: s,
-		ProfileConfirmer: func(profileID, confirmedBy, scope, overridesJSON string) error {
-			if sourceService == nil {
-				return fmt.Errorf("source service not available")
-			}
-			_, err := sourceService.ConfirmProfile(context.Background(), profileID, workspaceID, id, confirmedBy, scope, overridesJSON)
-			return err
-		},
-		Now: time.Now,
+		Now:         time.Now,
 	}
+	if sourceService != nil {
+		ctx.SessionSourcesProvider = func(ctx context.Context) ([]service.SessionSourceSummary, error) {
+			return sourceService.GetSessionSources(ctx, id)
+		}
+		ctx.ProfileDetailProvider = func(ctx context.Context, profileID string) (string, string, string, error) {
+			profile, confirmations, err := sourceService.GetSessionProfileDetail(ctx, id, profileID)
+			if err != nil {
+				return "{}", "[]", "[]", err
+			}
+			confJSON, err := json.Marshal(confirmations)
+			if err != nil {
+				return "{}", "[]", "[]", fmt.Errorf("encode profile confirmations: %w", err)
+			}
+			assets, err := sourceService.GetSemanticAssets(ctx, workspaceID, profile.SchemaSignature)
+			if err != nil {
+				return "{}", "[]", "[]", err
+			}
+			assetsJSON, err := json.Marshal(assets)
+			if err != nil {
+				return "{}", "[]", "[]", fmt.Errorf("encode reusable profile patches: %w", err)
+			}
+			return profile.ProfileJSON, string(confJSON), string(assetsJSON), nil
+		}
+		ctx.GovernanceProvider = func(ctx context.Context) (service.GovernanceInspection, error) {
+			return sourceService.InspectSessionGovernance(ctx, workspaceID, id)
+		}
+		ctx.ProfileConfirmer = func(ctx context.Context, profileID, scope, overridesJSON, confirmationReceiptID string) ([]string, error) {
+			if s.Engine == nil {
+				return nil, fmt.Errorf("agent engine is not initialized")
+			}
+			authorizationPayload, err := semanticConfirmationAuthorizationPayload(scope, overridesJSON)
+			if err != nil {
+				return nil, err
+			}
+			var auditErrors []string
+			err = s.Engine.CommitWithConfirmationReceipt(confirmationReceiptID, "profile_patch_commit", profileID, authorizationPayload, func(actorUserID string) error {
+				_, auditErrors, err = sourceService.ConfirmProfile(ctx, profileID, workspaceID, id, actorUserID, scope, overridesJSON, confirmationReceiptID, domain.ConfirmationProvenanceAuthorizationReceipt)
+				return err
+			})
+			return auditErrors, err
+		}
+	}
+	buildRuntimeRegistry = func(allowed []string) *tools.Registry {
+		reg := tools.NewRegistry()
+		reg.LoadGlobalTools(ctx)
+		delegable := make(map[string]struct{})
+		for _, name := range reg.RuntimeToolNames(true) {
+			delegable[name] = struct{}{}
+		}
+		filtered := make([]string, 0, len(allowed))
+		for _, name := range allowed {
+			_, isDelegable := delegable[name]
+			_, isAvailable := availableRuntimeTools[name]
+			if isDelegable && isAvailable {
+				filtered = append(filtered, name)
+			}
+		}
+		return reg.CloneFiltered(filtered)
+	}
+	ctx.DelegateRegistryFactory = buildRuntimeRegistry
 
 	masterReg := tools.NewRegistry()
 	masterReg.LoadGlobalTools(ctx)
 
-	// 主控和子 Agent 使用同一套工具语义；子 Agent 只是按本次任务裁剪过工具边界的递归实例。
-	runtimeAllowed := []string{
-		"state_time_context_inspect",
-		"state_session_sources_inspect",
-		"state_semantic_profile_inspect",
-		"state_governance_inspect",
-		"data_list_tables",
-		"data_describe_table",
-		"data_query_sql",
-		"report_create_chart",
-		"report_manage_blocks",
-		"report_configure_layout",
-		"report_finalize",
-		"memory_save_fact",
-		"state_memory_inspect",
-		"state_goal_inspect",
-		"state_report_inspect",
-		"state_report_edit_inspect",
-		"state_source_confirm_profile",
-		"goal_manage",
-		"user_request_input",
-		"task_delegate",
-	}
-	if pt, err := masterReg.Get("code_run_python"); err == nil {
-		if runPython, ok := pt.(*tools.RunPythonTool); ok {
-			if config.Cfg != nil {
-				runPython.MCPEndpoint = config.Cfg.PythonMCPURL
-			}
-			if err := runPython.HealthCheck(context.Background()); err != nil {
-				log.Printf("code_run_python disabled for session %s: %v", id, err)
-			} else {
-				runtimeAllowed = append(runtimeAllowed, "code_run_python")
+	// Runtime visibility comes from each tool's capability contract.
+	runtimeAllowed := masterReg.RuntimeToolNames(false)
+	for _, candidate := range masterReg.ListTools() {
+		if checker, ok := candidate.(tools.AvailabilityTool); ok {
+			if err := checker.CheckAvailability(context.Background()); err != nil {
+				log.Printf("tool %s disabled for session %s: %v", candidate.Name(), id, err)
+				runtimeAllowed = withoutToolName(runtimeAllowed, candidate.Name())
 			}
 		}
 	}
-	var buildRuntimeRegistry func([]string) *tools.Registry
-	buildRuntimeRegistry = func(allowed []string) *tools.Registry {
-		reg := tools.NewRegistry()
-		reg.LoadGlobalTools(ctx)
-		if len(allowed) > 0 {
-			reg = reg.CloneFiltered(allowed)
-		}
-		if dt, err := reg.Get("task_delegate"); err == nil {
-			if dtTool, ok := dt.(*agent.DelegateTaskTool); ok {
-				dtTool.RegistryFactory = buildRuntimeRegistry
-				dtTool.Subgoals = subgoals
-				dtTool.Memory = memory
-			}
-		}
-		return reg
+	availableRuntimeTools = make(map[string]struct{}, len(runtimeAllowed))
+	for _, name := range runtimeAllowed {
+		availableRuntimeTools[name] = struct{}{}
 	}
-	runtimeRegistry := buildRuntimeRegistry(runtimeAllowed)
+	runtimeRegistry := masterReg.CloneFiltered(runtimeAllowed)
 
 	s.Registry = runtimeRegistry
-	if ft, err := runtimeRegistry.Get("report_finalize"); err == nil {
-		if ftt, ok := ft.(*tools.FinalizeReportTool); ok {
-			s.FinalizeTool = ftt
-		}
-	}
 
-	policyPrompt := agent.BuildPolicyPrompt()
-	s.Engine = agent.NewEngine(runtimeRegistry, policyPrompt)
+	s.Engine = agent.NewEngine(runtimeRegistry)
+	s.Engine.SetReportState(s.ReportState)
 
 	return s, nil
+}
+
+func semanticConfirmationAuthorizationPayload(scope, overridesJSON string) (string, error) {
+	if scope == "" || scope != strings.TrimSpace(scope) {
+		return "", fmt.Errorf("scope must be a non-empty exact value")
+	}
+	if overridesJSON == "" || overridesJSON != strings.TrimSpace(overridesJSON) {
+		return "", fmt.Errorf("overrides_json must be a non-empty exact JSON object")
+	}
+	var overrides map[string]interface{}
+	if err := jsoncontract.Decode([]byte(overridesJSON), &overrides); err != nil {
+		return "", fmt.Errorf("overrides_json must be a strict JSON object: %w", err)
+	}
+	payload, err := json.Marshal(map[string]interface{}{"scope": scope, "overrides": overrides})
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
+}
+
+func withoutToolName(names []string, excluded string) []string {
+	filtered := make([]string, 0, len(names))
+	for _, name := range names {
+		if name != excluded {
+			filtered = append(filtered, name)
+		}
+	}
+	return filtered
 }
 
 func (s *Session) Touch() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.LastSeenAt = time.Now()
-}
-
-func (s *Session) FilesForClient() []agent.UploadedFile {
-	files, err := s.FileService.GetSessionFiles(context.Background(), s.ID)
-	if err != nil {
-		return nil
-	}
-
-	clientFiles := make([]agent.UploadedFile, 0, len(files))
-	for _, file := range files {
-		clientFiles = append(clientFiles, agent.UploadedFile{
-			FileID: file.ID,
-			Name:   file.DisplayName,
-			Size:   file.SizeBytes,
-		})
-	}
-	return clientFiles
 }
 
 func (s *Session) StartRun(parent context.Context) (string, context.Context, error) {
@@ -321,6 +266,14 @@ func (s *Session) RUnlockQuery() {
 	s.uploadMu.RUnlock()
 }
 
+func (s *Session) LockQuery() {
+	s.uploadMu.Lock()
+}
+
+func (s *Session) UnlockQuery() {
+	s.uploadMu.Unlock()
+}
+
 func (s *Session) SuspendRun(runID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -367,15 +320,33 @@ func (s *Session) GetWaitingRunID() (string, bool) {
 // 返回 empty string 表示当前不处于等待状态（已被其它 goroutine 消费）。
 // 用于替代原来的 GetWaitingRunID + ResumeRun 两步操作，将第二次重复提交的竞态消除。
 func (s *Session) ConsumeWaitingRun() string {
+	return s.ConsumeWaitingRunExact("")
+}
+
+func (s *Session) ConsumeWaitingRunExact(expectedRunID string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.ActiveRun == nil || s.ActiveRun.Status != "waiting_user_input" {
+		return ""
+	}
+	if expectedRunID != "" && s.ActiveRun.RunID != expectedRunID {
 		return ""
 	}
 	runID := s.ActiveRun.RunID
 	s.ActiveRun.Status = "running"
 	s.LastSeenAt = time.Now()
 	return runID
+}
+
+func (s *Session) ReturnRunToWaiting(runID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ActiveRun == nil || s.ActiveRun.RunID != runID || s.ActiveRun.Status != "running" {
+		return false
+	}
+	s.ActiveRun.Status = "waiting_user_input"
+	s.LastSeenAt = time.Now()
+	return true
 }
 
 func (s *Session) CancelRun(runID string) bool {
@@ -422,16 +393,15 @@ func (s *Session) ConfigureEditState(edit *agent.ReportEditContext) {
 		s.EditState.Reset()
 		return
 	}
-	s.EditState.Mode = strings.TrimSpace(edit.Mode)
-	s.EditState.TargetRunID = strings.TrimSpace(edit.TargetRunID)
-	s.EditState.TargetBlockID = strings.TrimSpace(edit.BlockID)
-	s.EditState.TargetBlockLabel = strings.TrimSpace(edit.BlockLabel)
-	s.EditState.TargetChartID = strings.TrimSpace(edit.ChartID)
-	s.EditState.SelectionText = strings.TrimSpace(edit.SelectionText)
+	s.EditState.ScopeKindValue = edit.ScopeKind
+	s.EditState.TargetRunID = edit.TargetRunID
+	s.EditState.TargetBlockID = edit.BlockID
+	s.EditState.TargetBlockLabel = edit.BlockLabel
+	s.EditState.TargetChartID = edit.ChartID
+	s.EditState.SelectionText = edit.SelectionText
 	s.EditState.SelectionStart = edit.SelectionStart
 	s.EditState.SelectionEnd = edit.SelectionEnd
 	s.EditState.SelectionRangeSet = edit.SelectionRangeSet
-	s.EditState.PreserveOtherBlocks = edit.PreserveOtherBlocks
 	s.EditState.RefreshFromReportState(s.ReportState)
 }
 
@@ -446,16 +416,15 @@ func (s *Session) CurrentEditContext() *agent.ReportEditContext {
 		return nil
 	}
 	return &agent.ReportEditContext{
-		Mode:                s.EditState.Mode,
-		TargetRunID:         s.EditState.TargetRunID,
-		BlockID:             s.EditState.TargetBlockID,
-		BlockLabel:          s.EditState.TargetBlockLabel,
-		ChartID:             s.EditState.TargetChartID,
-		SelectionText:       s.EditState.SelectionText,
-		SelectionStart:      s.EditState.SelectionStart,
-		SelectionEnd:        s.EditState.SelectionEnd,
-		SelectionRangeSet:   s.EditState.SelectionRangeSet,
-		PreserveOtherBlocks: s.EditState.PreserveOtherBlocks,
+		ScopeKind:         s.EditState.ScopeKindValue,
+		TargetRunID:       s.EditState.TargetRunID,
+		BlockID:           s.EditState.TargetBlockID,
+		BlockLabel:        s.EditState.TargetBlockLabel,
+		ChartID:           s.EditState.TargetChartID,
+		SelectionText:     s.EditState.SelectionText,
+		SelectionStart:    s.EditState.SelectionStart,
+		SelectionEnd:      s.EditState.SelectionEnd,
+		SelectionRangeSet: s.EditState.SelectionRangeSet,
 	}
 }
 
@@ -469,77 +438,115 @@ func (s *Session) CurrentEditStateData() *agent.EditStateUpdatedData {
 		Active:    true,
 		ScopeKind: s.EditState.ScopeKind(),
 		EditContext: &agent.ReportEditContext{
-			Mode:                s.EditState.Mode,
-			TargetRunID:         s.EditState.TargetRunID,
-			BlockID:             s.EditState.TargetBlockID,
-			BlockLabel:          s.EditState.TargetBlockLabel,
-			ChartID:             s.EditState.TargetChartID,
-			SelectionText:       s.EditState.SelectionText,
-			SelectionStart:      s.EditState.SelectionStart,
-			SelectionEnd:        s.EditState.SelectionEnd,
-			SelectionRangeSet:   s.EditState.SelectionRangeSet,
-			PreserveOtherBlocks: s.EditState.PreserveOtherBlocks,
+			ScopeKind:         s.EditState.ScopeKindValue,
+			TargetRunID:       s.EditState.TargetRunID,
+			BlockID:           s.EditState.TargetBlockID,
+			BlockLabel:        s.EditState.TargetBlockLabel,
+			ChartID:           s.EditState.TargetChartID,
+			SelectionText:     s.EditState.SelectionText,
+			SelectionStart:    s.EditState.SelectionStart,
+			SelectionEnd:      s.EditState.SelectionEnd,
+			SelectionRangeSet: s.EditState.SelectionRangeSet,
 		},
 	}
 }
 
-func (s *Session) LoadReportSnapshot(snapshot *domain.ReportSnapshot) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Session) LoadReportSnapshot(snapshot *domain.ReportSnapshot) error {
 	if snapshot == nil {
-		return
+		return nil
 	}
-	s.ReportState.Lock()
-	s.ReportState.FinalTitle = strings.TrimSpace(snapshot.Title)
-	s.ReportState.FinalAuthor = strings.TrimSpace(snapshot.Author)
-	s.ReportState.Layout = tools.ReportLayout{
+	results, err := tools.DecodeAnalysisResults(snapshot.Results)
+	if err != nil {
+		return fmt.Errorf("decode report analysis results: %w", err)
+	}
+	artifacts, err := tools.DecodeArtifactRecords(snapshot.Artifacts)
+	if err != nil {
+		return fmt.Errorf("decode report artifacts: %w", err)
+	}
+	blocks := make([]tools.ReportBlock, 0, len(snapshot.Blocks))
+	seenBlockIDs := make(map[string]struct{}, len(snapshot.Blocks))
+	for _, block := range snapshot.Blocks {
+		if block.ID == "" || block.ID != strings.TrimSpace(block.ID) {
+			return fmt.Errorf("report snapshot contains a non-exact block ID")
+		}
+		if _, exists := seenBlockIDs[block.ID]; exists {
+			return fmt.Errorf("report snapshot block ID %q is duplicated", block.ID)
+		}
+		seenBlockIDs[block.ID] = struct{}{}
+		switch block.Kind {
+		case "markdown", "html":
+			if strings.TrimSpace(block.Content) == "" || block.ChartID != "" {
+				return fmt.Errorf("report snapshot block %s has invalid %s structure", block.ID, block.Kind)
+			}
+		case "chart":
+			if block.ChartID == "" || block.ChartID != strings.TrimSpace(block.ChartID) {
+				return fmt.Errorf("report snapshot chart block %s requires an exact chart ID", block.ID)
+			}
+		default:
+			return fmt.Errorf("report snapshot block %s has invalid kind %q", block.ID, block.Kind)
+		}
+		sources, err := tools.DecodeEvidenceRefs(block.Sources)
+		if err != nil {
+			return fmt.Errorf("decode report block %s sources: %w", block.ID, err)
+		}
+		blocks = append(blocks, tools.ReportBlock{ID: block.ID, Kind: block.Kind, Title: block.Title, Content: block.Content, ChartID: block.ChartID, Sources: sources})
+	}
+	charts := make([]tools.ChartData, 0, len(snapshot.Charts))
+	seenChartIDs := make(map[string]struct{}, len(snapshot.Charts))
+	for _, chart := range snapshot.Charts {
+		if chart.ID == "" || chart.ID != strings.TrimSpace(chart.ID) {
+			return fmt.Errorf("report snapshot contains a non-exact chart ID")
+		}
+		if _, exists := seenChartIDs[chart.ID]; exists {
+			return fmt.Errorf("report snapshot chart ID %q is duplicated", chart.ID)
+		}
+		seenChartIDs[chart.ID] = struct{}{}
+		var option map[string]interface{}
+		if err := jsoncontract.Decode(chart.Option, &option); err != nil {
+			return fmt.Errorf("report snapshot chart %s has invalid option JSON: %w", chart.ID, err)
+		}
+		if option == nil {
+			return fmt.Errorf("report snapshot chart %s option must be a JSON object", chart.ID)
+		}
+		sources, err := tools.DecodeEvidenceRefs(chart.Sources)
+		if err != nil {
+			return fmt.Errorf("decode report chart %s sources: %w", chart.ID, err)
+		}
+		charts = append(charts, tools.ChartData{ID: chart.ID, Option: append(json.RawMessage(nil), chart.Option...), Width: chart.Width, Height: chart.Height, Sources: sources})
+	}
+	layout := tools.ReportLayout{
 		CustomCSS: snapshot.Layout.CustomCSS,
 		BodyClass: snapshot.Layout.BodyClass,
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ReportState.Lock()
+	s.ReportState.FinalTitle = snapshot.Title
+	s.ReportState.FinalAuthor = snapshot.Author
+	s.ReportState.Layout = layout
 	s.ReportState.NeedsFinalize = snapshot.NeedsFinalize
-	s.ReportState.FinalizeAttempts = 0
-	s.ReportState.LastFinalizeIssueSignature = ""
-	s.ReportState.Blocks = make([]tools.ReportBlock, 0, len(snapshot.Blocks))
-	for _, block := range snapshot.Blocks {
-		rb := tools.ReportBlock{
-			ID:      block.ID,
-			Kind:    block.Kind,
-			Title:   block.Title,
-			Content: block.Content,
-			ChartID: block.ChartID,
-		}
-		if len(block.Sources) > 0 {
-			var sources []tools.EvidenceRef
-			if err := json.Unmarshal(block.Sources, &sources); err == nil {
-				rb.Sources = sources
-			}
-		}
-		s.ReportState.Blocks = append(s.ReportState.Blocks, rb)
-	}
-	s.ReportState.Charts = make([]tools.ChartData, 0, len(snapshot.Charts))
-	for _, chart := range snapshot.Charts {
-		s.ReportState.Charts = append(s.ReportState.Charts, tools.ChartData{
-			ID:     chart.ID,
-			Option: chart.Option,
-			Width:  chart.Width,
-			Height: chart.Height,
-		})
-	}
+	s.ReportState.Results = results
+	s.ReportState.Artifacts = artifacts
+	s.ReportState.Blocks = blocks
+	s.ReportState.Charts = charts
 	s.ReportState.Unlock()
 	if s.EditState != nil {
-		s.ReportState.RLock()
 		s.EditState.RefreshFromReportState(s.ReportState)
-		s.ReportState.RUnlock()
 	}
+	return nil
 }
 
 func (s *Session) PrepareUserRun(ctx context.Context, userMsg agent.UserMessage, loader ReportSnapshotLoader) error {
+	if err := userMsg.Validate(); err != nil {
+		return err
+	}
 	var snapshot *domain.ReportSnapshot
 	targetRunID := ""
-	if userMsg.EditContext != nil && strings.TrimSpace(userMsg.EditContext.TargetRunID) != "" {
-		targetRunID = strings.TrimSpace(userMsg.EditContext.TargetRunID)
-	} else if userMsg.TurnContext != nil && strings.TrimSpace(userMsg.TurnContext.ReportTargetRunID) != "" {
-		targetRunID = strings.TrimSpace(userMsg.TurnContext.ReportTargetRunID)
+	if userMsg.EditContext != nil && userMsg.EditContext.TargetRunID != "" {
+		targetRunID = userMsg.EditContext.TargetRunID
+	} else if userMsg.TurnContext != nil && userMsg.TurnContext.ReportTargetRunID != "" {
+		targetRunID = userMsg.TurnContext.ReportTargetRunID
 	}
 	if targetRunID != "" {
 		if loader == nil {
@@ -552,13 +559,15 @@ func (s *Session) PrepareUserRun(ctx context.Context, userMsg agent.UserMessage,
 		snapshot = loaded
 	}
 	if snapshot != nil {
-		s.LoadReportSnapshot(snapshot)
+		if err := s.LoadReportSnapshot(snapshot); err != nil {
+			return err
+		}
 	}
 	s.ConfigureEditState(userMsg.EditContext)
 	return nil
 }
 
-func (s *Session) Reset(keepFiles bool) error {
+func (s *Session) Reset() error {
 	s.CancelRun("")
 	s.Engine.ResetMessages()
 	if s.Memory != nil {
@@ -576,8 +585,8 @@ func (s *Session) Reset(keepFiles bool) error {
 	s.ReportState.FinalAuthor = ""
 	s.ReportState.Layout = tools.ReportLayout{}
 	s.ReportState.NeedsFinalize = false
-	s.ReportState.FinalizeAttempts = 0
-	s.ReportState.LastFinalizeIssueSignature = ""
+	s.ReportState.Results = nil
+	s.ReportState.Artifacts = nil
 	s.ReportState.Unlock()
 	if s.EditState != nil {
 		s.EditState.Reset()
@@ -589,8 +598,6 @@ func (s *Session) Reset(keepFiles bool) error {
 		return err
 	}
 
-	// 文件元数据已经通过 FileRepository 与 session 关联，当前阶段 keepFiles=false 仅重置分析状态。
-	_ = keepFiles
 	return os.MkdirAll(s.FileService.TempDir, 0o755)
 }
 
@@ -605,11 +612,11 @@ func (s *Session) Destroy() error {
 	return nil
 }
 
-func (s *Session) RuntimeState() (map[string]string, []agent.Subgoal) {
-	var memory map[string]string
+func (s *Session) RuntimeState() (map[string]agent.MemoryEntry, []agent.Subgoal) {
+	var memory map[string]agent.MemoryEntry
 	var subgoals []agent.Subgoal
 	if s.Memory != nil {
-		memory = s.Memory.Snapshot()
+		memory = s.Memory.EntrySnapshot()
 	}
 	if s.Subgoals != nil {
 		subgoals = s.Subgoals.ListAll()
@@ -617,17 +624,22 @@ func (s *Session) RuntimeState() (map[string]string, []agent.Subgoal) {
 	return memory, subgoals
 }
 
-func (s *Session) LoadRuntimeState(memory map[string]string, subgoals []agent.Subgoal) {
+func (s *Session) LoadRuntimeStateEntries(entries map[string]agent.MemoryEntry, subgoals []agent.Subgoal) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.Memory != nil {
-		s.Memory.ReplaceSnapshot(memory)
+		if err := s.Memory.ReplaceEntries(entries); err != nil {
+			return err
+		}
 	}
 	if s.Subgoals != nil {
-		s.Subgoals.ReplaceAll(subgoals)
+		if err := s.Subgoals.ReplaceAll(subgoals); err != nil {
+			return err
+		}
 	}
 	s.LastSeenAt = time.Now()
+	return nil
 }
 
 func (s *Session) RuntimeVars() []agent.RuntimeContextBlock {
@@ -638,7 +650,7 @@ func (s *Session) RuntimeVars() []agent.RuntimeContextBlock {
 	// Active edit scope is explicit UI/turn state. Broader report and goal facts
 	// stay pull-based through state_* inspection tools.
 	if s.EditState != nil && s.EditState.Active() {
-		content := fmt.Sprintf("Mode: %s\nScopeKind: %s\n", s.EditState.Mode, s.EditState.ScopeKind())
+		content := fmt.Sprintf("ScopeKind: %s\n", s.EditState.ScopeKind())
 		if s.EditState.TargetBlockID != "" {
 			content += fmt.Sprintf("TargetBlockID: %s\n", s.EditState.TargetBlockID)
 		}
@@ -653,9 +665,6 @@ func (s *Session) RuntimeVars() []agent.RuntimeContextBlock {
 			if s.EditState.SelectionRangeSet && s.EditState.SelectionEnd > s.EditState.SelectionStart {
 				content += fmt.Sprintf("SelectionRange: %d-%d\n", s.EditState.SelectionStart, s.EditState.SelectionEnd)
 			}
-		}
-		if s.EditState.PreserveOtherBlocks {
-			content += "PreserveOtherBlocks: true\n"
 		}
 		if s.EditState.ScopeKindLocked() == "partial_selection" {
 			content += "MutationContract: only the target block content may change; content outside the selected range, block title, block kind, chart_id, and sources remain protected.\n"

@@ -9,13 +9,13 @@ import (
 	"github.com/ifnodoraemon/openDataAnalysis/session"
 )
 
-func TestConfiguredRunBackendDefaultsToInProcess(t *testing.T) {
+func TestConfiguredRunBackendDoesNotInventMissingConfiguration(t *testing.T) {
 	prev := config.Cfg
 	config.Cfg = nil
 	t.Cleanup(func() { config.Cfg = prev })
 
-	if got := configuredRunBackend(); got != "inprocess" {
-		t.Fatalf("expected default run backend inprocess, got %q", got)
+	if got := configuredRunBackend(); got != "" {
+		t.Fatalf("expected missing run backend to remain empty, got %q", got)
 	}
 }
 

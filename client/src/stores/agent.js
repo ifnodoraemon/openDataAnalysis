@@ -20,7 +20,7 @@ export const useAgentStore = defineStore("agent", () => {
   const sessions = ref([]);
   const runs = shallowRef([]);
   const subgoals = ref([]);
-  const memoryFacts = ref({});
+  const memoryEntries = ref({});
   const reportQuote = ref(null);
   const reportEditState = ref(null);
 
@@ -82,7 +82,11 @@ export const useAgentStore = defineStore("agent", () => {
         return { ...item, childRuns: childRuns || [] };
       }
       if (item.childRuns?.length) {
-        const nextChildren = setChildRunsInTree(item.childRuns, parentRunId, childRuns);
+        const nextChildren = setChildRunsInTree(
+          item.childRuns,
+          parentRunId,
+          childRuns,
+        );
         if (nextChildren !== item.childRuns) {
           changed = true;
           return { ...item, childRuns: nextChildren };
@@ -103,7 +107,11 @@ export const useAgentStore = defineStore("agent", () => {
         return { ...item, childRuns: [...existingChildren, run] };
       }
       if (item.childRuns?.length) {
-        const nextChildren = insertRunUnderParent(item.childRuns, parentRunId, run);
+        const nextChildren = insertRunUnderParent(
+          item.childRuns,
+          parentRunId,
+          run,
+        );
         if (nextChildren !== item.childRuns) {
           changed = true;
           return { ...item, childRuns: nextChildren };
@@ -139,7 +147,7 @@ export const useAgentStore = defineStore("agent", () => {
       return;
     }
     reportQuote.value = {
-      mode: quote.mode || "regenerate_selection",
+      scopeKind: quote.scopeKind || "",
       targetRunId: quote.targetRunId || "",
       blockId: quote.blockId || "",
       blockLabel: quote.blockLabel || "",
@@ -151,7 +159,6 @@ export const useAgentStore = defineStore("agent", () => {
         ? quote.selectionEnd
         : null,
       selectionRangeSet: quote.selectionRangeSet === true,
-      preserveOtherBlocks: quote.preserveOtherBlocks !== false,
     };
   }
 
@@ -251,6 +258,15 @@ export const useAgentStore = defineStore("agent", () => {
     runs.value = setChildRunsInTree(runs.value, parentRunId, items || []);
   }
 
+  function updateActiveRunStatus(status) {
+    if (activeRunId.value) {
+      const activeRun = getRun(activeRunId.value);
+      if (activeRun) {
+        runs.value = replaceRunInTree(runs.value, { ...activeRun, status });
+      }
+    }
+  }
+
   function patchRun(runId, patch) {
     if (!runId) return false;
     if (!findRunById(runs.value, runId)) return false;
@@ -283,8 +299,8 @@ export const useAgentStore = defineStore("agent", () => {
     subgoals.value = items || [];
   }
 
-  function setMemoryFacts(items) {
-    memoryFacts.value = items || {};
+  function setMemoryEntries(items) {
+    memoryEntries.value = items || {};
   }
 
   function setConnectionState(state) {
@@ -318,7 +334,7 @@ export const useAgentStore = defineStore("agent", () => {
     sessionId.value = "";
     runs.value = [];
     subgoals.value = [];
-    memoryFacts.value = {};
+    memoryEntries.value = {};
     reportQuote.value = null;
     reportEditState.value = null;
   }
@@ -353,7 +369,7 @@ export const useAgentStore = defineStore("agent", () => {
     sessions,
     runs,
     subgoals,
-    memoryFacts,
+    memoryEntries,
     reportQuote,
     reportEditState,
     addMessage,
@@ -370,15 +386,16 @@ export const useAgentStore = defineStore("agent", () => {
     setWorkspaces,
     setSessions,
     upsertSession,
+    upsertRun,
+    updateActiveRunStatus,
     setRuns,
     setRunChildren,
-    upsertRun,
     patchRun,
     appendRunPreview,
     getRun,
     setMessages,
     setSubgoals,
-    setMemoryFacts,
+    setMemoryEntries,
     setConnectionState,
     setBootstrapState,
     startRun,

@@ -24,3 +24,23 @@ func TestReportEditContextRequiresExplicitSelectionRangeSet(t *testing.T) {
 		t.Fatal("expected explicit selectionRangeSet=true to be preserved")
 	}
 }
+
+func TestReportEditContextValidateRequiresScopeTargets(t *testing.T) {
+	t.Parallel()
+
+	invalid := []*ReportEditContext{
+		{},
+		{ScopeKind: "partial_block"},
+		{ScopeKind: "partial_chart"},
+		{ScopeKind: "partial_selection", BlockID: "b1", SelectionText: "text"},
+	}
+	for _, edit := range invalid {
+		if err := edit.Validate(); err == nil {
+			t.Fatalf("expected invalid edit context to fail: %#v", edit)
+		}
+	}
+	valid := &ReportEditContext{ScopeKind: "partial_selection", BlockID: "b1", SelectionText: "text", SelectionStart: 0, SelectionEnd: 4, SelectionRangeSet: true}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("expected explicit selection scope to pass: %v", err)
+	}
+}

@@ -15,13 +15,9 @@ func TestApplyReportChartMutationReplacesExistingChart(t *testing.T) {
 	}
 
 	result, err := applyReportChartMutation(state, nil, createChartParams{
-		ChartID:    "chart_sales",
-		Title:      "销售趋势",
-		ChartType:  "bar",
-		Categories: []string{"1月"},
-		Series: []chartSeriesInput{
-			{Data: []float64{100}},
-		},
+		ChartID: "chart_sales",
+		Title:   "Observed values",
+		Option:  json.RawMessage(`{"series":[{"type":"bar","data":[100]}]}`),
 	})
 	if err != nil {
 		t.Fatalf("applyReportChartMutation: %v", err)
@@ -43,8 +39,7 @@ func TestCreateChartToolRejectsEditScopeViolation(t *testing.T) {
 	tool := &CreateChartTool{
 		ReportState: &ReportState{},
 		EditState: &ReportEditState{
-			Mode:                "regenerate_block",
-			PreserveOtherBlocks: true,
+			ScopeKindValue: "partial_block",
 			AllowedChartIDs: map[string]struct{}{
 				"chart_allowed": {},
 			},
@@ -53,10 +48,8 @@ func TestCreateChartToolRejectsEditScopeViolation(t *testing.T) {
 
 	result, err := tool.Execute(json.RawMessage(`{
 		"chart_id":"chart_blocked",
-		"title":"销售趋势",
-		"chart_type":"bar",
-		"categories":["1月"],
-		"series":[{"data":[100]}]
+		"title":"Observed values",
+		"option":{"series":[{"type":"bar","data":[100]}]}
 	}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

@@ -1,10 +1,14 @@
 <template>
   <div class="login-shell">
     <div class="login-card">
-      <div class="brand">📊 Open Data Analysis</div>
+      <div class="brand">📊 OpenDataAnalysis</div>
       <h1>{{ isRegister ? "注册新账号" : "欢迎登录" }}</h1>
       <p class="hint">
-        {{ isRegister ? "创建专属账号并自动生成独立工作区" : "输入账号进入智能数据分析系统" }}
+        {{
+          isRegister
+            ? "创建专属账号并自动生成独立工作区"
+            : "输入账号进入智能数据分析系统"
+        }}
       </p>
 
       <form class="form" @submit.prevent="handleSubmit">
@@ -50,7 +54,15 @@
         </label>
 
         <button class="submit" :disabled="loading">
-          {{ loading ? (isRegister ? "注册中..." : "登录中...") : (isRegister ? "立即注册" : "登录") }}
+          {{
+            loading
+              ? isRegister
+                ? "注册中..."
+                : "登录中..."
+              : isRegister
+                ? "立即注册"
+                : "登录"
+          }}
         </button>
       </form>
 
@@ -68,10 +80,10 @@
 
 <script setup>
 import { ref } from "vue";
-import { useWebSocket } from "../../composables/useWebSocket.js";
+import { useAgentTransport } from "../../composables/useAgentTransport.js";
 
 const emit = defineEmits(["success"]);
-const { login, register } = useWebSocket();
+const { login, register } = useAgentTransport();
 
 const isRegister = ref(false);
 const name = ref("");
@@ -93,7 +105,12 @@ async function handleSubmit() {
 
   try {
     if (isRegister.value) {
-      await register(name.value, email.value, password.value, workspaceName.value);
+      await register(
+        name.value,
+        email.value,
+        password.value,
+        workspaceName.value,
+      );
     } else {
       await login(email.value, password.value);
     }
@@ -112,13 +129,13 @@ async function handleSubmit() {
   display: grid;
   place-items: center;
   padding: 24px;
-  background: var(--bg-secondary);
+  background: var(--bg-card);
 }
 
 .login-card {
   width: min(420px, 100%);
   background: var(--bg-card);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: 18px;
   padding: 28px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.08);
@@ -129,7 +146,7 @@ async function handleSubmit() {
   padding: 6px 12px;
   border-radius: 999px;
   background: rgba(37, 99, 235, 0.1);
-  color: var(--accent-blue);
+  color: var(--primary-blue);
   font-size: 0.8rem;
   font-weight: 600;
   margin-bottom: 14px;
@@ -138,11 +155,11 @@ async function handleSubmit() {
 h1 {
   font-size: 1.6rem;
   margin-bottom: 6px;
-  color: var(--text-primary);
+  color: var(--text-main);
 }
 
 .hint {
-  color: var(--text-secondary);
+  color: var(--text-sub);
   font-size: 0.88rem;
   margin-bottom: 20px;
 }
@@ -157,14 +174,14 @@ h1 {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  color: var(--text-secondary);
+  color: var(--text-sub);
   font-size: 0.8rem;
 }
 
 .field input {
-  border: 1px solid var(--border);
-  background: var(--bg-primary);
-  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-app);
+  color: var(--text-main);
   border-radius: 10px;
   padding: 12px 14px;
   outline: none;
@@ -173,14 +190,14 @@ h1 {
 }
 
 .field input:focus {
-  border-color: var(--accent-blue);
+  border-color: var(--primary-blue);
 }
 
 .submit {
   margin-top: 8px;
   border: none;
   border-radius: 10px;
-  background: var(--accent-blue);
+  background: var(--primary-blue);
   color: white;
   padding: 12px 16px;
   font-size: 0.95rem;
@@ -205,13 +222,13 @@ h1 {
   justify-content: center;
   gap: 8px;
   font-size: 0.85rem;
-  color: var(--text-secondary);
+  color: var(--text-sub);
 }
 
 .toggle-btn {
   background: transparent;
   border: none;
-  color: var(--accent-blue);
+  color: var(--primary-blue);
   font-weight: 600;
   cursor: pointer;
   padding: 0;

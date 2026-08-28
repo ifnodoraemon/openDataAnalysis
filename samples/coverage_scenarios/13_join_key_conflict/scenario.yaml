@@ -5,13 +5,9 @@ prompt: 请综合分析投放 ROI，并解释不同渠道带来的收入表现�
 files:
   - campaign_spend_daily.csv
   - crm_bookings_monthly.csv
-expected:
-  should_inspect_schema: true
-  should_auto_map: false
-  should_ask_user: true
-  expected_coverage: partial
-  required_mentions:
-    - no stable attribution key
-    - grain mismatch between campaign daily spend and monthly bookings
-  forbidden_claims:
-    - directly attributed crm bookings to campaign spend
+acceptance:
+  terminal_types: [user_request_input]
+  no_error: true
+manual_review:
+  - 提问准确呈现关联键和时间粒度的不确定性。
+  - 未经确认不把 CRM bookings 直接归因到 campaign spend。

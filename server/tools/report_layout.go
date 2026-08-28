@@ -2,7 +2,6 @@ package tools
 
 import (
 	"fmt"
-	"strings"
 )
 
 type reportLayoutParams struct {
@@ -25,21 +24,26 @@ func applyReportLayoutMutation(state *ReportState, params reportLayoutParams) (r
 		return reportLayoutResult{}, fmt.Errorf("report state is not initialized")
 	}
 
-	action := strings.TrimSpace(params.Action)
-	if action == "" {
-		action = "merge"
+	if err := validateExactReportField("action", params.Action, true); err != nil {
+		return reportLayoutResult{}, err
 	}
-	params.Action = action
 
-	switch action {
+	switch params.Action {
 	case "reset":
+		if params.CustomCSS != "" || params.BodyClass != "" {
+			return reportLayoutResult{}, fmt.Errorf("reset does not accept custom_css or body_class")
+		}
 		state.Layout = ReportLayout{}
 		state.NeedsFinalize = true
+		state.MutationVersion++
 		return reportLayoutResult{
-			Action:    action,
-			UISummary: "report layout reset; delivery_state=draft",
+			Action:    params.Action,
+			UISummary: "报告布局已重置，当前仍为草稿。",
 		}, nil
 	case "merge":
+		if params.CustomCSS == "" && params.BodyClass == "" {
+			return reportLayoutResult{}, fmt.Errorf("merge requires custom_css or body_class")
+		}
 		if params.CustomCSS != "" {
 			if len(params.CustomCSS) > maxCustomCSSSize {
 				return reportLayoutResult{}, fmt.Errorf("custom_css exceeds maximum allowed size (%d bytes)", maxCustomCSSSize)
@@ -47,16 +51,20 @@ func applyReportLayoutMutation(state *ReportState, params reportLayoutParams) (r
 			state.Layout.CustomCSS = params.CustomCSS
 		}
 		if params.BodyClass != "" {
-			state.Layout.BodyClass = strings.TrimSpace(params.BodyClass)
+			if sanitizeBodyClass(params.BodyClass) != params.BodyClass {
+				return reportLayoutResult{}, fmt.Errorf("body_class must be a space-separated list of CSS class identifiers")
+			}
+			state.Layout.BodyClass = params.BodyClass
 		}
 		state.NeedsFinalize = true
+		state.MutationVersion++
 		return reportLayoutResult{
-			Action:       action,
+			Action:       params.Action,
 			HasCustomCSS: state.Layout.CustomCSS != "",
 			BodyClass:    state.Layout.BodyClass,
-			UISummary:    "report layout updated; delivery_state=draft",
+			UISummary:    "报告布局已更新，当前仍为草稿。",
 		}, nil
 	default:
-		return reportLayoutResult{}, fmt.Errorf("unknown action: %s", action)
+		return reportLayoutResult{}, fmt.Errorf("unknown action: %s", params.Action)
 	}
 }

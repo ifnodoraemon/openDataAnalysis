@@ -30,7 +30,7 @@ describe("data source store", () => {
     const result = await store.confirmProfile(
       "sp_1",
       "session",
-      { primary_time_column: "month" },
+      { annotation: "user supplied" },
       "sess_1",
     );
 
@@ -42,7 +42,7 @@ describe("data source store", () => {
         body: JSON.stringify({
           session_id: "sess_1",
           scope: "session",
-          overrides: { primary_time_column: "month" },
+          overrides: { annotation: "user supplied" },
         }),
       }),
     );
@@ -76,7 +76,7 @@ describe("data source store", () => {
             {
               source_id: "ds_1",
               analysis_table_name: "sales",
-              semantic_status: "profiled",
+              profile_status: "profiled",
               profile_id: "sp_1",
               schema_signature: "sig_1",
             },
@@ -103,12 +103,12 @@ describe("data source store", () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 403,
-      text: async () => "not authorized",
+      text: async () => "无权执行此操作",
     });
 
     const result = await store.testConnection("ds_1");
 
-    expect(result).toEqual({ success: false, message: "not authorized" });
+    expect(result).toEqual({ success: false, error: "无权执行此操作" });
   });
 
   it("creates SQL sources with separated public config and credential", async () => {
@@ -131,7 +131,8 @@ describe("data source store", () => {
       host: "db.example.com",
       port: 3306,
       database_name: "analytics",
-      default_schema: "public",
+      security_mode_field: "tls_mode",
+      security_mode: "verify_identity",
       username: "reader",
       password: "secret",
       allowlist: [{ schema: "public", name: "orders", kind: "table" }],
@@ -145,7 +146,7 @@ describe("data source store", () => {
         host: "db.example.com",
         port: 3306,
         database_name: "analytics",
-        default_schema: "public",
+        tls_mode: "verify_identity",
         username: "reader",
         allowlist: [{ schema: "public", name: "orders", kind: "table" }],
       },
@@ -166,7 +167,6 @@ describe("data source store", () => {
               label: "MySQL",
               category: "sql",
               configurable: true,
-              default_port: 3306,
             },
           ],
         }),
@@ -181,7 +181,6 @@ describe("data source store", () => {
         label: "MySQL",
         category: "sql",
         configurable: true,
-        default_port: 3306,
       },
     ]);
   });
@@ -204,8 +203,8 @@ describe("data source store", () => {
       host: "db.example.com",
       port: 5432,
       database_name: "analytics",
-      default_schema: "public",
-      ssl_mode: "require",
+      security_mode_field: "ssl_mode",
+      security_mode: "require",
       username: "reader",
       password: "",
       allowlist: [{ schema: "public", name: "orders", kind: "table" }],
@@ -214,5 +213,6 @@ describe("data source store", () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body.credential).toBeUndefined();
     expect(body.config.password).toBeUndefined();
+    expect(body.config.ssl_mode).toBe("require");
   });
 });

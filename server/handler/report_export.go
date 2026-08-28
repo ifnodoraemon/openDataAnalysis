@@ -1,8 +1,7 @@
 package handler
 
 import (
-	"encoding/json"
-	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -52,67 +51,63 @@ func ConvertReportDOCXHandler(w http.ResponseWriter, r *http.Request) {
 	userID := identity.UserID
 
 	type request struct {
-		Title string `json:"title"`
 		RunID string `json:"runId"`
-		HTML  string `json:"html"`
 	}
 
 	var req request
 
 	r.Body = http.MaxBytesReader(w, r.Body, ReportExportMaxBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid export request or body too large", http.StatusBadRequest)
+	if err := decodeRequestJSON(r, &req); err != nil {
+		http.Error(w, "导出请求无效或请求体过大", http.StatusBadRequest)
 		return
 	}
 	if strings.TrimSpace(req.RunID) == "" {
-		http.Error(w, "missing runId", http.StatusBadRequest)
+		http.Error(w, "缺少任务 ID", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.RunID) != req.RunID {
+		http.Error(w, "任务 ID 必须保持原值", http.StatusBadRequest)
 		return
 	}
 
 	run, err := runRepo.GetByID(r.Context(), req.RunID)
-	if err != nil {
-		http.Error(w, "run not found", http.StatusNotFound)
+	if writeRepoLookupError(w, err, "任务不存在") {
 		return
 	}
 	if run.WorkspaceID != workspaceID || run.UserID != userID {
-		http.Error(w, "run not found", http.StatusNotFound)
+		http.Error(w, "任务不存在", http.StatusNotFound)
 		return
 	}
-	if run.ReportFileID == nil || *run.ReportFileID == "" {
-		http.Error(w, "report not finalized yet", http.StatusBadRequest)
+	report, err := reportRepo.GetByRunID(r.Context(), req.RunID)
+	if writeRepoLookupError(w, err, "报告尚未定稿") {
 		return
 	}
-
-	html := strings.TrimSpace(req.HTML)
-	if html == "" {
-		reader, _, err := fileService.OpenForDownload(r.Context(), userID, workspaceID, *run.ReportFileID)
-		if err != nil {
-			http.Error(w, "failed to read report file", http.StatusInternalServerError)
-			return
-		}
-		defer reader.Close()
-		htmlBytes, err := io.ReadAll(reader)
-		if err != nil {
-			http.Error(w, "failed to read report content", http.StatusInternalServerError)
-			return
-		}
-		html = string(htmlBytes)
+	if report == nil {
+		http.Error(w, "报告存储返回了空记录", http.StatusInternalServerError)
+		return
+	}
+	html, err := renderReportHTMLFromSnapshot(report)
+	if err != nil {
+		http.Error(w, "渲染报告快照失败", http.StatusInternalServerError)
+		return
 	}
 
 	html = sanitizeExportHTML(html)
 	if strings.TrimSpace(html) == "" {
-		http.Error(w, "report content is empty or invalid", http.StatusBadRequest)
+		http.Error(w, "报告内容为空或无效", http.StatusBadRequest)
 		return
 	}
 
-	body, filename, err := fileService.ConvertHTMLToDOCX(r.Context(), req.Title, html)
+	body, filename, err := fileService.ConvertHTMLToDOCX(r.Context(), report.Title, html)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeHandlerError(w, http.StatusInternalServerError, "转换报告文件失败", err)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+safeHeaderFilename(filename)+`"`)
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(body)
+	if _, err := w.Write(body); err != nil {
+		log.Printf("write report export run_id=%s: %v", req.RunID, err)
+	}
 }

@@ -6,31 +6,6 @@ import (
 	"testing"
 )
 
-func TestDefaultLLMAPIEndpoint(t *testing.T) {
-	tests := []struct {
-		name     string
-		provider string
-		baseURL  string
-		want     string
-	}{
-		{"openai default", "openai", "https://api.openai.com", "https://api.openai.com/v1/responses"},
-		{"anthropic default", "anthropic", "https://api.anthropic.com", "https://api.anthropic.com/v1/messages"},
-		{"deepseek auto chat.completions", "openai", "https://api.deepseek.com", "https://api.deepseek.com/chat/completions"},
-		{"general openai-compat with /v1", "openai", "https://api.groq.com/v1", "https://api.groq.com/v1/chat/completions"},
-		{"general openai-compat without /v1", "openai", "https://api.groq.com", "https://api.groq.com/v1/chat/completions"},
-		{"empty baseURL", "openai", "", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := defaultLLMAPIEndpoint(tt.provider, tt.baseURL)
-			if got != tt.want {
-				t.Errorf("defaultLLMAPIEndpoint(%q, %q) = %q, want %q", tt.provider, tt.baseURL, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestTrustedReportScriptURL(t *testing.T) {
 	tests := []struct {
 		url  string
@@ -41,6 +16,7 @@ func TestTrustedReportScriptURL(t *testing.T) {
 		{"https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js", true},
 		{"https://evil.com/echarts.min.js", false},
 		{"/assets/echarts.min.js", true},
+		{" /assets/echarts.min.js", false},
 		{"", false},
 		{"//cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js", false},
 	}
@@ -55,15 +31,28 @@ func TestTrustedReportScriptURL(t *testing.T) {
 	}
 }
 
+func TestNilConfigurationFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	var cfg *Config
+	if err := cfg.ValidateProductionReadiness(); err == nil {
+		t.Fatal("expected nil configuration to fail validation")
+	}
+}
+
 func TestLoadLLMTimeoutConfig(t *testing.T) {
 	previous := Cfg
 	defer func() { Cfg = previous }()
 
 	t.Setenv("LLM_API_KEY", "test-key")
+	t.Setenv("LLM_PROVIDER", "openai")
+	t.Setenv("LLM_API_PROTOCOL", "responses")
+	t.Setenv("LLM_API_ENDPOINT", "https://api.example.com/v1/responses")
+	t.Setenv("LLM_MODEL", "model-id")
 	t.Setenv("AUTH_SECRET", "abcdefghijklmnopqrstuvwxyz123456")
 	t.Setenv("LLM_HTTP_TIMEOUT_SECONDS", "321")
 	t.Setenv("LLM_RETRY_BUDGET_SECONDS", "654")
-	t.Setenv("CORS_ALLOWED_ORIGINS", "https://app.example.com, https://admin.example.com")
+	t.Setenv("CORS_ALLOWED_ORIGINS", "https://app.example.com,https://admin.example.com")
 	t.Setenv("PROXY_TOKEN", "proxy-token")
 	t.Setenv("PUBLIC_API_BASE_URL", "https://analysis.example.com")
 
@@ -107,13 +96,23 @@ func TestIsOriginAllowed(t *testing.T) {
 
 func TestProductionReadinessRejectsDevelopmentBackends(t *testing.T) {
 	cfg := &Config{
-		DeploymentMode:      "production",
-		AllowedOrigins:      []string{"http://localhost:5173"},
-		MetadataStore:       "sqlite",
-		StorageProvider:     "local",
-		RunBackend:          "inprocess",
-		AnalysisStore:       "session_sqlite",
-		PythonArtifactStore: "executor_local",
+		DeploymentMode:           "production",
+		LLMProvider:              "openai",
+		LLMAPIProtocol:           "responses",
+		LLMAPIEndpoint:           "https://api.example.com/v1/responses",
+		LLMAPIKey:                "provider-key",
+		LLMModel:                 "model-id",
+		LLMHTTPTimeoutSec:        240,
+		LLMRetryBudgetSec:        360,
+		AllowedOrigins:           []string{"http://localhost:5173"},
+		MetadataStore:            "sqlite",
+		StorageProvider:          "local",
+		RunBackend:               "inprocess",
+		AnalysisStore:            "session_sqlite",
+		PythonArtifactStore:      "object_storage",
+		BootstrapDefaultIdentity: true,
+		AuthSecret:               "abcdefghijklmnopqrstuvwxyz123456",
+		PythonMaxTimeoutSec:      120,
 	}
 
 	err := cfg.ValidateProductionReadiness()
@@ -125,9 +124,8 @@ func TestProductionReadinessRejectsDevelopmentBackends(t *testing.T) {
 		"STORAGE_PROVIDER=local",
 		"RUN_BACKEND=inprocess",
 		"ANALYSIS_STORE=session_sqlite",
-		"PYTHON_ARTIFACT_STORE=executor_local",
 		"CORS_ALLOWED_ORIGINS",
-		"DEFAULT_USER_* bootstrap",
+		"BOOTSTRAP_DEFAULT_IDENTITY",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("expected production readiness error to contain %q, got %v", want, err)
@@ -138,12 +136,21 @@ func TestProductionReadinessRejectsDevelopmentBackends(t *testing.T) {
 func TestProductionReadinessAllowsDevelopmentMode(t *testing.T) {
 	cfg := &Config{
 		DeploymentMode:      "development",
+		LLMProvider:         "openai",
+		LLMAPIProtocol:      "responses",
+		LLMAPIEndpoint:      "https://api.example.com/v1/responses",
+		LLMAPIKey:           "provider-key",
+		LLMModel:            "model-id",
+		LLMHTTPTimeoutSec:   240,
+		LLMRetryBudgetSec:   360,
 		AllowedOrigins:      []string{"http://localhost:5173"},
 		MetadataStore:       "sqlite",
 		StorageProvider:     "local",
 		RunBackend:          "inprocess",
 		AnalysisStore:       "session_sqlite",
-		PythonArtifactStore: "executor_local",
+		PythonArtifactStore: "object_storage",
+		AuthSecret:          "abcdefghijklmnopqrstuvwxyz123456",
+		PythonMaxTimeoutSec: 120,
 	}
 
 	if err := cfg.ValidateProductionReadiness(); err != nil {
@@ -151,24 +158,15 @@ func TestProductionReadinessAllowsDevelopmentMode(t *testing.T) {
 	}
 }
 
-func TestIsPlaceholderValue(t *testing.T) {
-	for _, value := range []string{
-		"replace-with-a-long-random-secret",
-		"REPLACE_WITH_A_LONG_RANDOM_SECRET",
-		"REPLACE_WITH_YOUR_API_KEY",
-		"change me",
-		"CHANGE_ME_generate-a-long-random-secret-here",
-		"placeholder",
-		"admin",
-		"password",
+func TestRuntimeConfigurationRejectsAliasesAndImplicitProtocols(t *testing.T) {
+	for _, cfg := range []*Config{
+		{DeploymentMode: "prod", LLMProvider: "openai", LLMAPIProtocol: "responses", LLMAPIEndpoint: "https://api.example.com/v1/responses", LLMAPIKey: "provider-key", LLMModel: "model-id", AuthSecret: "abcdefghijklmnopqrstuvwxyz123456", PythonMaxTimeoutSec: 120, LLMHTTPTimeoutSec: 240, LLMRetryBudgetSec: 360},
+		{DeploymentMode: "development", LLMProvider: "openai", LLMAPIEndpoint: "https://api.example.com/v1/responses", LLMAPIKey: "provider-key", LLMModel: "model-id", AuthSecret: "abcdefghijklmnopqrstuvwxyz123456", PythonMaxTimeoutSec: 120, LLMHTTPTimeoutSec: 240, LLMRetryBudgetSec: 360},
+		{DeploymentMode: "development", LLMProvider: "OpenAI", LLMAPIProtocol: "responses", LLMAPIEndpoint: "https://api.example.com/v1/responses", LLMAPIKey: "provider-key", LLMModel: "model-id", AuthSecret: "abcdefghijklmnopqrstuvwxyz123456", PythonMaxTimeoutSec: 120, LLMHTTPTimeoutSec: 240, LLMRetryBudgetSec: 360},
 	} {
-		if !IsPlaceholderValue(value) {
-			t.Fatalf("expected placeholder to be detected: %q", value)
+		if err := cfg.ValidateProductionReadiness(); err == nil {
+			t.Fatalf("expected explicit configuration contract to reject %#v", cfg)
 		}
-	}
-
-	if IsPlaceholderValue("8f3995c9dbd14f1eb1cf8d3f9a296e11") {
-		t.Fatal("expected random-looking value to be accepted")
 	}
 }
 
@@ -196,21 +194,24 @@ func TestGetEnvBool(t *testing.T) {
 		t.Error("expected default true")
 	}
 
-	for _, val := range []string{"1", "true", "TRUE", "yes", "on"} {
-		os.Setenv("TEST_BOOL_KEY", val)
-		if !getEnvBool("TEST_BOOL_KEY", false) {
-			t.Errorf("expected true for value %q", val)
-		}
+	t.Setenv("TEST_BOOL_KEY", "true")
+	if !getEnvBool("TEST_BOOL_KEY", false) {
+		t.Error("expected exact true")
 	}
 
-	for _, val := range []string{"0", "false", "FALSE", "no", "off"} {
-		os.Setenv("TEST_BOOL_KEY", val)
-		if getEnvBool("TEST_BOOL_KEY", true) {
-			t.Errorf("expected false for value %q", val)
-		}
+	t.Setenv("TEST_BOOL_KEY", "false")
+	if getEnvBool("TEST_BOOL_KEY", true) {
+		t.Error("expected exact false")
 	}
 
-	os.Unsetenv("TEST_BOOL_KEY")
+	t.Setenv("TEST_BOOL_KEY", "yes")
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected invalid boolean to fail closed")
+		}
+	}()
+	_ = getEnvBool("TEST_BOOL_KEY", false)
+
 }
 
 func TestGetEnvInt(t *testing.T) {
@@ -220,15 +221,17 @@ func TestGetEnvInt(t *testing.T) {
 		t.Error("expected default 42")
 	}
 
-	os.Setenv("TEST_INT_KEY", "100")
-	defer os.Unsetenv("TEST_INT_KEY")
+	t.Setenv("TEST_INT_KEY", "100")
 
 	if getEnvInt("TEST_INT_KEY", 42) != 100 {
 		t.Error("expected 100")
 	}
 
-	os.Setenv("TEST_INT_KEY", "not-a-number")
-	if getEnvInt("TEST_INT_KEY", 42) != 42 {
-		t.Error("expected default 42 for invalid input")
-	}
+	t.Setenv("TEST_INT_KEY", "not-a-number")
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected invalid integer to fail closed")
+		}
+	}()
+	_ = getEnvInt("TEST_INT_KEY", 42)
 }

@@ -8,14 +8,18 @@
         </div>
         <div class="brand-info">
           <span class="brand-name">OpenDataAnalysis</span>
-          <span class="brand-tag">Enterprise AI</span>
+          <span class="brand-tag">企业数据智能</span>
         </div>
-        <button class="collapse-btn" @click="$emit('toggle')" title="收起侧边栏">
+        <button
+          class="collapse-btn"
+          @click="$emit('toggle')"
+          title="收起侧边栏"
+        >
           <span>◀</span>
         </button>
       </div>
 
-      <button class="btn-new-analysis" @click="createNewSession">
+      <button class="btn-new-analysis" @click="handleCreateSession">
         <span class="plus-icon">+</span>
         <span>新建分析会话</span>
       </button>
@@ -30,16 +34,18 @@
           <div class="card-icon blue">📁</div>
           <div class="card-info">
             <div class="card-title">数据源中心</div>
-            <div class="card-sub">PostgreSQL / S3 / CSV</div>
+            <div class="card-sub">数据库、对象存储与表格文件</div>
           </div>
-          <span class="count-badge" v-if="sourceCount > 0">{{ sourceCount }}</span>
+          <span class="count-badge" v-if="sourceCount > 0">{{
+            sourceCount
+          }}</span>
         </button>
 
         <button class="feature-nav-card" @click="$emit('open-semantic')">
           <div class="card-icon purple">🧠</div>
           <div class="card-info">
-            <div class="card-title">语义模型 & 指标库</div>
-            <div class="card-sub">自动关联 & 逻辑映射</div>
+            <div class="card-title">数据事实与用户补丁</div>
+            <div class="card-sub">观测事实、授权记录与可复用补丁</div>
           </div>
         </button>
 
@@ -51,10 +57,13 @@
           </div>
         </button>
 
-        <button class="feature-nav-card" @click="$emit('open-workspace-settings')">
+        <button
+          class="feature-nav-card"
+          @click="$emit('open-workspace-settings')"
+        >
           <div class="card-icon orange">⚙️</div>
           <div class="card-info">
-            <div class="card-title">工作区 & RBAC 团队</div>
+            <div class="card-title">工作区与团队权限</div>
             <div class="card-sub">权限管理与成员角色</div>
           </div>
         </button>
@@ -82,7 +91,10 @@
             class="session-card-wrapper"
           >
             <!-- Editing Mode -->
-            <div v-if="editingSessionId === session.id" class="session-card editing">
+            <div
+              v-if="editingSessionId === session.id"
+              class="session-card editing"
+            >
               <span class="item-icon">💬</span>
               <input
                 ref="editInput"
@@ -166,7 +178,7 @@
 
 <script setup>
 import { computed, ref, nextTick } from "vue";
-import { useWebSocket } from "../../composables/useWebSocket.js";
+import { useAgentTransport } from "../../composables/useAgentTransport.js";
 import { useAgentStore } from "../../stores/agent.js";
 import { useDataSourceStore } from "../../stores/datasource.js";
 
@@ -185,11 +197,13 @@ const {
   openSession,
   renameSession,
   deleteSession,
-} = useWebSocket();
+} = useAgentTransport();
 const store = useAgentStore();
 const dataSourceStore = useDataSourceStore();
 
-const sourceCount = computed(() => dataSourceStore.workspaceDataSources?.length || 0);
+const sourceCount = computed(
+  () => dataSourceStore.workspaceDataSources?.length || 0,
+);
 const workspaceOptions = computed(() => store.workspaces || []);
 const workspaceId = computed(() => store.workspace?.id || "");
 const sessions = computed(() => store.sessions || []);
@@ -200,12 +214,21 @@ const editingTitle = ref("");
 const editInput = ref(null);
 
 const userName = computed(() => {
-  return store.user?.name || store.user?.username || store.user?.email || "Administrator";
+  return store.user?.name || store.user?.email || "管理员";
 });
 
 const userInitial = computed(() => {
   return userName.value.charAt(0).toUpperCase();
 });
+
+async function handleCreateSession() {
+  try {
+    await createNewSession();
+  } catch (err) {
+    store.addMessage({ type: "error", content: "新建分析会话失败" });
+    console.error("新建分析会话失败：", err);
+  }
+}
 
 async function handleSessionClick(sessionId) {
   if (!sessionId || sessionId === currentSessionId.value) return;
@@ -213,7 +236,8 @@ async function handleSessionClick(sessionId) {
   try {
     await openSession(sessionId);
   } catch (err) {
-    console.error("open session failed:", err);
+    store.addMessage({ type: "error", content: "打开历史会话失败" });
+    console.error("打开历史会话失败：", err);
   }
 }
 
@@ -223,7 +247,8 @@ async function handleWorkspaceChange(event) {
   try {
     await switchWorkspace(nextWorkspaceId);
   } catch (err) {
-    console.error("switch workspace failed:", err);
+    store.addMessage({ type: "error", content: "切换工作区失败" });
+    console.error("切换工作区失败：", err);
   }
 }
 
@@ -256,7 +281,8 @@ async function saveRename(sessionId) {
     try {
       await renameSession(sessionId, newTitle);
     } catch (err) {
-      console.error("rename failed", err);
+      store.addMessage({ type: "error", content: "重命名会话失败" });
+      console.error("重命名会话失败：", err);
     }
   }
 }
@@ -266,7 +292,8 @@ async function confirmDelete(sessionId) {
     try {
       await deleteSession(sessionId);
     } catch (err) {
-      console.error("delete failed", err);
+      store.addMessage({ type: "error", content: "删除会话失败" });
+      console.error("删除会话失败：", err);
     }
   }
 }
@@ -281,8 +308,8 @@ function logout() {
 .sidebar {
   width: 280px;
   height: 100%;
-  background: var(--bg-secondary);
-  border-right: 1px solid var(--border);
+  background: var(--bg-card);
+  border-right: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -292,7 +319,7 @@ function logout() {
 
 .sidebar-header {
   padding: 16px 14px 12px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -309,7 +336,11 @@ function logout() {
   width: 32px;
   height: 32px;
   border-radius: 8px;
-  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  background: linear-gradient(
+    135deg,
+    var(--primary-blue),
+    var(--accent-purple)
+  );
   display: flex;
   align-items: center;
   justify-content: center;
@@ -329,13 +360,13 @@ function logout() {
 .brand-name {
   font-size: 0.95rem;
   font-weight: 700;
-  color: var(--text-primary);
+  color: var(--text-main);
   letter-spacing: -0.01em;
 }
 
 .brand-tag {
   font-size: 0.68rem;
-  color: var(--accent-blue);
+  color: var(--primary-blue);
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -349,18 +380,18 @@ function logout() {
   padding: 4px 6px;
   border-radius: 6px;
   font-size: 0.75rem;
-  transition: all var(--transition);
+  transition: all var(--transition-fast);
 }
 
 .collapse-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
+  background: var(--bg-card-hover);
+  color: var(--text-main);
 }
 
 .btn-new-analysis {
   width: 100%;
   padding: 10px 14px;
-  background: linear-gradient(135deg, var(--accent-blue), #2563eb);
+  background: linear-gradient(135deg, var(--primary-blue), #2563eb);
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 10px;
   color: white;
@@ -371,7 +402,7 @@ function logout() {
   justify-content: center;
   gap: 8px;
   cursor: pointer;
-  transition: all var(--transition);
+  transition: all var(--transition-fast);
   box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
 }
 
@@ -414,8 +445,8 @@ function logout() {
 
 .session-count {
   font-size: 0.7rem;
-  background: var(--bg-tertiary);
-  color: var(--text-secondary);
+  background: var(--bg-card-hover);
+  color: var(--text-sub);
   padding: 1px 6px;
   border-radius: 10px;
   font-weight: 600;
@@ -432,12 +463,12 @@ function logout() {
   border-radius: 8px;
   cursor: pointer;
   text-align: left;
-  transition: all var(--transition);
+  transition: all var(--transition-fast);
 }
 
 .feature-nav-card:hover {
-  background: var(--bg-hover);
-  border-color: var(--border);
+  background: var(--bg-card-hover);
+  border-color: var(--border-subtle);
 }
 
 .card-icon {
@@ -451,10 +482,22 @@ function logout() {
   flex-shrink: 0;
 }
 
-.card-icon.blue { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
-.card-icon.purple { background: rgba(139, 92, 246, 0.15); color: #c084fc; }
-.card-icon.green { background: rgba(16, 185, 129, 0.15); color: #34d399; }
-.card-icon.orange { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+.card-icon.blue {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+}
+.card-icon.purple {
+  background: rgba(139, 92, 246, 0.15);
+  color: #c084fc;
+}
+.card-icon.green {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+}
+.card-icon.orange {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+}
 
 .card-info {
   flex: 1;
@@ -466,7 +509,7 @@ function logout() {
 .card-title {
   font-size: 0.83rem;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--text-main);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -481,7 +524,7 @@ function logout() {
 }
 
 .count-badge {
-  background: var(--accent-blue);
+  background: var(--primary-blue);
   color: white;
   font-size: 0.7rem;
   font-weight: 700;
@@ -491,7 +534,7 @@ function logout() {
 
 .divider {
   height: 1px;
-  background: var(--border);
+  background: var(--border-subtle);
   margin: 4px 0;
 }
 
@@ -505,9 +548,18 @@ function logout() {
   gap: 4px;
 }
 
-.empty-sessions .icon { font-size: 1.5rem; opacity: 0.4; }
-.empty-sessions p { font-size: 0.82rem; font-weight: 500; }
-.empty-sessions .hint { font-size: 0.72rem; color: var(--text-muted); }
+.empty-sessions .icon {
+  font-size: 1.5rem;
+  opacity: 0.4;
+}
+.empty-sessions p {
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+.empty-sessions .hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
 
 .session-list {
   display: flex;
@@ -524,25 +576,28 @@ function logout() {
   border: 1px solid transparent;
   background: transparent;
   border-radius: 8px;
-  color: var(--text-secondary);
+  color: var(--text-sub);
   cursor: pointer;
-  transition: all var(--transition);
+  transition: all var(--transition-fast);
   text-align: left;
 }
 
 .session-card:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
+  background: var(--bg-card-hover);
+  color: var(--text-main);
 }
 
 .session-card.active {
   background: rgba(59, 130, 246, 0.12);
   border-color: rgba(59, 130, 246, 0.3);
-  color: var(--text-primary);
+  color: var(--text-main);
   font-weight: 600;
 }
 
-.item-icon { font-size: 0.9rem; opacity: 0.7; }
+.item-icon {
+  font-size: 0.9rem;
+  opacity: 0.7;
+}
 
 .session-title {
   flex: 1;
@@ -571,7 +626,7 @@ function logout() {
   padding: 3px 5px;
   border-radius: 4px;
   font-size: 0.8rem;
-  transition: all var(--transition);
+  transition: all var(--transition-fast);
 }
 
 .action-btn:hover {
@@ -580,13 +635,13 @@ function logout() {
 }
 
 .action-btn.delete:hover {
-  color: var(--accent-red);
+  color: var(--accent-rose);
   background: rgba(239, 68, 68, 0.15);
 }
 
 .session-card.editing {
-  background: var(--bg-tertiary);
-  border-color: var(--accent-blue);
+  background: var(--bg-card-hover);
+  border-color: var(--primary-blue);
 }
 
 .edit-input {
@@ -601,7 +656,7 @@ function logout() {
 
 .sidebar-footer {
   padding: 12px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -624,10 +679,10 @@ function logout() {
 .ws-select {
   width: 100%;
   padding: 6px 10px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
+  background: var(--bg-card-hover);
+  border: 1px solid var(--border-subtle);
   border-radius: 6px;
-  color: var(--text-primary);
+  color: var(--text-main);
   font-size: 0.8rem;
   outline: none;
   cursor: pointer;
@@ -640,14 +695,18 @@ function logout() {
   padding: 6px 8px;
   background: rgba(255, 255, 255, 0.03);
   border-radius: 8px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
 }
 
 .avatar {
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  background: linear-gradient(
+    135deg,
+    var(--primary-blue),
+    var(--accent-purple)
+  );
   color: white;
   font-weight: 700;
   font-size: 0.85rem;
@@ -667,7 +726,7 @@ function logout() {
 .user-name {
   font-size: 0.82rem;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--text-main);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -697,11 +756,11 @@ function logout() {
   cursor: pointer;
   padding: 4px 8px;
   border-radius: 6px;
-  transition: all var(--transition);
+  transition: all var(--transition-fast);
 }
 
 .logout-btn:hover {
   background: rgba(239, 68, 68, 0.15);
-  color: var(--accent-red);
+  color: var(--accent-rose);
 }
 </style>

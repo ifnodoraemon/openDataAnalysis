@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-const reportDraftMessage = "delivery_state=draft; no finalized report file yet."
+const reportDraftMessage = "报告当前为草稿，尚未生成定稿文件。"
 
 func reportDraftSuccess(toolName string, state *ReportState, fields map[string]interface{}) string {
 	payload := reportDraftPayload(state, fields)
@@ -41,9 +41,6 @@ func addEditScopeFailureFacts(payload map[string]interface{}, editState *ReportE
 	payload["active_edit_scope"] = scope
 	if scopeKind, ok := scope["scope_kind"].(string); ok && scopeKind != "" {
 		payload["scope_kind"] = scopeKind
-	}
-	if preserve, ok := scope["preserve_other_blocks"].(bool); ok {
-		payload["preserve_other_blocks"] = preserve
 	}
 	targetBlockID, _ := scope["target_block_id"].(string)
 	if strings.TrimSpace(targetBlockID) != "" {
@@ -90,7 +87,7 @@ func reportAlreadyFinalizedFailure(state *ReportState) string {
 	return toolFailure("report_finalize", "report_already_finalized", "delivery_state is already finalized; no new draft changes detected.", mergePayloads(
 		reportDraftPayload(state, nil),
 		map[string]interface{}{
-			"ui_summary": "delivery_state=finalized; no new draft changes detected.",
+			"ui_summary": "报告已经定稿，未检测到新的草稿变更。",
 		},
 	))
 }
@@ -123,9 +120,9 @@ func mergePayloads(base map[string]interface{}, extra map[string]interface{}) ma
 }
 
 func formatFinalizeBlockedSummary(count int) string {
-	return "finalize blocked: active_branch_count=" + strconv.Itoa(count)
+	return "报告定稿受阻，仍有 " + strconv.Itoa(count) + " 个活动目标分支。"
 }
 
 func formatFinalizeIssuesSummary(count int) string {
-	return "finalize blocked: finalize_issue_count=" + strconv.Itoa(count)
+	return "报告定稿受阻，仍有 " + strconv.Itoa(count) + " 个结构问题。"
 }

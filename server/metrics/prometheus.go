@@ -16,7 +16,7 @@ var (
 	HTTPRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "oda_http_requests_total",
-			Help: "Total number of HTTP requests processed by OpenDataAnalysis server.",
+			Help: "Total number of HTTP requests processed by the OpenDataAnalysis server.",
 		},
 		[]string{"code", "method", "path"},
 	)
@@ -30,10 +30,10 @@ var (
 		[]string{"method", "path"},
 	)
 
-	ActiveWSConnections = prometheus.NewGauge(
+	ActiveEventStreamConnections = prometheus.NewGauge(
 		prometheus.GaugeOpts{
-			Name: "oda_active_websocket_connections",
-			Help: "Number of currently active WebSocket client connections.",
+			Name: "oda_active_event_stream_connections",
+			Help: "Number of currently active SSE client connections.",
 		},
 	)
 
@@ -44,13 +44,25 @@ var (
 		},
 		[]string{"status"},
 	)
+	AgentRunsTotal             = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "oda_agent_runs_total", Help: "Agent runs by terminal event."}, []string{"status"})
+	ToolCallsTotal             = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "oda_tool_calls_total", Help: "Tool calls by tool name and result."}, []string{"tool", "status"})
+	ToolCallDuration           = prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "oda_tool_call_duration_seconds", Help: "Tool execution latency.", Buckets: prometheus.DefBuckets}, []string{"tool"})
+	AnalysisResultsTotal       = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "oda_analysis_results_total", Help: "Structured analysis results recorded by tool."}, []string{"tool"})
+	ReportFinalizeTotal        = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "oda_report_finalize_total", Help: "Report finalize attempts by result."}, []string{"status"})
+	SemanticConfirmationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "oda_semantic_confirmations_total", Help: "Semantic confirmations by scope and provenance."}, []string{"scope", "provenance"})
 )
 
 func init() {
 	prometheus.MustRegister(HTTPRequestsTotal)
 	prometheus.MustRegister(HTTPRequestDuration)
-	prometheus.MustRegister(ActiveWSConnections)
+	prometheus.MustRegister(ActiveEventStreamConnections)
 	prometheus.MustRegister(PythonExecutionsTotal)
+	prometheus.MustRegister(AgentRunsTotal)
+	prometheus.MustRegister(ToolCallsTotal)
+	prometheus.MustRegister(ToolCallDuration)
+	prometheus.MustRegister(AnalysisResultsTotal)
+	prometheus.MustRegister(ReportFinalizeTotal)
+	prometheus.MustRegister(SemanticConfirmationsTotal)
 }
 
 // Handler returns an http.Handler for the Prometheus /metrics endpoint.

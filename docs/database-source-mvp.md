@@ -1,159 +1,96 @@
-# 数据库数据源
+# Database Source Boundaries
 
-更新日期：2026-06-24
+Updated: 2026-08-11
 
-本文档记录当前数据库数据源实现和边界。历史 source-first 计划已合并进本文档；过期草案不再保留。
+This document records the current database-source implementation and its boundaries. Obsolete source-first drafts have been consolidated here.
 
-## 当前状态
+## Current state
 
-已支持 PostgreSQL 和 MySQL workspace data source，并以 snapshot import 方式导入到当前 session 的 SQLite 分析库。
+PostgreSQL and MySQL workspace sources are supported through snapshot imports into the current session's SQLite analysis database.
 
-后端已引入 `SourceConnector` 抽象：
+The backend exposes a `SourceConnector` boundary:
 
-- `file_upload`、`postgres_connection` 和 `mysql_connection` 都通过 connector 执行 catalog/test/import 等运行时能力。
-- connector 负责 config 规范化、credential 加密、公开配置序列化和运行时导入。
-- 导入后的 schema 提取、snapshot completion、semantic profile 创建、截断/估计 warning 写入走统一收尾管线。
-- SQL 配置已从专用 `database_connections` 升级为通用 `source_configs`，后续新增商业数据源不再需要新增专用配置表。
+- `file_upload`, `postgres_connection`, and `mysql_connection` use connector capabilities for catalog, test, and import operations.
+- A connector validates configuration, encrypts credentials, serializes public configuration, and performs its source-specific import.
+- Schema extraction, snapshot completion, structural profile creation, and truncation or estimate warnings share one completion pipeline.
+- Every import uses a distinct analysis table. The active binding changes only after successful completion, then superseded snapshots are cleaned up. A failed import does not replace the active snapshot.
+- SQL configuration uses generic `source_configs`, so a new connector does not require another type-specific configuration table.
 
-当前不支持：
+The runtime does not currently provide live upstream queries, database writes, arbitrary database drivers, live cross-database joins, or upstream schema changes.
 
-- live upstream query
-- 写回数据库
-- 任意数据库类型
-- 跨数据库实时 join
-- 自动修改上游 schema
+## Why snapshot import
 
-## 为什么先做 Snapshot Import
+The analysis execution layer is session-scoped SQLite. A source object becomes a fixed snapshot before the model uses the same SQL, chart, and report tools that it uses for uploaded files. This keeps analysis reproducible, makes limits and permissions enforceable, gives files and databases the same observation surface, and avoids exposing an arbitrary upstream SQL endpoint.
 
-当前分析执行层是 session-scoped SQLite。SQL 表/视图先导入成固定 snapshot，再由 agent 使用同一套 `data_query_sql`、图表和报告工具分析。
+## Domain model
 
-这样做的原因：
-
-- 分析可复现，报告能追溯到导入时刻。
-- 权限、超时、行数上限和资源消耗更容易控制。
-- 文件上传和数据库导入在 agent 观察面中保持同质。
-- 不把上游数据库暴露为任意 SQL 执行面。
-
-## 领域模型
-
-| 实体 | 作用 |
+| Entity | Purpose |
 |---|---|
-| `DataSource` | 工作区级数据源；当前包括 `file_upload`、`postgres_connection` 和 `mysql_connection` |
-| `SourceConfig` | connector 类型、公开配置 JSON、加密 credential、测试状态 |
-| `SourceSnapshot` | 某个 source 在某个 session 中导入到 SQLite 的固定快照 |
-| `SessionSourceBinding` | session 当前绑定的 source/object -> active snapshot |
-| `SemanticProfile` | schema、候选语义、候选 join、歧义、warning 等结构化事实 |
-| `SemanticConfirmation` | 用户对口径、时间列、单位或 join 的 session/workspace 级确认 |
-| `SemanticAsset` | workspace 级可复用语义资产，由用户确认沉淀，按 schema signature 复用 |
-| `AuditEvent` | 关键数据操作和语义资产变更的审计事件 |
+| `DataSource` | Workspace source identity and exact connector type |
+| `SourceConfig` | Public connector configuration, encrypted credentials, and test state |
+| `SourceSnapshot` | Fixed source object imported into one session's SQLite database |
+| `SessionSourceBinding` | Current source-object identity and active snapshot for a session |
+| `SemanticProfile` | Observed schema, sampling facts, column statistics, and warnings |
+| `SemanticConfirmation` | Explicit user-authorized JSON patch and its session or workspace scope |
+| `SemanticAsset` | Reusable workspace patch fact queried by schema signature |
+| `AuditEvent` | Durable fact about a material data or semantic-state change |
 
-## SQL 连接边界
+## SQL connection boundary
 
-- PostgreSQL 使用 `pgx/v5/stdlib`，上游连接设置 `default_transaction_read_only=on`。
-- MySQL 使用 `go-sql-driver/mysql`，运行时只生成 allowlist 对象的 `SELECT *` import 查询。
-- 创建 SQL 数据源时要求 `AUTH_SECRET` 长度至少 32，用于 AES-GCM 加密密码。
-- 只允许导入 allowlist 中的 schema/table/view。
-- catalog API 只返回 allowlist 对象，不扫描整库暴露元数据。
+- PostgreSQL uses `pgx/v5/stdlib` with `default_transaction_read_only=on`.
+- MySQL uses `go-sql-driver/mysql`; import queries select only declared allowlist objects.
+- PostgreSQL `ssl_mode` and MySQL `tls_mode` are explicit. The runtime does not infer transport mode from a host, port, or environment.
+- Creating a SQL source requires an `AUTH_SECRET` of at least 32 characters for AES-GCM credential encryption.
+- Only allowlisted schema, table, or view objects can be imported.
+- Catalog operations return the allowlist and do not scan an entire database.
 
-## 导入边界
+## Import boundary
 
-默认配置：
+The default limit is:
 
 ```env
 SQL_IMPORT_ROW_LIMIT=1000000
 ```
 
-行为：
+`0` means unlimited. A positive limit reads at most `row_limit + 1` rows to observe truncation. A truncated snapshot persists `import_truncated=true` and `import_row_limit`; profile and UI surfaces disclose those facts.
 
-- `0` 表示不限制导入行数。
-- 大于 `0` 时，导入查询使用 `LIMIT row_limit + 1` 探测是否被截断。
-- 如果超过上限，snapshot 保存 `import_truncated=true` 和 `import_row_limit`。
-- profile 和 UI 会明确显示截断状态，报告不应把受限快照包装成全量事实。
+Persisted profiles describe imported snapshots. Callers of `data_describe_table` provide `sample_rows` explicitly: `0` requests exact statistics and a positive value requests bounded structural sampling. The tool returns source rows, sampled rows, method, and estimate state without choosing that trade-off for the model.
 
-数据规模分层：
+## Semantic profiles and confirmations
 
-| 规模 | 行数 | profile mode |
-|---|---:|---|
-| small | < 10,000 | exact |
-| medium | 10,000 - 99,999 | mixed |
-| large | 100,000 - 999,999 | sampled |
-| xlarge | >= 1,000,000 | sampled |
+An imported snapshot produces a `SemanticProfile` containing structural observations: schema, declared types, row and column counts, null rates, distinct or sampled values, sampling method, and operational warnings. The runtime does not infer metrics, units, joins, business aliases, primary time columns, or numeric meaning from names or value formats.
 
-## 语义画像和确认
+A `SemanticConfirmation` stores an explicit user-authorized patch. Session scope affects one session; workspace scope makes the patch discoverable when the schema signature matches. Confirmations remain separate from observations and are not applied automatically.
 
-导入完成后会生成 `SemanticProfile`：
+A workspace confirmation also creates a `SemanticAsset`. The complete JSON patch is stored under an opaque confirmation identity; the runtime does not split, merge, or interpret its fields. Matching assets are observation facts, not keyword triggers or workflow instructions.
 
-- 确定性 schema 和列统计始终可用。
-- 配置 LLM 时，可补充业务别名和关系候选。
-- sampled/mixed profile 中估计字段会标记为 `estimated`。
-- 多时间列、多个指标口径、单位冲突和 join 冲突会保留为 `ambiguities`。
-
-用户确认通过 `SemanticConfirmation` 保存：
-
-- `session` 范围只影响当前会话。
-- `workspace` 范围可在 schema signature 匹配时复用。
-- session override 后应用，覆盖 workspace override。
-
-workspace 范围的确认还会沉淀为 `SemanticAsset`：
-
-- 当前从用户确认事实中提取主时间列、指标定义、单位标注、join 候选和通用 override。
-- 新 profile 创建时会读取同 workspace、同 schema signature 的语义资产并自动应用。
-- 语义资产是复用事实，不是关键词触发器，也不规定 agent 下一步流程。
-
-关键事件会写入 `AuditEvent`：
-
-- 数据源导入完成后记录 source、snapshot、目标分析表、行列数、截断状态和 profile ID。
-- profile 确认和语义资产 upsert 会记录 actor、scope、schema signature 和资产键。
+Audit events record import completion, source and snapshot identity, target table, shape, truncation, profile identity, actor, scope, schema signature, and semantic asset identity where applicable.
 
 ## API
 
-- `POST /api/data-sources`：创建 connector-backed source，请求体使用 `source_type`、`config`、`credential`。
-- `GET /api/data-sources`：列出工作区 sources。
-- `PUT /api/data-sources/{sourceID}`：更新 source 名称、connector config 或 credential。
-- `DELETE /api/data-sources/{sourceID}`：删除 workspace source，并移除相关 snapshot/profile。
-- `POST /api/data-sources/{sourceID}/test`：测试连接和 allowlist。
-- `GET /api/data-sources/{sourceID}/catalog`：返回 allowlist 对象。
-- `POST /api/data-sources/{sourceID}/import`：导入 allowlist 对象到 session snapshot。
-- `GET /api/sessions/{sessionID}/sources`：查看当前 session source/snapshot/profile 摘要。
-- `GET /api/semantic-profiles/{profileID}`：查看 profile 详情。
-- `POST /api/semantic-profiles/{profileID}/confirm`：保存确认或覆盖。
+- `POST /api/data-sources`: create a connector-backed source.
+- `GET /api/data-sources`: list workspace sources.
+- `PUT /api/data-sources/{sourceID}`: update exact source name, configuration, or credentials.
+- `DELETE /api/data-sources/{sourceID}`: delete a workspace source and related snapshots or profiles.
+- `POST /api/data-sources/{sourceID}/test`: test configured access.
+- `GET /api/data-sources/{sourceID}/catalog`: list declared importable objects.
+- `POST /api/data-sources/{sourceID}/import`: import one declared object into a session snapshot.
+- `GET /api/sessions/{sessionID}/sources`: inspect source, snapshot, and profile summaries.
+- `GET /api/semantic-profiles/{profileID}`: inspect a profile.
+- `POST /api/semantic-profiles/{profileID}/confirm`: persist an authorized patch.
 
-## Source Connector 边界
+## Connector boundary
 
-Connector 负责数据源类型相关的运行时能力：
+`NormalizeConfig` validates exact connector configuration and encrypts credentials when needed. `PublicConfig` returns non-secret facts. `Test` observes configured access. `Catalog` returns the explicitly allowed import surface. `Import` materializes one selected object into session SQLite.
 
-- `NormalizeConfig`：校验并规范化 connector 配置，必要时加密 credential。
-- `PublicConfig`：返回不含 secret 的配置摘要和最近测试状态。
-- `Test`：验证文件、连接或外部系统对象是否可访问。
-- `Catalog`：返回当前 source 可导入对象，且只暴露允许范围。
-- `Import`：把指定对象物化到 session analysis SQLite。
+Connectors do not decide agent behavior, generate reports, or expose live upstream query access. Every successful import produces a `SourceSnapshot` and structural profile facts.
 
-Connector 不负责 agent 决策、不直接生成报告，也不把上游 live query 暴露给 agent。所有 connector import 成功后都必须产出 `SourceSnapshot` 和尽可能完整的 `SemanticProfile`。
+## Agent tool surface
 
-## Agent 工具面
+Observation tools include `state_session_sources_inspect`, `state_semantic_profile_inspect`, `state_governance_inspect`, and the user-authorized action `state_source_confirm_profile`. Analysis tools operate only on session snapshots: `data_list_tables`, `data_describe_table`, and `data_query_sql`.
 
-主要 observation tools：
+`state_governance_inspect` returns generic governance facts such as snapshot state, truncation, profile warnings, authorized patches, and reusable asset counts. It does not return `next_action` or select behavior from an industry or workflow.
 
-- `state_session_sources_inspect`
-- `state_semantic_profile_inspect`
-- `state_governance_inspect`
-- `state_source_confirm_profile`
+## Future direction
 
-分析工具仍只面向 session SQLite snapshot：
-
-- `data_list_tables`
-- `data_describe_table`
-- `data_query_sql`
-
-Agent 不直接生成上游数据库 SQL。
-
-`state_governance_inspect` 只返回通用数据治理事实，例如 snapshot 状态、导入截断、profile warning、语义歧义和可复用语义资产数量；它不返回 `next_action`，也不按固定行业或工作流触发行为。
-
-## 后续方向
-
-后续如果要支持 live query 或更多 SaaS/API connector，应作为独立执行层或 connector 能力设计，并单独处理：
-
-- 上游 SQL 权限和超时。
-- pushdown 与 session snapshot 的一致性。
-- 报告复现和数据期间标注。
-- 大表筛选、分区、增量导入或 DuckDB/ClickHouse 等执行引擎选择。
+Live query or additional connector types require an explicit execution boundary for upstream permissions, timeouts, pushdown consistency, report reproducibility, data-period metadata, partitioning, incremental import, and execution-engine selection. Those capabilities are not guessed from the current connector type.

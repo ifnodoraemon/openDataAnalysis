@@ -2,8 +2,6 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
@@ -53,11 +51,8 @@ func (r *SourceSnapshotRepository) Create(ctx context.Context, snapshot *domain.
 func (r *SourceSnapshotRepository) GetByID(ctx context.Context, id string) (*domain.SourceSnapshot, error) {
 	row := r.db.QueryRow(ctx, `SELECT `+snapshotCols+` FROM source_snapshots WHERE id = $1`, id)
 	s, err := scanSnapshot(row)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, sql.ErrNoRows
-	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get source snapshot by id: %w", err)
+		return nil, fmt.Errorf("failed to get source snapshot by id: %w", normalizeLookupError(err))
 	}
 	return s, nil
 }

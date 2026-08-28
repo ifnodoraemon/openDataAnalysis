@@ -14,6 +14,13 @@ import (
 	"github.com/ifnodoraemon/openDataAnalysis/tools"
 )
 
+func reportLifecycleTestRegistry() *tools.Registry {
+	registry := tools.NewRegistry()
+	registry.Register(&tools.ManageReportBlocksTool{})
+	registry.Register(&tools.FinalizeReportTool{})
+	return registry
+}
+
 func TestRunBeforeUserRunHooksStopsOnError(t *testing.T) {
 	t.Parallel()
 
@@ -48,19 +55,20 @@ func TestReportLifecycleHookTriggersDerivedReportEffects(t *testing.T) {
 
 	var previewCount, finalizeCount int
 	scope := runtimeEventScope{
+		session:           &session.Session{Registry: reportLifecycleTestRegistry()},
 		emitReportPreview: func() { previewCount++ },
 		finalizeReport:    func() error { finalizeCount++; return nil },
 	}
 
-	reportLifecycleHook(scope, agent.WSEvent{
+	reportLifecycleHook(scope, agent.RuntimeEvent{
 		Type: agent.EventToolResult,
 		Data: agent.ToolResultData{Name: "report_manage_blocks", Success: true},
 	})
-	reportLifecycleHook(scope, agent.WSEvent{
+	reportLifecycleHook(scope, agent.RuntimeEvent{
 		Type: agent.EventToolResult,
 		Data: agent.ToolResultData{Name: "report_finalize", Success: true},
 	})
-	reportLifecycleHook(scope, agent.WSEvent{
+	reportLifecycleHook(scope, agent.RuntimeEvent{
 		Type: agent.EventToolResult,
 		Data: agent.ToolResultData{Name: "report_finalize", Success: false},
 	})
@@ -80,11 +88,12 @@ func TestReportLifecycleHookFailsRunOnFinalizeError(t *testing.T) {
 	cancelCalled := false
 	sess := &session.Session{
 		ActiveRun:   &session.RunState{RunID: "run_99", Status: "running", Cancel: func() { cancelCalled = true }},
+		Registry:    reportLifecycleTestRegistry(),
 		ReportState: &tools.ReportState{NeedsFinalize: false},
 		EditState: &tools.ReportEditState{
-			Mode:          "regenerate_selection",
-			TargetBlockID: "blk_99",
-			SelectionText: "selected text",
+			ScopeKindValue: "partial_selection",
+			TargetBlockID:  "blk_99",
+			SelectionText:  "selected text",
 		},
 	}
 
@@ -106,7 +115,7 @@ func TestReportLifecycleHookFailsRunOnFinalizeError(t *testing.T) {
 		},
 	}
 
-	reportLifecycleHook(scope, agent.WSEvent{
+	reportLifecycleHook(scope, agent.RuntimeEvent{
 		Type: agent.EventToolResult,
 		Data: agent.ToolResultData{Name: "report_finalize", Success: true, Result: `{"report_title":"零售分析","author":"AI"}`},
 	})
@@ -129,8 +138,8 @@ func TestReportLifecycleHookFailsRunOnFinalizeError(t *testing.T) {
 	if sess.ReportState == nil || !sess.ReportState.NeedsFinalize {
 		t.Fatalf("expected finalize failure to roll report state back to draft")
 	}
-	if sess.ReportState.FinalTitle != "零售分析" || sess.ReportState.FinalAuthor != "AI" {
-		t.Fatalf("expected finalize metadata to be preserved for retry, got %#v", sess.ReportState)
+	if sess.ReportState.FinalTitle != "" || sess.ReportState.FinalAuthor != "" {
+		t.Fatalf("expected lifecycle hook not to interpret tool-result fields, got %#v", sess.ReportState)
 	}
 }
 
@@ -149,7 +158,7 @@ func TestRunLifecycleHookIgnoresStaleUserRequestInput(t *testing.T) {
 		},
 	}
 
-	runLifecycleHook(scope, agent.WSEvent{
+	runLifecycleHook(scope, agent.RuntimeEvent{
 		Type: agent.EventUserRequestInput,
 		Data: agent.AskUserData{Question: "stale?"},
 	})
@@ -171,9 +180,9 @@ func TestRunLifecycleHookUpdatesSessionStateAndPersistenceCallbacks(t *testing.T
 	sess := &session.Session{
 		ActiveRun: &session.RunState{RunID: "run_1", Status: "running"},
 		EditState: &tools.ReportEditState{
-			Mode:          "regenerate_selection",
-			TargetBlockID: "blk_1",
-			SelectionText: "selected text",
+			ScopeKindValue: "partial_selection",
+			TargetBlockID:  "blk_1",
+			SelectionText:  "selected text",
 		},
 	}
 	scope := runtimeEventScope{
@@ -186,11 +195,11 @@ func TestRunLifecycleHookUpdatesSessionStateAndPersistenceCallbacks(t *testing.T
 			statuses = append(statuses, status)
 		},
 		setRunSummary: func(summary string) {
-			summaries = append(summaries, strings.TrimSpace(summary))
+			summaries = append(summaries, summary)
 		},
 	}
 
-	runLifecycleHook(scope, agent.WSEvent{
+	runLifecycleHook(scope, agent.RuntimeEvent{
 		Type: agent.EventUserRequestInput,
 		Data: agent.AskUserData{Question: "next?"},
 	})
@@ -198,14 +207,14 @@ func TestRunLifecycleHookUpdatesSessionStateAndPersistenceCallbacks(t *testing.T
 		t.Fatalf("expected run to enter waiting state, got waiting=%t runID=%q", waiting, runID)
 	}
 
-	runLifecycleHook(scope, agent.WSEvent{
+	runLifecycleHook(scope, agent.RuntimeEvent{
 		Type: agent.EventRunCompleted,
 		Data: agent.CompleteData{Summary: " done "},
 	})
 	if len(statuses) != 2 || statuses[0] != domain.RunStatusWaitingUserInput || statuses[1] != domain.RunStatusCompleted {
 		t.Fatalf("unexpected status updates: %v", statuses)
 	}
-	if len(summaries) != 1 || summaries[0] != "done" {
+	if len(summaries) != 1 || summaries[0] != " done " {
 		t.Fatalf("unexpected summary updates: %v", summaries)
 	}
 	if sess.ActiveRun != nil {
@@ -227,9 +236,9 @@ func TestRunLifecycleHookIgnoresStaleTerminalEvents(t *testing.T) {
 	sess := &session.Session{
 		ActiveRun: &session.RunState{RunID: "run_new", Status: "running"},
 		EditState: &tools.ReportEditState{
-			Mode:          "regenerate_selection",
-			TargetBlockID: "blk_new",
-			SelectionText: "new selected text",
+			ScopeKindValue: "partial_selection",
+			TargetBlockID:  "blk_new",
+			SelectionText:  "new selected text",
 		},
 	}
 	scope := runtimeEventScope{
@@ -243,7 +252,7 @@ func TestRunLifecycleHookIgnoresStaleTerminalEvents(t *testing.T) {
 		},
 	}
 
-	runLifecycleHook(scope, agent.WSEvent{
+	runLifecycleHook(scope, agent.RuntimeEvent{
 		Type: agent.EventError,
 		Data: agent.ErrorData{Message: "stale failure"},
 	})
@@ -276,15 +285,15 @@ func TestRunLoggingHookWritesEventLogs(t *testing.T) {
 		runID:   "run_1",
 	}
 
-	runLoggingHook(scope, agent.WSEvent{
+	runLoggingHook(scope, agent.RuntimeEvent{
 		Type: agent.EventUserRequestInput,
 		Data: agent.AskUserData{Question: "next?"},
 	})
-	runLoggingHook(scope, agent.WSEvent{
+	runLoggingHook(scope, agent.RuntimeEvent{
 		Type: agent.EventRunCompleted,
 		Data: agent.CompleteData{Summary: " done "},
 	})
-	runLoggingHook(scope, agent.WSEvent{
+	runLoggingHook(scope, agent.RuntimeEvent{
 		Type: agent.EventError,
 		Data: agent.ErrorData{Message: "boom"},
 	})
@@ -307,23 +316,26 @@ func TestRuntimeEventDispatcherRoutesChildRunEventsWithoutRootHooks(t *testing.T
 	delivered := make([]string, 0, 2)
 	hooked := false
 	dispatcher := runtimeEventDispatcher{
-		deliver: func(ev agent.WSEvent) {
+		deliver: func(ev agent.RuntimeEvent) error {
 			delivered = append(delivered, "root:"+ev.Type)
+			return nil
 		},
-		deliverToRun: func(runID string, ev agent.WSEvent) {
+		deliverToRun: func(runID string, ev agent.RuntimeEvent) error {
 			delivered = append(delivered, runID+":"+ev.Type)
+			return nil
 		},
 		scope: runtimeEventScope{
-			runID: "root_run",
+			runID:   "root_run",
+			session: &session.Session{Registry: reportLifecycleTestRegistry()},
 		},
 		hooks: []runtimeEventHook{
-			func(runtimeEventScope, agent.WSEvent) {
+			func(runtimeEventScope, agent.RuntimeEvent) {
 				hooked = true
 			},
 		},
 	}
 
-	dispatcher.Emit(agent.WSEvent{
+	dispatcher.Emit(agent.RuntimeEvent{
 		Type:  agent.EventAssistantStatus,
 		RunID: "child_run",
 		Data:  agent.AssistantStatusData{Content: "child"},
@@ -342,17 +354,18 @@ func TestRuntimeEventDispatcherStillEmitsChildReportPreview(t *testing.T) {
 
 	previewRuns := make([]string, 0, 1)
 	dispatcher := runtimeEventDispatcher{
-		deliver:      func(agent.WSEvent) {},
-		deliverToRun: func(string, agent.WSEvent) {},
+		deliver:      func(agent.RuntimeEvent) error { return nil },
+		deliverToRun: func(string, agent.RuntimeEvent) error { return nil },
 		emitChildPreview: func(runID string) {
 			previewRuns = append(previewRuns, runID)
 		},
 		scope: runtimeEventScope{
-			runID: "root_run",
+			runID:   "root_run",
+			session: &session.Session{Registry: reportLifecycleTestRegistry()},
 		},
 	}
 
-	dispatcher.Emit(agent.WSEvent{
+	dispatcher.Emit(agent.RuntimeEvent{
 		Type:  agent.EventToolResult,
 		RunID: "child_run",
 		Data:  agent.ToolResultData{Name: "report_manage_blocks", Success: true},

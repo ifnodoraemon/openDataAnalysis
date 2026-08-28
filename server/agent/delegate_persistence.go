@@ -12,7 +12,7 @@ type ChildRunStart struct {
 
 type DelegateRunPersistence interface {
 	StartChildRun(ctx context.Context, input ChildRunStart) (string, error)
-	AppendChildEvent(ctx context.Context, childRunID string, ev WSEvent) error
+	AppendChildEvent(ctx context.Context, childRunID string, ev RuntimeEvent) error
 	UpdateChildRunStatus(ctx context.Context, childRunID string, status string, errMsg *string) error
 	UpdateChildRunSummary(ctx context.Context, childRunID, summary string) error
 	// UpdateChildRunTokens 记录子代理累计的 prompt/completion token 消耗。

@@ -39,7 +39,7 @@ func (e reportAlreadyFinalizedError) Error() string {
 	return "report already finalized"
 }
 
-func finalizeReportState(state *ReportState, subgoals SubgoalChecker, params reportFinalizeParams, semanticIssues []string) (reportFinalizeResult, error) {
+func finalizeReportState(state *ReportState, subgoals SubgoalChecker, params reportFinalizeParams) (reportFinalizeResult, error) {
 	if state == nil {
 		return reportFinalizeResult{}, fmt.Errorf("report state is not initialized")
 	}
@@ -48,7 +48,9 @@ func finalizeReportState(state *ReportState, subgoals SubgoalChecker, params rep
 		return reportFinalizeResult{}, reportAlreadyFinalizedError{}
 	}
 
-	params.Author = strings.TrimSpace(params.Author)
+	if strings.TrimSpace(params.ReportTitle) == "" {
+		return reportFinalizeResult{}, reportFinalizeIssuesError{Issues: []string{"report_title_missing"}}
+	}
 
 	if subgoals != nil {
 		canFinalize, blockers := subgoals.CanFinalize()
@@ -60,10 +62,6 @@ func finalizeReportState(state *ReportState, subgoals SubgoalChecker, params rep
 	if issues := reportFinalizeIssues(state); len(issues) > 0 {
 		return reportFinalizeResult{}, reportFinalizeIssuesError{Issues: issues}
 	}
-	if len(semanticIssues) > 0 {
-		return reportFinalizeResult{}, reportFinalizeIssuesError{Issues: semanticIssues}
-	}
-
 	state.FinalTitle = params.ReportTitle
 	state.FinalAuthor = params.Author
 	state.NeedsFinalize = false

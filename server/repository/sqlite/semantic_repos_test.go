@@ -25,9 +25,9 @@ func TestSemanticAssetRepositoryUpsertAndList(t *testing.T) {
 		WorkspaceID:               "ws_1",
 		SourceID:                  "src_1",
 		SchemaSignature:           "sig_1",
-		AssetKind:                 domain.SemanticAssetKindMetricDefinition,
-		AssetKey:                  "metric:latency_ms",
-		AssetValueJSON:            `{"column_name":"latency_ms","definition":"p95 latency"}`,
+		AssetKind:                 domain.SemanticAssetKindPatch,
+		AssetKey:                  "latency_definition",
+		AssetValueJSON:            `{"latency_definition":"p95 latency"}`,
 		CreatedFromProfileID:      "sp_1",
 		CreatedFromConfirmationID: "sc_1",
 		CreatedBy:                 "user_1",
@@ -39,7 +39,7 @@ func TestSemanticAssetRepositoryUpsertAndList(t *testing.T) {
 	}
 
 	asset.SourceID = "src_2"
-	asset.AssetValueJSON = `{"column_name":"latency_ms","definition":"p99 latency"}`
+	asset.AssetValueJSON = `{"latency_definition":"p99 latency"}`
 	asset.UpdatedAt = now.Add(time.Minute)
 	if err := repo.Upsert(context.Background(), asset); err != nil {
 		t.Fatalf("upsert asset: %v", err)
@@ -61,7 +61,7 @@ func TestSemanticAssetRepositoryUpsertAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list by workspace: %v", err)
 	}
-	if len(workspaceAssets) != 1 || workspaceAssets[0].AssetKey != "metric:latency_ms" {
+	if len(workspaceAssets) != 1 || workspaceAssets[0].AssetKey != "latency_definition" {
 		t.Fatalf("unexpected workspace assets: %#v", workspaceAssets)
 	}
 }

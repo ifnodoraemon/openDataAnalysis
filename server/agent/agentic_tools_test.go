@@ -4,7 +4,15 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	odatools "github.com/ifnodoraemon/openDataAnalysis/tools"
 )
+
+func askUserTestRegistry() *odatools.Registry {
+	registry := odatools.NewRegistry()
+	registry.Register(&AskUserTool{})
+	return registry
+}
 
 func TestAskUserToolSupportsOptionsAndCustomAnswer(t *testing.T) {
 	t.Parallel()
@@ -22,6 +30,7 @@ func TestAskUserToolSupportsOptionsAndCustomAnswer(t *testing.T) {
 		"context_ref":"orders.amount",
 		"input_hint":"直接输入要采用的口径",
 		"required":true,
+		"allow_custom":true,
 		"options":[{"id":"gross","label":"Gross"}],
 		"selection_mode":"multiple"
 	}`))
@@ -71,6 +80,8 @@ func TestProvideAskUserResultStoresStructuredToolResult(t *testing.T) {
 	t.Parallel()
 
 	engine := &Engine{
+		registry:             askUserTestRegistry(),
+		confirmationReceipts: make(map[string]*ConfirmationReceipt),
 		history: []ConversationItem{
 			{
 				Role: LLMRoleAssistant,
@@ -78,7 +89,8 @@ func TestProvideAskUserResultStoresStructuredToolResult(t *testing.T) {
 					{
 						ID: "call_1",
 						Function: LLMFunctionCall{
-							Name: "user_request_input",
+							Name:      "user_request_input",
+							Arguments: `{"question":"Choose a value","required":true,"selection_mode":"single","allow_custom":true}`,
 						},
 					},
 				},
@@ -86,7 +98,7 @@ func TestProvideAskUserResultStoresStructuredToolResult(t *testing.T) {
 		},
 	}
 	answer := `{"response_type":"selection","selected_option_ids":["gross"],"custom_response":""}`
-	if err := engine.ProvideAskUserResult(answer); err != nil {
+	if err := engine.ProvideAskUserResult(answer, "user_1"); err != nil {
 		t.Fatalf("ProvideAskUserResult: %v", err)
 	}
 	if len(engine.history) != 2 || engine.history[1].Role != LLMRoleTool || engine.history[1].ToolCallID != "call_1" {
@@ -100,9 +112,92 @@ func TestProvideAskUserResultStoresStructuredToolResult(t *testing.T) {
 	if payload["ok"] != true || payload["tool"] != "user_request_input" || payload["response_json"] != true {
 		t.Fatalf("unexpected user input tool payload: %#v", payload)
 	}
+	if _, exists := payload["confirmation_receipt_id"]; exists || len(engine.confirmationReceipts) != 0 {
+		t.Fatalf("ordinary clarification must not mint an action receipt, got %#v", payload)
+	}
 	response, ok := payload["response"].(map[string]interface{})
 	if !ok || response["response_type"] != "selection" {
 		t.Fatalf("expected parsed response object, got %#v", payload["response"])
+	}
+}
+
+func TestActionAuthorizationReceiptBindsActorActionResourceAndPayload(t *testing.T) {
+	t.Parallel()
+	engine := &Engine{
+		registry:             askUserTestRegistry(),
+		confirmationReceipts: make(map[string]*ConfirmationReceipt),
+		history: []ConversationItem{{Role: LLMRoleAssistant, ToolCalls: []LLMToolCall{{
+			ID: "call_auth", Function: LLMFunctionCall{Name: "user_request_input", Arguments: `{"question":"approve?","authorization":{"action":"profile_patch_commit","resource_ref":"sp_1","payload_json":"{\"scope\":\"session\",\"overrides\":{\"time\":\"dt\"}}"}}`},
+		}}}},
+	}
+	answer := `{"response_type":"authorization","authorization_decision":"approve","action":"profile_patch_commit","resource_ref":"sp_1"}`
+	if err := engine.ProvideAskUserResult(answer, "user_1"); err != nil {
+		t.Fatalf("ProvideAskUserResult: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(engine.history[1].Content), &result); err != nil {
+		t.Fatal(err)
+	}
+	receiptID, _ := result["authorization_receipt_id"].(string)
+	if !strings.HasPrefix(receiptID, "ucr_") {
+		t.Fatalf("expected authorization receipt, got %#v", result)
+	}
+	commits := 0
+	err := engine.CommitWithConfirmationReceipt(receiptID, "profile_patch_commit", "sp_1", `{"overrides":{"time":"dt"},"scope":"session"}`, func(actor string) error {
+		if actor != "user_1" {
+			t.Fatalf("unexpected actor %q", actor)
+		}
+		commits++
+		return nil
+	})
+	if err != nil || commits != 1 {
+		t.Fatalf("authorized commit failed commits=%d err=%v", commits, err)
+	}
+	if err := engine.CommitWithConfirmationReceipt(receiptID, "profile_patch_commit", "sp_1", `{"scope":"session","overrides":{"time":"dt"}}`, func(string) error { return nil }); err == nil {
+		t.Fatal("expected single-use receipt to reject replay")
+	}
+}
+
+func TestActionAuthorizationRejectDoesNotMintReceipt(t *testing.T) {
+	t.Parallel()
+	engine := &Engine{
+		registry:             askUserTestRegistry(),
+		confirmationReceipts: make(map[string]*ConfirmationReceipt),
+		history: []ConversationItem{{Role: LLMRoleAssistant, ToolCalls: []LLMToolCall{{
+			ID: "call_auth", Function: LLMFunctionCall{Name: "user_request_input", Arguments: `{"question":"approve?","authorization":{"action":"write","resource_ref":"r1","payload_json":"{}"}}`},
+		}}}},
+	}
+	answer := `{"response_type":"authorization","authorization_decision":"reject","action":"write","resource_ref":"r1"}`
+	if err := engine.ProvideAskUserResult(answer, "user_1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(engine.confirmationReceipts) != 0 || strings.Contains(engine.history[1].Content, "authorization_receipt_id") {
+		t.Fatalf("rejection must not authorize action: %#v", engine.confirmationReceipts)
+	}
+}
+
+func TestActionAuthorizationReceiptRejectsPayloadMismatch(t *testing.T) {
+	t.Parallel()
+	payloadHash, err := authorizationPayloadHash(`{"value":1}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := &Engine{confirmationReceipts: map[string]*ConfirmationReceipt{"ucr_1": {ID: "ucr_1", ActorUserID: "u1", Action: "write", ResourceRef: "r1", PayloadHash: payloadHash}}}
+	called := false
+	err = engine.CommitWithConfirmationReceipt("ucr_1", "write", "r1", `{"value":2}`, func(string) error { called = true; return nil })
+	if err == nil || called {
+		t.Fatalf("mismatched payload must be blocked before commit, called=%v err=%v", called, err)
+	}
+}
+
+func TestParseAskUserAuthorizationUsesRuntimeOwnedDecisionOptions(t *testing.T) {
+	t.Parallel()
+	payload, err := parseAskUserToolCallArguments(`{"question":"批准变更？","allow_custom":false,"selection_mode":"multiple","options":[{"id":"yes","label":"随意标签"}],"authorization":{"action":"write","resource_ref":"r1","payload_json":"{\"value\":1}"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.SelectionMode != "single" || payload.AllowCustom || len(payload.Options) != 2 || payload.Options[0].ID != "approve" || payload.Options[1].ID != "reject" {
+		t.Fatalf("expected fixed authorization decision surface, got %#v", payload)
 	}
 }
 
@@ -116,6 +211,7 @@ func TestParseAskUserToolCallArgumentsUsesCurrentProtocol(t *testing.T) {
 		"context_ref":"orders.amount",
 		"input_hint":"补充口径说明",
 		"required":true,
+		"allow_custom":true,
 		"selection_mode":"multiple",
 		"options":[{"id":"gross","label":"Gross","hint":"含税"}]
 	}`)
@@ -138,6 +234,8 @@ func TestParseAskUserToolCallArgumentsSelectionModeSingle(t *testing.T) {
 
 	payload, err := parseAskUserToolCallArguments(`{
 		"question":"您希望从哪个维度进行深度对比分析？",
+		"required":true,
+		"allow_custom":false,
 		"selection_mode":"single",
 		"options":[
 			{"id":"channel_compare","label":"营销渠道全面对比"},
@@ -158,6 +256,8 @@ func TestParseAskUserToolCallArgumentsSelectionModeMultipleEnablesMultiSelect(t 
 
 	payload, err := parseAskUserToolCallArguments(`{
 		"question":"请选择一个或多个需要补充分析的维度",
+		"required":true,
+		"allow_custom":false,
 		"selection_mode":"multiple",
 		"options":[
 			{"id":"channel_compare","label":"营销渠道"},
@@ -172,28 +272,27 @@ func TestParseAskUserToolCallArgumentsSelectionModeMultipleEnablesMultiSelect(t 
 	}
 }
 
-func TestParseAskUserToolCallArgumentsDefaultsToSingleSelectionMode(t *testing.T) {
+func TestParseAskUserToolCallArgumentsRequiresExplicitSelectionMode(t *testing.T) {
 	t.Parallel()
 
-	payload, err := parseAskUserToolCallArguments(`{
+	_, err := parseAskUserToolCallArguments(`{
 		"question":"请选择需要分析的维度",
+		"required":true,
+		"allow_custom":false,
 		"options":[
 			{"id":"channel_compare","label":"营销渠道"},
 			{"id":"region_compare","label":"区域销售"}
 		]
 	}`)
-	if err != nil {
-		t.Fatalf("parse default selection mode: %v", err)
-	}
-	if payload.SelectionMode != "single" {
-		t.Fatalf("expected omitted selection_mode to default to single: %#v", payload)
+	if err == nil {
+		t.Fatal("expected omitted selection_mode to be rejected")
 	}
 }
 
 func TestParseAskUserToolCallArgumentsRejectsInvalidSelectionMode(t *testing.T) {
 	t.Parallel()
 
-	_, err := parseAskUserToolCallArguments(`{"question":"请选择口径","selection_mode":"combo"}`)
+	_, err := parseAskUserToolCallArguments(`{"question":"请选择口径","required":true,"allow_custom":true,"selection_mode":"combo"}`)
 	if err == nil {
 		t.Fatal("expected invalid selection_mode to be rejected")
 	}

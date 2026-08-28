@@ -42,3 +42,28 @@ func TestRegistryGetToolSpecsReturnsProviderNeutralSpecs(t *testing.T) {
 		t.Fatalf("unexpected parameters: %s", string(specs[0].Function.Parameters))
 	}
 }
+
+func TestRegistryRejectsDuplicateToolNames(t *testing.T) {
+	t.Parallel()
+
+	reg := NewRegistry()
+	reg.Register(registryTestTool{})
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected duplicate tool registration to panic")
+		}
+	}()
+	reg.Register(registryTestTool{})
+}
+
+func TestRegistryRejectsUninitializedRegistry(t *testing.T) {
+	t.Parallel()
+
+	reg := &Registry{}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected uninitialized tool registry to panic")
+		}
+	}()
+	reg.Register(registryTestTool{})
+}

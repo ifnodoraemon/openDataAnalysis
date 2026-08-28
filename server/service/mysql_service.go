@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -16,13 +16,12 @@ import (
 )
 
 type MySQLSourceConfig struct {
-	Driver        string           `json:"driver"`
-	Host          string           `json:"host"`
-	Port          int              `json:"port"`
-	DatabaseName  string           `json:"database_name"`
-	DefaultSchema string           `json:"default_schema"`
-	Username      string           `json:"username"`
-	Allowlist     []AllowlistEntry `json:"allowlist"`
+	Host         string           `json:"host"`
+	Port         int              `json:"port"`
+	DatabaseName string           `json:"database_name"`
+	TLSMode      string           `json:"tls_mode"`
+	Username     string           `json:"username"`
+	Allowlist    []AllowlistEntry `json:"allowlist"`
 }
 
 type MySQLCredential struct {
@@ -34,15 +33,17 @@ func ParseMySQLSourceConfig(sourceConfig *domain.SourceConfig) (MySQLSourceConfi
 		return MySQLSourceConfig{}, fmt.Errorf("source config does not exist")
 	}
 	var cfg MySQLSourceConfig
-	if err := json.Unmarshal([]byte(sourceConfig.ConfigJSON), &cfg); err != nil {
+	if err := decodeStrictJSON([]byte(sourceConfig.ConfigJSON), &cfg); err != nil {
 		return MySQLSourceConfig{}, fmt.Errorf("failed to parse mysql source config: %w", err)
 	}
-	if cfg.Driver == "" {
-		cfg.Driver = "mysql"
+	if err := validateMySQLConfig(cfg); err != nil {
+		return MySQLSourceConfig{}, err
 	}
-	if cfg.DefaultSchema == "" {
-		cfg.DefaultSchema = cfg.DatabaseName
+	allowlist, err := ValidateAllowlist(cfg.Allowlist)
+	if err != nil {
+		return MySQLSourceConfig{}, err
 	}
+	cfg.Allowlist = allowlist
 	return cfg, nil
 }
 
@@ -65,6 +66,12 @@ func OpenMySQLConnection(ctx context.Context, sourceConfig *domain.SourceConfig,
 	mysqlCfg.Net = "tcp"
 	mysqlCfg.Addr = net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 	mysqlCfg.DBName = cfg.DatabaseName
+	mysqlCfg.TLSConfig = map[string]string{
+		"disabled":        "false",
+		"preferred":       "preferred",
+		"verify_identity": "true",
+		"skip_verify":     "skip-verify",
+	}[cfg.TLSMode]
 	mysqlCfg.ParseTime = true
 	mysqlCfg.Timeout = 10 * time.Second
 	mysqlCfg.ReadTimeout = 5 * time.Minute
@@ -81,46 +88,49 @@ func OpenMySQLConnection(ctx context.Context, sourceConfig *domain.SourceConfig,
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(1)
 	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("connection test failed: %w", err)
+		closeErr := db.Close()
+		return nil, errors.Join(fmt.Errorf("connection test failed: %w", err), closeErr)
 	}
 	return db, nil
 }
 
-func (s *SourceService) TestMySQLConnection(ctx context.Context, sourceID, authSecret string) map[string]interface{} {
+func (s *SourceService) TestMySQLConnection(ctx context.Context, sourceID, authSecret string) (result SourceTestResult) {
 	sourceConfig, err := s.findSourceConfig(ctx, sourceID)
 	if err != nil {
-		return map[string]interface{}{"success": false, "message": err.Error()}
+		return SourceTestResult{Success: false, Error: err.Error()}
 	}
 
 	mysqlDB, err := OpenMySQLConnection(ctx, sourceConfig, authSecret)
 	if err != nil {
-		return map[string]interface{}{"success": false, "message": err.Error()}
+		return SourceTestResult{Success: false, Error: err.Error()}
 	}
-	defer mysqlDB.Close()
+	defer func() {
+		if closeErr := mysqlDB.Close(); closeErr != nil {
+			result = SourceTestResult{Success: false, Error: fmt.Sprintf("failed to close tested connection: %v", closeErr)}
+		}
+	}()
 
 	cfg, err := ParseMySQLSourceConfig(sourceConfig)
 	if err != nil {
-		return map[string]interface{}{"success": false, "message": err.Error()}
+		return SourceTestResult{Success: false, Error: err.Error()}
 	}
-	var validated []map[string]interface{}
+	validated := make([]SourceObjectTestFact, 0, len(cfg.Allowlist))
 	for _, entry := range cfg.Allowlist {
-		exists := s.checkMySQLObjectExists(ctx, mysqlDB, entry)
-		validated = append(validated, map[string]interface{}{
-			"schema": entry.Schema, "name": entry.Name, "kind": entry.Kind, "exists": exists,
+		exists, err := s.checkMySQLObjectExists(ctx, mysqlDB, entry)
+		if err != nil {
+			return SourceTestResult{Success: false, Error: fmt.Sprintf("failed to inspect %s.%s: %v", entry.Schema, entry.Name, err), Objects: validated}
+		}
+		validated = append(validated, SourceObjectTestFact{
+			Schema: entry.Schema, Name: entry.Name, Kind: entry.Kind, Exists: exists,
 		})
 	}
 
-	return map[string]interface{}{
-		"success":   true,
-		"message":   "connection successful",
-		"allowlist": validated,
-	}
+	return SourceTestResult{Success: true, Objects: validated}
 }
 
-func (s *SourceService) streamMySQLImportToSQLite(ctx context.Context, mysqlDB *sql.DB, schema, object string, ingester *data.Ingester, tableName string, importRowLimit int) (int, int, int, bool, error) {
+func (s *SourceService) streamMySQLImportToSQLite(ctx context.Context, mysqlDB *sql.DB, schema, object string, ingester *data.Ingester, tableName string, importRowLimit int) (rowCountResult, colCountResult, rowsSkippedResult int, importTruncatedResult bool, resultErr error) {
 	if err := data.ValidateSQLIdent(tableName); err != nil {
-		return 0, 0, 0, false, fmt.Errorf("invalid SQLite table name after sanitization: %w", err)
+		return 0, 0, 0, false, fmt.Errorf("invalid SQLite table name: %w", err)
 	}
 	quotedSchema, err := quoteMySQLIdentifier(schema)
 	if err != nil {
@@ -138,7 +148,11 @@ func (s *SourceService) streamMySQLImportToSQLite(ctx context.Context, mysqlDB *
 	if err != nil {
 		return 0, 0, 0, false, fmt.Errorf("failed to query upstream data: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close upstream rows: %w", closeErr))
+		}
+	}()
 
 	colTypes, err := rows.ColumnTypes()
 	if err != nil {
@@ -146,28 +160,13 @@ func (s *SourceService) streamMySQLImportToSQLite(ctx context.Context, mysqlDB *
 	}
 	colCount := len(colTypes)
 	colNames := make([]string, colCount)
-	seenCols := make(map[string]int)
 	for i, ct := range colTypes {
-		base := sanitizePGColumnName(ct.Name())
-		finalName := base
-		if count := seenCols[base]; count > 0 {
-			finalName = fmt.Sprintf("%s_%d", base, count)
-		}
-		seenCols[base]++
-		colNames[i] = finalName
+		colNames[i] = ct.Name()
 	}
 
 	sqliteColTypes := make([]data.ColumnType, colCount)
-	for i, ct := range colTypes {
-		dbType := strings.ToUpper(ct.DatabaseTypeName())
-		switch {
-		case strings.Contains(dbType, "INT"), strings.Contains(dbType, "BIT"), strings.Contains(dbType, "BOOL"):
-			sqliteColTypes[i] = data.TypeInteger
-		case strings.Contains(dbType, "FLOAT"), strings.Contains(dbType, "DOUBLE"), strings.Contains(dbType, "REAL"), strings.Contains(dbType, "NUMERIC"), strings.Contains(dbType, "DECIMAL"):
-			sqliteColTypes[i] = data.TypeReal
-		default:
-			sqliteColTypes[i] = data.TypeText
-		}
+	for i := range colTypes {
+		sqliteColTypes[i] = data.TypePreserve
 	}
 
 	if err := ingester.CreateTypedTable(tableName, colNames, sqliteColTypes); err != nil {
@@ -175,9 +174,8 @@ func (s *SourceService) streamMySQLImportToSQLite(ctx context.Context, mysqlDB *
 	}
 
 	batchSize := 5000
-	batch := make([][]string, 0, batchSize)
+	batch := make([][]interface{}, 0, batchSize)
 	rowCount := 0
-	rowsSkipped := 0
 	importTruncated := false
 	vals := make([]interface{}, colCount)
 	valPtrs := make([]interface{}, colCount)
@@ -191,91 +189,61 @@ func (s *SourceService) streamMySQLImportToSQLite(ctx context.Context, mysqlDB *
 			break
 		}
 		if err := rows.Scan(valPtrs...); err != nil {
-			rowsSkipped++
-			continue
+			return rowCount, colCount, 0, importTruncated, fmt.Errorf("failed to scan upstream row %d: %w", rowCount+len(batch)+1, err)
 		}
-		row := make([]string, colCount)
+		row := make([]interface{}, colCount)
 		for i := range vals {
-			row[i] = formatSQLValue(vals[i])
+			row[i] = cloneSQLValue(vals[i])
 		}
 		batch = append(batch, row)
 		if len(batch) >= batchSize {
-			if err := ingester.InsertBatchTyped(tableName, colNames, sqliteColTypes, batch); err != nil {
-				return rowCount, colCount, rowsSkipped, importTruncated, err
+			if err := ingester.InsertBatchValues(tableName, colNames, batch); err != nil {
+				return rowCount, colCount, 0, importTruncated, err
 			}
 			rowCount += len(batch)
 			batch = batch[:0]
 		}
 	}
 	if len(batch) > 0 {
-		if err := ingester.InsertBatchTyped(tableName, colNames, sqliteColTypes, batch); err != nil {
-			return rowCount, colCount, rowsSkipped, importTruncated, err
+		if err := ingester.InsertBatchValues(tableName, colNames, batch); err != nil {
+			return rowCount, colCount, 0, importTruncated, err
 		}
 		rowCount += len(batch)
 	}
 	if err := rows.Err(); err != nil {
-		return rowCount, colCount, rowsSkipped, importTruncated, fmt.Errorf("failed while reading upstream data: %w", err)
+		return rowCount, colCount, 0, importTruncated, fmt.Errorf("failed while reading upstream data: %w", err)
 	}
-	if rowCount == 0 && rowsSkipped > 0 {
-		return rowCount, colCount, rowsSkipped, importTruncated, fmt.Errorf("all %d upstream rows failed to import", rowsSkipped)
-	}
-	return rowCount, colCount, rowsSkipped, importTruncated, nil
+	return rowCount, colCount, 0, importTruncated, nil
 }
 
 func quoteMySQLIdentifier(name string) (string, error) {
-	clean := strings.TrimSpace(name)
-	if clean == "" {
+	if name == "" || strings.TrimSpace(name) == "" {
 		return "", fmt.Errorf("empty MySQL identifier")
 	}
-	if strings.ContainsRune(clean, 0) {
+	if strings.ContainsRune(name, 0) {
 		return "", fmt.Errorf("MySQL identifier contains NUL byte")
 	}
-	return "`" + strings.ReplaceAll(clean, "`", "``") + "`", nil
+	return "`" + strings.ReplaceAll(name, "`", "``") + "`", nil
 }
 
-func sourceScopedMySQLTableName(schemaName, objectName, sourceID string) string {
-	rawName := strings.TrimSpace(objectName)
-	if strings.TrimSpace(schemaName) != "" {
-		rawName = strings.TrimSpace(schemaName) + "_" + rawName
-	}
-	base := sanitizePGTableName(rawName)
-	suffix := sourceTableSuffix(sourceID)
-	if suffix == "" {
-		return base
-	}
-	return sanitizePGTableName(base + "__" + suffix)
-}
-
-func (s *SourceService) checkMySQLObjectExists(ctx context.Context, db *sql.DB, entry AllowlistEntry) bool {
-	kind := strings.ToUpper(strings.TrimSpace(entry.Kind))
-	if kind == "" {
-		kind = "TABLE"
+func (s *SourceService) checkMySQLObjectExists(ctx context.Context, db *sql.DB, entry AllowlistEntry) (bool, error) {
+	tableType, ok := map[string]string{"table": "BASE TABLE", "view": "VIEW"}[entry.Kind]
+	if !ok {
+		return false, fmt.Errorf("unsupported object kind %q", entry.Kind)
 	}
 	var count int
-	err := db.QueryRowContext(ctx,
+	if err := db.QueryRowContext(ctx,
 		`SELECT COUNT(1) FROM information_schema.tables WHERE table_schema = ? AND table_name = ? AND table_type = ?`,
-		entry.Schema, entry.Name, mapMySQLTableType(kind),
-	).Scan(&count)
-	return err == nil && count > 0
+		entry.Schema, entry.Name, tableType,
+	).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
-func mapMySQLTableType(kind string) string {
-	if kind == "VIEW" {
-		return "VIEW"
+func cloneSQLValue(v interface{}) interface{} {
+	if bytes, ok := v.([]byte); ok {
+		return append([]byte(nil), bytes...)
 	}
-	return "BASE TABLE"
-}
-
-func formatSQLValue(v interface{}) string {
-	if v == nil {
-		return ""
-	}
-	switch tv := v.(type) {
-	case []byte:
-		return string(tv)
-	case time.Time:
-		return tv.Format("2006-01-02 15:04:05")
-	default:
-		return fmt.Sprint(tv)
-	}
+	return v
 }

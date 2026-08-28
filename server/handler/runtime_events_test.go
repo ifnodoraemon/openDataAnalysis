@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,22 +9,27 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/ifnodoraemon/openDataAnalysis/agent"
 	"github.com/ifnodoraemon/openDataAnalysis/config"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
+	"github.com/ifnodoraemon/openDataAnalysis/repository"
 	"github.com/ifnodoraemon/openDataAnalysis/session"
 	"github.com/ifnodoraemon/openDataAnalysis/tools"
 )
 
 type captureMessageRepo struct {
-	mu           sync.Mutex
-	createCtxErr error
-	created      []*domain.RunMessage
+	mu            sync.Mutex
+	createCtxErr  error
+	created       []*domain.RunMessage
+	panicOnCreate bool
 }
 
 func (r *captureMessageRepo) Create(ctx context.Context, msg *domain.RunMessage) error {
+	if r.panicOnCreate {
+		panic("repository exploded")
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.createCtxErr = ctx.Err()
@@ -54,51 +58,7 @@ func (r *captureMessageRepo) snapshot() ([]*domain.RunMessage, error) {
 	return out, r.createCtxErr
 }
 
-func TestWebSocketUpgraderSelectsAuthSubprotocol(t *testing.T) {
-	prevCfg := config.Cfg
-	config.Cfg = &config.Config{AllowedOrigins: []string{"http://localhost"}}
-	t.Cleanup(func() { config.Cfg = prevCfg })
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Errorf("upgrade failed: %v", err)
-			return
-		}
-		defer conn.Close()
-	}))
-	defer server.Close()
-
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	headers := http.Header{}
-	headers.Set("Origin", "http://localhost")
-	dialer := websocket.Dialer{Subprotocols: []string{"mcp-token", "token-example"}}
-
-	conn, resp, err := dialer.Dial(wsURL, headers)
-	if err != nil {
-		if resp != nil {
-			t.Fatalf("dial failed status=%s err=%v", resp.Status, err)
-		}
-		t.Fatalf("dial failed: %v", err)
-	}
-	defer conn.Close()
-
-	if got := conn.Subprotocol(); got != "mcp-token" {
-		t.Fatalf("expected selected subprotocol mcp-token, got %q", got)
-	}
-}
-
-func TestWebSocketOriginCheckRejectsMissingConfig(t *testing.T) {
-	prevCfg := config.Cfg
-	config.Cfg = nil
-	t.Cleanup(func() { config.Cfg = prevCfg })
-
-	if isWebSocketOriginAllowed("https://app.example.com") {
-		t.Fatal("expected missing config to reject websocket origin")
-	}
-}
-
-func TestSaveEventToDBDetachesCancelledContext(t *testing.T) {
+func TestSaveRuntimeEventDetachesCancelledContext(t *testing.T) {
 	previous := messageRepo
 	prevQ := eventPersistQueue
 	repo := &captureMessageRepo{}
@@ -114,7 +74,7 @@ func TestSaveEventToDBDetachesCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // 已取消的 context
 
-	saveEventToDB(ctx, "ws_1", "sess_1", "run_1", agent.WSEvent{
+	saveEventToDB(ctx, "ws_1", "sess_1", "run_1", agent.RuntimeEvent{
 		Type: agent.EventRunCompleted,
 		Data: agent.CompleteData{Summary: "done"},
 	})
@@ -135,13 +95,94 @@ func TestSaveEventToDBDetachesCancelledContext(t *testing.T) {
 	}
 }
 
+func TestRunPersistJobRecoversPanicAndKeepsWorkerAlive(t *testing.T) {
+	previous := messageRepo
+	prevQ := eventPersistQueue
+	repo := &captureMessageRepo{panicOnCreate: true}
+	messageRepo = repo
+	t.Cleanup(func() {
+		messageRepo = previous
+		eventPersistQueue = prevQ
+	})
+
+	job := persistJob{
+		workspaceID: "ws_1",
+		sessionID:   "sess_1",
+		runID:       "run_1",
+		ev:          agent.RuntimeEvent{Type: agent.EventRunCompleted, Data: agent.CompleteData{Summary: "done"}},
+		createdAt:   time.Now(),
+		result:      make(chan persistResult, 1),
+	}
+
+	runPersistJob(job)
+
+	result := <-job.result
+	if result.err == nil {
+		t.Fatal("expected panic to be converted into a persistence error")
+	}
+	if !strings.Contains(result.err.Error(), "panicked") {
+		t.Fatalf("expected panic error, got %v", result.err)
+	}
+
+	repo.panicOnCreate = false
+	runPersistJob(job)
+	result = <-job.result
+	if result.err != nil {
+		t.Fatalf("expected worker to keep processing jobs after recovery, got %v", result.err)
+	}
+	if result.msg == nil || result.msg.Content != "done" {
+		t.Fatalf("expected persisted message after recovery, got %#v", result.msg)
+	}
+}
+
+func TestSaveEventToDBPreservesSubmissionOrderAcrossFallback(t *testing.T) {
+	previous := messageRepo
+	prevQ := eventPersistQueue
+	repo := &captureMessageRepo{}
+	messageRepo = repo
+	t.Cleanup(func() {
+		messageRepo = previous
+		eventPersistQueue = prevQ
+	})
+
+	shutdown := startEventPersistWorker()
+	t.Cleanup(shutdown)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	first := agent.RuntimeEvent{Type: agent.EventAssistantStatus, Data: agent.AssistantStatusData{Content: "first"}}
+	second := agent.RuntimeEvent{Type: agent.EventAssistantStatus, Data: agent.AssistantStatusData{Content: "second"}}
+
+	if _, err := saveEventToDB(ctx, "ws_1", "sess_1", "run_1", first); err != nil {
+		t.Fatalf("save first event: %v", err)
+	}
+	secondMsg, err := saveEventToDB(ctx, "ws_1", "sess_1", "run_1", second)
+	if err != nil {
+		t.Fatalf("save second event: %v", err)
+	}
+	if secondMsg == nil || secondMsg.Content != "second" {
+		t.Fatalf("expected persisted message from fallback path, got %#v", secondMsg)
+	}
+
+	shutdown()
+
+	created, _ := repo.snapshot()
+	if len(created) != 2 {
+		t.Fatalf("expected two persisted messages, got %d", len(created))
+	}
+	if !created[0].CreatedAt.Before(created[1].CreatedAt) {
+		t.Fatalf("expected fallback path to keep submission-order timestamps, got %v then %v", created[0].CreatedAt, created[1].CreatedAt)
+	}
+}
+
 func TestWriteRepoLookupErrorRecognizesNotFound(t *testing.T) {
 	t.Parallel()
 
 	recorder := httptest.NewRecorder()
-	handled := writeRepoLookupError(recorder, sql.ErrNoRows, "任务不存在")
+	handled := writeRepoLookupError(recorder, repository.ErrNotFound, "任务不存在")
 	if !handled {
-		t.Fatal("expected helper to handle sql.ErrNoRows")
+		t.Fatal("expected helper to handle repository.ErrNotFound")
 	}
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", recorder.Code)
@@ -169,7 +210,7 @@ func TestSaveEventToDBSyncPersistsReportUpdatePayload(t *testing.T) {
 		messageRepo = previous
 	})
 
-	saveEventToDBSync("ws_1", "sess_1", "run_1", agent.WSEvent{
+	saveEventToDBSync("ws_1", "sess_1", "run_1", agent.RuntimeEvent{
 		Type: agent.EventReportUpdate,
 		Data: agent.ReportUpdateData{
 			HTML:  "<p>draft</p>",
@@ -182,7 +223,7 @@ func TestSaveEventToDBSyncPersistsReportUpdatePayload(t *testing.T) {
 				},
 			},
 		},
-	})
+	}, time.Now())
 
 	created, _ := repo.snapshot()
 	if len(created) != 1 {
@@ -201,45 +242,13 @@ func TestSaveEventToDBSyncPersistsReportUpdatePayload(t *testing.T) {
 	}
 }
 
-func TestIsExpectedWebSocketReadCloseRecognizesAbnormalBrowserDisconnects(t *testing.T) {
-	t.Parallel()
-
-	tests := []error{
-		&websocket.CloseError{Code: websocket.CloseNoStatusReceived, Text: ""},
-		&websocket.CloseError{Code: websocket.CloseAbnormalClosure, Text: "unexpected EOF"},
-		errors.New("websocket: close 1006 (abnormal closure): unexpected EOF"),
-	}
-
-	for _, err := range tests {
-		if !isExpectedWebSocketReadClose(err) {
-			t.Fatalf("expected read close to be classified as expected: %v", err)
-		}
-	}
-}
-
-func TestIsExpectedWebSocketWriteCloseRecognizesClosedConnectionNoise(t *testing.T) {
-	t.Parallel()
-
-	tests := []error{
-		&websocket.CloseError{Code: websocket.CloseGoingAway, Text: ""},
-		errors.New("write tcp 127.0.0.1:8080->127.0.0.1:12345: write: broken pipe"),
-		errors.New("websocket: close 1006 (abnormal closure): unexpected EOF"),
-	}
-
-	for _, err := range tests {
-		if !isExpectedWebSocketWriteClose(err) {
-			t.Fatalf("expected write close to be classified as expected: %v", err)
-		}
-	}
-}
-
 func TestResolvePreparedUserMessageDoesNotCallHiddenResolver(t *testing.T) {
 	prevCfg := config.Cfg
 	config.Cfg = &config.Config{LLMProvider: "openai", LLMModel: "gpt-4o"}
 	t.Cleanup(func() { config.Cfg = prevCfg })
 
 	sess := &session.Session{
-		Engine: agent.NewEngine(tools.NewRegistry(), ""),
+		Engine: agent.NewEngine(tools.NewRegistry()),
 		ReportState: &tools.ReportState{
 			Blocks: []tools.ReportBlock{
 				{ID: "b1", Kind: "markdown", Title: "Overview", Content: "body"},
@@ -267,7 +276,7 @@ func TestResolvePreparedUserMessageCarriesTurnTargetIntoEditContext(t *testing.T
 	t.Cleanup(func() { config.Cfg = prevCfg })
 
 	sess := &session.Session{
-		Engine:    agent.NewEngine(tools.NewRegistry(), ""),
+		Engine:    agent.NewEngine(tools.NewRegistry()),
 		EditState: &tools.ReportEditState{},
 	}
 
@@ -298,13 +307,13 @@ func TestResolvePreparedUserMessageDoesNotReconcileGoals(t *testing.T) {
 	t.Cleanup(func() { config.Cfg = prevCfg })
 
 	subgoals := agent.NewSubgoalManager()
-	rootID, err := subgoals.AddGoal("先补充报告数据", "")
+	rootID, err := subgoals.AddGoalWithBlocking("先补充报告数据", "", false)
 	if err != nil {
 		t.Fatalf("add root goal: %v", err)
 	}
 
 	sess := &session.Session{
-		Engine:    agent.NewEngine(tools.NewRegistry(), ""),
+		Engine:    agent.NewEngine(tools.NewRegistry()),
 		EditState: &tools.ReportEditState{},
 		Subgoals:  subgoals,
 	}
@@ -331,7 +340,7 @@ func TestResolvePreparedUserMessageDoesNotInferActiveSelectionScope(t *testing.T
 	t.Cleanup(func() { config.Cfg = prevCfg })
 
 	sess := &session.Session{
-		Engine: agent.NewEngine(tools.NewRegistry(), ""),
+		Engine: agent.NewEngine(tools.NewRegistry()),
 		ReportState: &tools.ReportState{
 			Blocks: []tools.ReportBlock{
 				{ID: "b1", Kind: "markdown", Title: "结论", Content: "原文内容"},
@@ -339,15 +348,14 @@ func TestResolvePreparedUserMessageDoesNotInferActiveSelectionScope(t *testing.T
 			NeedsFinalize: true,
 		},
 		EditState: &tools.ReportEditState{
-			Mode:                "regenerate_selection",
-			TargetRunID:         "run_report_1",
-			TargetBlockID:       "b1",
-			TargetBlockLabel:    "结论",
-			SelectionText:       "这句需要改短",
-			SelectionStart:      4,
-			SelectionEnd:        10,
-			SelectionRangeSet:   true,
-			PreserveOtherBlocks: true,
+			ScopeKindValue:    "partial_selection",
+			TargetRunID:       "run_report_1",
+			TargetBlockID:     "b1",
+			TargetBlockLabel:  "结论",
+			SelectionText:     "这句需要改短",
+			SelectionStart:    4,
+			SelectionEnd:      10,
+			SelectionRangeSet: true,
 		},
 	}
 

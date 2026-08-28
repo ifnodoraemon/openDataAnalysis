@@ -33,11 +33,11 @@
 
 <script setup>
 import { computed } from "vue";
-import { useWebSocket } from "../../composables/useWebSocket.js";
+import { useAgentTransport } from "../../composables/useAgentTransport.js";
 import { useAgentStore } from "../../stores/agent.js";
 
 const { connected, createNewSession, disconnect, switchWorkspace } =
-  useWebSocket();
+  useAgentTransport();
 const store = useAgentStore();
 const workspaceOptions = computed(() => store.workspaces || []);
 const workspaceId = computed(() => store.workspace?.id || "");
@@ -54,8 +54,13 @@ const statusText = computed(() => {
   }
 });
 
-function clearAll() {
-  createNewSession();
+async function clearAll() {
+  try {
+    await createNewSession();
+  } catch (err) {
+    store.addMessage({ type: "error", content: "新建分析会话失败" });
+    console.error("新建分析会话失败：", err);
+  }
 }
 
 async function handleWorkspaceChange(event) {
@@ -64,7 +69,8 @@ async function handleWorkspaceChange(event) {
   try {
     await switchWorkspace(nextWorkspaceId);
   } catch (err) {
-    console.error("switch workspace failed:", err);
+    store.addMessage({ type: "error", content: "切换工作区失败" });
+    console.error("切换工作区失败：", err);
   }
 }
 
@@ -77,8 +83,8 @@ function logout() {
 <style scoped>
 .top-nav {
   height: var(--nav-height);
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border);
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -100,14 +106,14 @@ function logout() {
 .title {
   font-size: 0.85rem;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--text-main);
 }
 
 .workspace-select {
   font-size: 0.72rem;
-  color: var(--text-secondary);
+  color: var(--text-sub);
   background: var(--bg-card);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   padding: 4px 8px;
   border-radius: 999px;
   outline: none;
@@ -118,7 +124,7 @@ function logout() {
   align-items: center;
   gap: 6px;
   font-size: 0.75rem;
-  color: var(--text-secondary);
+  color: var(--text-sub);
 }
 
 .status-dot {
@@ -143,17 +149,17 @@ function logout() {
 
 .nav-btn {
   background: var(--bg-card);
-  border: 1px solid var(--border);
-  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-main);
   padding: 4px 12px;
   border-radius: 6px;
   font-size: 0.8rem;
   cursor: pointer;
-  transition: all var(--transition);
+  transition: all var(--transition-fast);
 }
 
 .nav-btn:hover {
-  background: var(--bg-hover);
-  border-color: var(--accent-blue);
+  background: var(--bg-card-hover);
+  border-color: var(--primary-blue);
 }
 </style>

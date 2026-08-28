@@ -2,16 +2,15 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"strings"
-	"sync"
 
-	"github.com/gorilla/websocket"
 	"github.com/ifnodoraemon/openDataAnalysis/agent"
 	"github.com/ifnodoraemon/openDataAnalysis/auth"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
+	"github.com/ifnodoraemon/openDataAnalysis/metrics"
 	"github.com/ifnodoraemon/openDataAnalysis/session"
+	"github.com/ifnodoraemon/openDataAnalysis/tools"
 )
 
 type beforeUserRunHook func(context.Context, *session.Session, agent.UserMessage) error
@@ -34,7 +33,7 @@ func prepareUserRunHook(loader session.ReportSnapshotLoader) beforeUserRunHook {
 	}
 }
 
-type runtimeEventHook func(runtimeEventScope, agent.WSEvent)
+type runtimeEventHook func(runtimeEventScope, agent.RuntimeEvent)
 
 type runtimeEventScope struct {
 	session           *session.Session
@@ -47,31 +46,55 @@ type runtimeEventScope struct {
 }
 
 type runtimeEventDispatcher struct {
-	deliver          func(agent.WSEvent)
-	deliverToRun     func(string, agent.WSEvent)
-	emitChildPreview func(string)
-	scope            runtimeEventScope
-	hooks            []runtimeEventHook
+	deliver           func(agent.RuntimeEvent) error
+	deliverToRun      func(string, agent.RuntimeEvent) error
+	onDeliveryFailure func(string, error)
+	emitChildPreview  func(string)
+	scope             runtimeEventScope
+	hooks             []runtimeEventHook
 }
 
-func newRuntimeEventDispatcher(ctx context.Context, conn *websocket.Conn, writeMu *sync.Mutex, sess *session.Session, identity auth.Identity, runID string) runtimeEventDispatcher {
-	deliverToRun := func(targetRunID string, ev agent.WSEvent) {
-		sendSessionEvent(conn, writeMu, sess.ID, targetRunID, ev)
-		saveEventToDB(ctx, sess.WorkspaceID, sess.ID, targetRunID, ev)
+func newRuntimeEventDispatcher(ctx context.Context, sess *session.Session, identity auth.Identity, runID string) runtimeEventDispatcher {
+	deliverToRun := func(targetRunID string, ev agent.RuntimeEvent) error {
+		msg, err := saveEventToDB(ctx, sess.WorkspaceID, sess.ID, targetRunID, ev)
+		if err != nil {
+			return err
+		}
+		sendSessionEvent(sess.ID, targetRunID, ev, persistedMessageID(msg))
+		return nil
 	}
-	deliver := func(ev agent.WSEvent) { deliverToRun(runID, ev) }
+	deliver := func(ev agent.RuntimeEvent) error { return deliverToRun(runID, ev) }
+	handlePersistenceFailure := func(targetRunID string, err error) {
+		log.Printf("runtime event persistence failed run_id=%s err=%v", targetRunID, err)
+		sendSessionEvent(sess.ID, targetRunID, agent.RuntimeEvent{
+			Type: agent.EventError,
+			Data: agent.ErrorData{Message: "运行时状态持久化失败"},
+		}, "")
+		if targetRunID != runID {
+			return
+		}
+		sess.CancelRun(runID)
+		msg := "运行时状态持久化失败"
+		if statusErr := withPersistenceContext(ctx, func(persistCtx context.Context) error {
+			return runRepo.UpdateStatus(persistCtx, runID, domain.RunStatusFailed, &msg)
+		}); statusErr != nil {
+			log.Printf("failed to persist run failure run_id=%s err=%v", runID, statusErr)
+		}
+	}
 
 	scope := runtimeEventScope{
 		session: sess,
 		runID:   runID,
 		emitReportPreview: func() {
-			emitReportPreviewUpdate(ctx, conn, writeMu, sess.ID, sess.WorkspaceID, runID, sess.ReportState)
+			if err := emitReportPreviewUpdate(ctx, sess.ID, sess.WorkspaceID, runID, sess.ReportState); err != nil {
+				handlePersistenceFailure(runID, err)
+			}
 		},
 		emitEditState: func(data agent.EditStateUpdatedData) {
-			deliverToRun(runID, agent.WSEvent{Type: agent.EventStateReportEditUpdated, Data: data})
+			deliverToRun(runID, agent.RuntimeEvent{Type: agent.EventStateReportEditUpdated, Data: data})
 		},
 		finalizeReport: func() error {
-			return finalizeAndPersistReport(ctx, conn, writeMu, sess, identity, runID)
+			return finalizeAndPersistReport(ctx, sess, identity, runID)
 		},
 		setRunStatus: func(status domain.RunStatus, errMsg *string) {
 			if err := withPersistenceContext(ctx, func(persistCtx context.Context) error {
@@ -81,9 +104,8 @@ func newRuntimeEventDispatcher(ctx context.Context, conn *websocket.Conn, writeM
 			}
 		},
 		setRunSummary: func(summary string) {
-			trimmed := strings.TrimSpace(summary)
 			if err := withPersistenceContext(ctx, func(persistCtx context.Context) error {
-				return runRepo.UpdateSummary(persistCtx, runID, trimmed)
+				return runRepo.UpdateSummary(persistCtx, runID, summary)
 			}); err != nil {
 				log.Printf("failed to persist run summary run_id=%s err=%v", runID, err)
 			}
@@ -91,10 +113,13 @@ func newRuntimeEventDispatcher(ctx context.Context, conn *websocket.Conn, writeM
 	}
 
 	return runtimeEventDispatcher{
-		deliver:      deliver,
-		deliverToRun: deliverToRun,
+		deliver:           deliver,
+		deliverToRun:      deliverToRun,
+		onDeliveryFailure: handlePersistenceFailure,
 		emitChildPreview: func(targetRunID string) {
-			emitReportPreviewUpdate(ctx, conn, writeMu, sess.ID, sess.WorkspaceID, targetRunID, sess.ReportState)
+			if err := emitReportPreviewUpdate(ctx, sess.ID, sess.WorkspaceID, targetRunID, sess.ReportState); err != nil {
+				handlePersistenceFailure(targetRunID, err)
+			}
 		},
 		scope: scope,
 		hooks: []runtimeEventHook{
@@ -105,10 +130,17 @@ func newRuntimeEventDispatcher(ctx context.Context, conn *websocket.Conn, writeM
 	}
 }
 
-func (d runtimeEventDispatcher) Emit(ev agent.WSEvent) {
+func (d runtimeEventDispatcher) Emit(ev agent.RuntimeEvent) {
 	if runID := strings.TrimSpace(ev.RunID); runID != "" && runID != strings.TrimSpace(d.scope.runID) {
 		if d.deliverToRun != nil {
-			d.deliverToRun(runID, ev)
+			if err := d.deliverToRun(runID, ev); err != nil {
+				if d.onDeliveryFailure != nil {
+					d.onDeliveryFailure(runID, err)
+				} else {
+					log.Printf("failed to persist delegated runtime event run_id=%s type=%s err=%v", runID, ev.Type, err)
+				}
+				return
+			}
 		}
 		childScope := d.scope
 		childScope.runID = runID
@@ -126,13 +158,28 @@ func (d runtimeEventDispatcher) Emit(ev agent.WSEvent) {
 		runLoggingHook(childScope, ev)
 		return
 	}
-	d.deliver(ev)
+	if err := d.deliver(ev); err != nil {
+		if d.onDeliveryFailure != nil {
+			d.onDeliveryFailure(d.scope.runID, err)
+		} else {
+			log.Printf("failed to persist runtime event run_id=%s type=%s err=%v", d.scope.runID, ev.Type, err)
+		}
+		return
+	}
+	switch ev.Type {
+	case agent.EventRunCompleted:
+		metrics.AgentRunsTotal.WithLabelValues("completed").Inc()
+	case agent.EventError:
+		metrics.AgentRunsTotal.WithLabelValues("failed").Inc()
+	case agent.EventRunCancelled:
+		metrics.AgentRunsTotal.WithLabelValues("cancelled").Inc()
+	}
 	for _, hook := range d.hooks {
 		hook(d.scope, ev)
 	}
 }
 
-func reportLifecycleHook(scope runtimeEventScope, ev agent.WSEvent) {
+func reportLifecycleHook(scope runtimeEventScope, ev agent.RuntimeEvent) {
 	if ev.Type != agent.EventToolResult {
 		return
 	}
@@ -140,12 +187,13 @@ func reportLifecycleHook(scope runtimeEventScope, ev agent.WSEvent) {
 	if !ok {
 		return
 	}
-	if shouldEmitReportPreview(result.Name) && scope.emitReportPreview != nil {
+	capability, hasCapability := runtimeToolCapability(scope.session, result.Name)
+	if hasCapability && capability.EmitsReportPreview && scope.emitReportPreview != nil {
 		scope.emitReportPreview()
 	}
-	if result.Name == "report_finalize" && result.Success && scope.finalizeReport != nil {
+	if hasCapability && capability.DeliveryBoundary && result.Success && scope.finalizeReport != nil {
 		if err := scope.finalizeReport(); err != nil {
-			rollbackFinalizeDraft(scope, result.Result)
+			rollbackFinalizeDraft(scope)
 			if scope.session != nil {
 				scope.session.CancelRun(scope.runID)
 			}
@@ -157,7 +205,22 @@ func reportLifecycleHook(scope runtimeEventScope, ev agent.WSEvent) {
 	}
 }
 
-func rollbackFinalizeDraft(scope runtimeEventScope, toolResult string) {
+func runtimeToolCapability(sess *session.Session, name string) (tools.ToolCapability, bool) {
+	if sess == nil || sess.Registry == nil {
+		return tools.ToolCapability{}, false
+	}
+	tool, err := sess.Registry.Get(name)
+	if err != nil {
+		return tools.ToolCapability{}, false
+	}
+	provider, ok := tool.(tools.CapabilityTool)
+	if !ok {
+		return tools.ToolCapability{}, false
+	}
+	return provider.Capability(), true
+}
+
+func rollbackFinalizeDraft(scope runtimeEventScope) {
 	if scope.session == nil || scope.session.ReportState == nil {
 		return
 	}
@@ -166,20 +229,9 @@ func rollbackFinalizeDraft(scope runtimeEventScope, toolResult string) {
 	state.Lock()
 	defer state.Unlock()
 	state.NeedsFinalize = true
-
-	var payload map[string]interface{}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(toolResult)), &payload); err != nil {
-		return
-	}
-	if title, ok := payload["report_title"].(string); ok {
-		state.FinalTitle = strings.TrimSpace(title)
-	}
-	if author, ok := payload["author"].(string); ok {
-		state.FinalAuthor = strings.TrimSpace(author)
-	}
 }
 
-func runLifecycleHook(scope runtimeEventScope, ev agent.WSEvent) {
+func runLifecycleHook(scope runtimeEventScope, ev agent.RuntimeEvent) {
 	if scope.session == nil || strings.TrimSpace(scope.runID) == "" {
 		return
 	}
@@ -238,7 +290,7 @@ func finishTerminalRun(scope runtimeEventScope, status string) bool {
 	return finished
 }
 
-func runLoggingHook(scope runtimeEventScope, ev agent.WSEvent) {
+func runLoggingHook(scope runtimeEventScope, ev agent.RuntimeEvent) {
 	if scope.session == nil || strings.TrimSpace(scope.runID) == "" {
 		return
 	}

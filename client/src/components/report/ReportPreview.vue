@@ -146,6 +146,16 @@ const runMetaLabel = computed(() => {
   return "";
 });
 const mode = ref("preview");
+const pendingTimers = new Set();
+
+function scheduleTimer(callback, delay) {
+  const timerId = window.setTimeout(() => {
+    pendingTimers.delete(timerId);
+    callback();
+  }, delay);
+  pendingTimers.add(timerId);
+  return timerId;
+}
 
 watch(
   sanitizedReportHTML,
@@ -163,6 +173,8 @@ watch(mode, (nextMode) => {
 });
 
 onBeforeUnmount(() => {
+  pendingTimers.forEach((timerId) => window.clearTimeout(timerId));
+  pendingTimers.clear();
   const doc = reportFrame.value?.contentWindow?.document;
   doc?.removeEventListener("mouseup", handleFrameMouseUp);
   doc?.removeEventListener("keyup", handleFrameMouseUp);
@@ -234,7 +246,7 @@ function ensureFrameStyles(doc) {
 }
 
 function handleFrameMouseUp() {
-  window.setTimeout(() => {
+  scheduleTimer(() => {
     const frameWindow = reportFrame.value?.contentWindow;
     const selection = frameWindow?.getSelection?.();
     const selectedText = selection?.toString?.().trim() || "";
@@ -323,7 +335,7 @@ function applySelectionHighlight(fragmentIdx) {
 function quoteSelection() {
   if (!selectedBlockId.value || !selectedBlockText.value) return;
   store.setReportQuote({
-    mode: selectedByText.value ? "regenerate_selection" : "regenerate_block",
+    scopeKind: selectedByText.value ? "partial_selection" : "partial_block",
     targetRunId: selectedRun.value?.id || activeRun.value?.id || "",
     blockId: selectedBlockId.value,
     blockLabel: selectedBlockLabel.value,
@@ -334,7 +346,6 @@ function quoteSelection() {
       selectedByText.value &&
       Number.isInteger(selectedSelectionStart.value) &&
       Number.isInteger(selectedSelectionEnd.value),
-    preserveOtherBlocks: true,
   });
 }
 
@@ -342,12 +353,11 @@ function quoteWholeReport() {
   const label =
     selectedReport.value?.title || selectedRun.value?.id || "当前报告";
   store.setReportQuote({
-    mode: "revise_report",
+    scopeKind: "whole_report",
     targetRunId: selectedRun.value?.id || activeRun.value?.id || "",
     blockId: "",
     blockLabel: label,
     selectionText: `整篇报告：${label}`,
-    preserveOtherBlocks: false,
   });
   clearSelection();
 }
@@ -408,18 +418,16 @@ function exportHTML() {
 
 async function exportWord() {
   const targetRunId = selectedRun.value?.id || activeRun.value?.id || "";
-  const snapshotHTML = await buildRenderedSnapshotHTML({ forWord: true });
+  if (!targetRunId) {
+    throw new Error("缺少已完成报告对应的任务 ID");
+  }
   const res = await fetch("/api/report-exports/docx", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...(store.token ? { Authorization: `Bearer ${store.token}` } : {}),
     },
-    body: JSON.stringify({
-      title: buildFilename(),
-      runId: targetRunId,
-      html: snapshotHTML,
-    }),
+    body: JSON.stringify({ runId: targetRunId }),
   });
   if (!res.ok) {
     throw new Error(await res.text());
@@ -429,7 +437,7 @@ async function exportWord() {
 }
 
 async function exportPDF() {
-  const snapshotHTML = await buildRenderedSnapshotHTML({ forPDF: true });
+  const snapshotHTML = await buildRenderedSnapshotHTML();
   const url = URL.createObjectURL(
     new Blob([snapshotHTML], { type: "text/html;charset=utf-8" }),
   );
@@ -471,14 +479,13 @@ function waitForPrintWindow(targetWindow) {
         resolve();
         return;
       }
-      window.setTimeout(checkReady, 60);
+      scheduleTimer(checkReady, 60);
     };
     checkReady();
   });
 }
 
-async function buildRenderedSnapshotHTML(options = {}) {
-  const { forPDF = false, forWord = false } = options;
+async function buildRenderedSnapshotHTML() {
   const frameWindow = reportFrame.value?.contentWindow;
   const frameDocument = frameWindow?.document;
   if (!frameDocument?.documentElement) {
@@ -493,7 +500,7 @@ async function buildRenderedSnapshotHTML(options = {}) {
     if (!sourceCanvas?.toDataURL) return;
     const image = clonedDocument.ownerDocument.createElement("img");
     image.src = sourceCanvas.toDataURL("image/png");
-    image.alt = sourceCanvas.getAttribute("aria-label") || "chart";
+    image.alt = sourceCanvas.getAttribute("aria-label") || "图表";
     const rect = sourceCanvas.getBoundingClientRect();
     const width = Math.max(
       Math.round(
@@ -517,12 +524,7 @@ async function buildRenderedSnapshotHTML(options = {}) {
     image.style.margin = "0 auto";
     canvasNode.replaceWith(image);
   });
-  if (forPDF) {
-    optimizeSnapshotForPDF(clonedDocument);
-  }
-  if (forWord) {
-    optimizeSnapshotForWord(clonedDocument);
-  }
+  optimizeSnapshotForPDF(clonedDocument);
   clonedDocument.querySelectorAll("script").forEach((node) => node.remove());
   return `<!DOCTYPE html>\n${clonedDocument.outerHTML}`;
 }
@@ -672,132 +674,14 @@ function optimizeSnapshotForPDF(documentNode) {
   head.appendChild(exportStyle);
 }
 
-function optimizeSnapshotForWord(documentNode) {
-  const doc = documentNode.ownerDocument;
-  const head = documentNode.querySelector("head");
-  const body = documentNode.querySelector("body");
-  if (!head || !body) return;
-
-  head
-    .querySelectorAll('script, link[rel="preconnect"], link[rel="stylesheet"]')
-    .forEach((node) => node.remove());
-  body.querySelectorAll(".cover").forEach((node) => {
-    node.style.minHeight = "auto";
-    node.style.background = "#ffffff";
-    node.style.color = "#111827";
-    node.style.padding = "0 0 18pt 0";
-    node.style.margin = "0 0 18pt 0";
-    node.style.pageBreakAfter = "avoid";
-  });
-  body.querySelectorAll(".toc, .section, .footer").forEach((node) => {
-    node.style.maxWidth = "none";
-    node.style.margin = "0 0 16pt 0";
-    node.style.padding = node.classList.contains("footer") ? "8pt 0 0 0" : "0";
-    node.style.background = "#ffffff";
-    node.style.boxShadow = "none";
-    node.style.border = "none";
-    node.style.borderRadius = "0";
-    node.style.pageBreakInside = "avoid";
-  });
-  body.querySelectorAll(".summary-box, .conclusion-box").forEach((node) => {
-    node.style.background = "#ffffff";
-    node.style.border = "1px solid #d1d5db";
-    node.style.borderLeft = "4px solid #0f2b46";
-    node.style.borderRadius = "0";
-    node.style.boxShadow = "none";
-    node.style.padding = "12pt";
-  });
-  body.querySelectorAll(".chart-box").forEach((node) => {
-    node.style.height = "auto";
-    node.style.minHeight = "0";
-    node.style.padding = "8pt";
-    node.style.border = "1px solid #d1d5db";
-    node.style.boxShadow = "none";
-    node.style.background = "#ffffff";
-    node.style.pageBreakInside = "avoid";
-  });
-  body.querySelectorAll("img").forEach((node) => {
-    node.style.display = "block";
-    node.style.maxWidth = "100%";
-    node.style.height = "auto";
-    node.style.pageBreakInside = "avoid";
-  });
-  body.querySelectorAll("table").forEach((node) => {
-    node.style.width = "100%";
-    node.style.borderCollapse = "collapse";
-    node.style.fontSize = "10.5pt";
-  });
-  body.querySelectorAll("th, td").forEach((node) => {
-    node.style.border = "1px solid #d1d5db";
-    node.style.padding = "6pt 8pt";
-  });
-
-  const exportStyle = doc.createElement("style");
-  exportStyle.textContent = `
-    @page { size: A4; margin: 22mm 18mm; }
-    html, body {
-      background: #ffffff !important;
-    }
-    body {
-      font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "SimSun", sans-serif !important;
-      color: #111827 !important;
-      font-size: 11pt !important;
-      line-height: 1.7 !important;
-      margin: 0 !important;
-      padding: 0 !important;
-    }
-    * {
-      animation: none !important;
-      transition: none !important;
-      text-shadow: none !important;
-    }
-    .cover::before,
-    .toc h2::before,
-    .section h2::after,
-    .footer::before {
-      content: none !important;
-      display: none !important;
-    }
-    .cover h1 {
-      font-size: 22pt !important;
-      margin-bottom: 8pt !important;
-    }
-    .cover .meta {
-      display: block !important;
-      font-size: 10.5pt !important;
-    }
-    .toc h2,
-    .section h2,
-    .content h3,
-    .content h4,
-    .content h5 {
-      color: #0f2b46 !important;
-      border: none !important;
-      padding: 0 !important;
-      margin-top: 0 !important;
-    }
-    .content p {
-      text-indent: 0 !important;
-      font-size: 11pt !important;
-      margin: 0 0 8pt 0 !important;
-    }
-    .toc ol,
-    .content ul {
-      padding-left: 18pt !important;
-      margin: 0 0 10pt 0 !important;
-    }
-  `;
-  head.appendChild(exportStyle);
-}
-
 function waitForFrameReady(frameDocument) {
   return new Promise((resolve) => {
     const checkReady = () => {
       if (frameDocument.readyState === "complete") {
-        window.setTimeout(resolve, 120);
+        scheduleTimer(resolve, 120);
         return;
       }
-      window.setTimeout(checkReady, 80);
+      scheduleTimer(checkReady, 80);
     };
     checkReady();
   });
@@ -809,21 +693,21 @@ function waitForFrameReady(frameDocument) {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--bg-primary);
-  border-left: 1px solid var(--border);
+  background: var(--bg-app);
+  border-left: 1px solid var(--border-subtle);
 }
 
 .panel-header {
   padding: 16px;
   font-size: 0.9rem;
   font-weight: 600;
-  color: var(--text-primary);
-  border-bottom: 1px solid var(--border);
+  color: var(--text-main);
+  border-bottom: 1px solid var(--border-subtle);
   display: flex;
   justify-content: space-between;
   align-items: center;
   flex-shrink: 0;
-  background: var(--bg-primary);
+  background: var(--bg-app);
 }
 
 .header-main {
@@ -848,34 +732,34 @@ function waitForFrameReady(frameDocument) {
 }
 
 .toolbar-btn {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-sub);
   padding: 4px 12px;
   border-radius: 6px;
   font-size: 0.75rem;
   cursor: pointer;
-  transition: all var(--transition);
+  transition: all var(--transition-fast);
 }
 
 .toolbar-btn:hover {
   border-color: var(--border-light);
-  color: var(--text-primary);
-  background: var(--bg-hover);
+  color: var(--text-main);
+  background: var(--bg-card-hover);
 }
 .toolbar-btn.active {
-  background: var(--text-primary);
-  color: var(--bg-primary);
-  border-color: var(--text-primary);
+  background: var(--text-main);
+  color: var(--bg-app);
+  border-color: var(--text-main);
 }
 .toolbar-btn.export {
-  background: var(--accent-blue);
+  background: var(--primary-blue);
   color: white;
-  border-color: var(--accent-blue);
+  border-color: var(--primary-blue);
 }
 .toolbar-btn.export:hover {
   opacity: 0.9;
-  background: var(--accent-blue);
+  background: var(--primary-blue);
 }
 
 .export-dropdown {
@@ -883,8 +767,8 @@ function waitForFrameReady(frameDocument) {
   top: calc(100% + 8px);
   right: 0;
   min-width: 140px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
   border-radius: 10px;
   box-shadow: 0 12px 30px rgba(15, 23, 42, 0.12);
   padding: 6px;
@@ -897,7 +781,7 @@ function waitForFrameReady(frameDocument) {
 .export-option {
   border: none;
   background: transparent;
-  color: var(--text-primary);
+  color: var(--text-main);
   text-align: left;
   padding: 8px 10px;
   border-radius: 8px;
@@ -906,14 +790,14 @@ function waitForFrameReady(frameDocument) {
 }
 
 .export-option:hover {
-  background: var(--bg-secondary);
+  background: var(--bg-card);
 }
 
 .preview-area {
   flex: 1;
   overflow: hidden;
   position: relative;
-  background: var(--bg-secondary);
+  background: var(--bg-card);
 }
 
 .edit-strip {
@@ -938,9 +822,9 @@ function waitForFrameReady(frameDocument) {
 
 .edit-value {
   font-size: 0.84rem;
-  color: var(--text-primary);
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
+  color: var(--text-main);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
   border-radius: 999px;
   padding: 4px 10px;
   max-width: 280px;
@@ -956,10 +840,10 @@ function waitForFrameReady(frameDocument) {
   max-height: 54px;
   overflow: hidden;
   margin: 0;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: 12px;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
+  background: var(--bg-card);
+  color: var(--text-main);
   padding: 10px 12px;
   font-size: 0.78rem;
   line-height: 1.45;
@@ -971,8 +855,8 @@ function waitForFrameReady(frameDocument) {
 }
 
 .toolbar-btn.primary {
-  background: var(--text-primary);
-  color: var(--bg-primary);
+  background: var(--text-main);
+  color: var(--bg-app);
 }
 
 .toolbar-btn.primary:disabled {
@@ -1007,7 +891,7 @@ function waitForFrameReady(frameDocument) {
   width: 100%;
   height: 100%;
   border: none;
-  background: var(--bg-primary);
+  background: var(--bg-app);
   box-shadow: -4px 0 16px rgba(0, 0, 0, 0.02);
 }
 
@@ -1017,10 +901,10 @@ function waitForFrameReady(frameDocument) {
   padding: 24px;
   overflow: auto;
   height: 100%;
-  color: var(--text-secondary);
+  color: var(--text-sub);
   white-space: pre-wrap;
   word-break: break-all;
-  background: var(--bg-primary);
+  background: var(--bg-app);
   margin: 0;
 }
 </style>

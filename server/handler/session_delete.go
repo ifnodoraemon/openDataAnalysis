@@ -3,11 +3,14 @@ package handler
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
+	"github.com/ifnodoraemon/openDataAnalysis/metadata"
 )
 
 type sessionDeletionPlan struct {
@@ -31,19 +34,39 @@ func deleteSessionResources(ctx context.Context, session domain.Session) error {
 			return err
 		}
 	}
+	if len(plan.storageKeys) > 0 {
+		if fileService == nil || fileService.Storage == nil {
+			return fmt.Errorf("object storage is not initialized for session deletion")
+		}
+		var storageErrors error
+		for _, key := range plan.storageKeys {
+			if strings.TrimSpace(key) == "" || strings.TrimSpace(key) != key {
+				storageErrors = errors.Join(storageErrors, fmt.Errorf("stored object key must be a non-empty exact value"))
+				continue
+			}
+			if err := fileService.Storage.Delete(ctx, key); err != nil {
+				storageErrors = errors.Join(storageErrors, fmt.Errorf("delete session storage object %s: %w", key, err))
+			}
+		}
+		if storageErrors != nil {
+			return storageErrors
+		}
+	}
 
 	tx, err := metadataStore.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		_ = tx.Rollback()
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			log.Printf("rollback session deletion session_id=%s: %v", session.ID, rollbackErr)
+		}
 	}()
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM run_messages WHERE session_id = ?`, session.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, rebindSessionDeletionQuery(`DELETE FROM run_messages WHERE session_id = ?`), session.ID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM reports WHERE run_id IN (SELECT id FROM analysis_runs WHERE session_id = ?)`, session.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, rebindSessionDeletionQuery(`DELETE FROM reports WHERE run_id IN (SELECT id FROM analysis_runs WHERE session_id = ?)`), session.ID); err != nil {
 		return err
 	}
 	if len(plan.reportFileIDs) > 0 {
@@ -51,22 +74,22 @@ func deleteSessionResources(ctx context.Context, session domain.Session) error {
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM analysis_runs WHERE session_id = ?`, session.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, rebindSessionDeletionQuery(`DELETE FROM analysis_runs WHERE session_id = ?`), session.ID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM session_files WHERE session_id = ?`, session.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, rebindSessionDeletionQuery(`DELETE FROM session_files WHERE session_id = ?`), session.ID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM semantic_confirmations WHERE session_id = ?`, session.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, rebindSessionDeletionQuery(`DELETE FROM semantic_confirmations WHERE session_id = ?`), session.ID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM semantic_profiles WHERE session_id = ?`, session.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, rebindSessionDeletionQuery(`DELETE FROM semantic_profiles WHERE session_id = ?`), session.ID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM source_snapshots WHERE session_id = ?`, session.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, rebindSessionDeletionQuery(`DELETE FROM source_snapshots WHERE session_id = ?`), session.ID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM session_source_bindings WHERE session_id = ?`, session.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, rebindSessionDeletionQuery(`DELETE FROM session_source_bindings WHERE session_id = ?`), session.ID); err != nil {
 		return err
 	}
 	if len(plan.sourceFileIDs) > 0 {
@@ -74,7 +97,7 @@ func deleteSessionResources(ctx context.Context, session domain.Session) error {
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, session.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, rebindSessionDeletionQuery(`DELETE FROM sessions WHERE id = ?`), session.ID); err != nil {
 		return err
 	}
 
@@ -82,21 +105,13 @@ func deleteSessionResources(ctx context.Context, session domain.Session) error {
 		return err
 	}
 
-	CloseSessionWebSockets(session.ID)
+	GlobalSSEBroker.CloseSession(session.ID)
 	if sessionManager != nil {
 		if err := sessionManager.Delete(session.ID, session.WorkspaceID, session.UserID); err != nil {
 			log.Printf("delete in-memory session failed session_id=%s err=%v", session.ID, err)
 		}
 	}
 
-	for _, key := range plan.storageKeys {
-		if strings.TrimSpace(key) == "" || fileService == nil || fileService.Storage == nil {
-			continue
-		}
-		if err := fileService.Storage.Delete(ctx, key); err != nil {
-			log.Printf("delete session storage object failed after metadata removal session_id=%s key=%s err=%v", session.ID, key, err)
-		}
-	}
 	return nil
 }
 
@@ -108,7 +123,7 @@ func buildSessionDeletionPlan(ctx context.Context, db *sql.DB, sessionID string)
 		WHERE sf1.session_id = ?
 		  AND f.visibility = 'private'
 		  AND NOT EXISTS (
-		      SELECT 1 FROM session_files sf2 
+		      SELECT 1 FROM session_files sf2
 		      WHERE sf2.file_id = sf1.file_id AND sf2.session_id != ?
 		  )
 	`, sessionID, sessionID)
@@ -127,12 +142,12 @@ func buildSessionDeletionPlan(ctx context.Context, db *sql.DB, sessionID string)
 		SELECT DISTINCT storage_key
 		FROM files
 		WHERE id IN (
-			SELECT sf1.file_id FROM session_files sf1 
+			SELECT sf1.file_id FROM session_files sf1
 			JOIN files f ON f.id = sf1.file_id
-			WHERE sf1.session_id = ? 
+			WHERE sf1.session_id = ?
 			  AND f.visibility = 'private'
 			  AND NOT EXISTS (
-			      SELECT 1 FROM session_files sf2 
+			      SELECT 1 FROM session_files sf2
 			      WHERE sf2.file_id = sf1.file_id AND sf2.session_id != ?
 			  )
 			UNION
@@ -157,8 +172,26 @@ func buildSessionDeletionPlan(ctx context.Context, db *sql.DB, sessionID string)
 	}, nil
 }
 
+func rebindSessionDeletionQuery(query string) string {
+	if metadataStore == nil || metadataStore.Dialect != metadata.DialectPostgres {
+		return query
+	}
+	var sb strings.Builder
+	param := 0
+	for i := 0; i < len(query); i++ {
+		if query[i] == '?' {
+			param++
+			sb.WriteByte('$')
+			sb.WriteString(strconv.Itoa(param))
+			continue
+		}
+		sb.WriteByte(query[i])
+	}
+	return sb.String()
+}
+
 func queryStrings(ctx context.Context, db *sql.DB, query string, args ...any) ([]string, error) {
-	rows, err := db.QueryContext(ctx, query, args...)
+	rows, err := db.QueryContext(ctx, rebindSessionDeletionQuery(query), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +217,7 @@ func deleteFilesByIDs(ctx context.Context, tx *sql.Tx, ids []string) error {
 	for _, id := range ids {
 		args = append(args, id)
 	}
-	_, err := tx.ExecContext(ctx, `DELETE FROM files WHERE id IN (`+placeholders+`)`, args...)
+	_, err := tx.ExecContext(ctx, rebindSessionDeletionQuery(`DELETE FROM files WHERE id IN (`+placeholders+`)`), args...)
 	return err
 }
 

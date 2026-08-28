@@ -8,6 +8,8 @@ import os
 import pytest
 import requests
 
+from sandbox import SecurityViolation, check_code
+
 BASE_URL = os.environ.get(
     "PYTHON_EXECUTOR_BASE_URL", "http://localhost:8081"
 )
@@ -22,7 +24,7 @@ def _executor_available():
         return False
 
 
-pytestmark = pytest.mark.skipif(
+requires_executor = pytest.mark.skipif(
     not _executor_available(),
     reason="python executor is not running",
 )
@@ -35,7 +37,12 @@ def _headers():
 def _execute(code, timeout=5):
     return requests.post(
         f"{BASE_URL}/execute",
-        json={"code": code, "timeout": timeout},
+        json={
+            "code": code,
+            "timeout": timeout,
+            "session_id": "sess_test",
+            "workspace_id": "ws_test",
+        },
         headers=_headers(),
     )
 
@@ -146,7 +153,7 @@ def test_pandas_available():
 def test_proxy_token_required():
     resp = requests.post(
         f"{BASE_URL}/execute",
-        json={"code": "print('hello')", "timeout": 5},
+        json={"code": "print('hello')", "timeout": 5, "session_id": "sess_test", "workspace_id": "ws_test"},
     )
     assert resp.status_code in (403, 503)
 
@@ -154,7 +161,7 @@ def test_proxy_token_required():
 def test_invalid_proxy_token():
     resp = requests.post(
         f"{BASE_URL}/execute",
-        json={"code": "print('hello')", "timeout": 5},
+        json={"code": "print('hello')", "timeout": 5, "session_id": "sess_test", "workspace_id": "ws_test"},
         headers={"X-Proxy-Token": "wrong-token"},
     )
     assert resp.status_code == 403
@@ -176,11 +183,138 @@ def test_session_workspace_isolation():
     assert len(data["files"]) == 1
 
 
+def test_attr_os_escape_rejected():
+    with pytest.raises(SecurityViolation) as exc_info:
+        check_code("matplotlib.os.system('sh')")
+    assert "not allowed" in str(exc_info.value)
+
+
+def test_attr_sys_modules_escape_rejected():
+    with pytest.raises(SecurityViolation) as exc_info:
+        check_code("pandas.sys.modules['subprocess'].run(['sh'])")
+    assert "not allowed" in str(exc_info.value)
+
+
+def test_attr_importlib_escape_rejected():
+    with pytest.raises(SecurityViolation) as exc_info:
+        check_code("numpy.importlib.import_module('os')")
+    assert "not allowed" in str(exc_info.value)
+
+
+def test_getattr_dynamic_access_rejected():
+    with pytest.raises(SecurityViolation) as exc_info:
+        check_code("f = getattr(matplotlib, 'os')\nf.system('sh')")
+    assert "not allowed" in str(exc_info.value)
+
+
+def test_import_from_dangerous_attr_rejected():
+    with pytest.raises(SecurityViolation) as exc_info:
+        check_code("from pandas import io\nio.common.urlopen('http://example.com')")
+    assert "not allowed" in str(exc_info.value)
+
+
+def test_dotted_import_dangerous_component_rejected():
+    with pytest.raises(SecurityViolation) as exc_info:
+        check_code("import pandas.io")
+    assert "not allowed" in str(exc_info.value)
+
+
+def test_license_interactive_rejected():
+    with pytest.raises(SecurityViolation):
+        check_code("license()")
+
+
+def test_bytearray_rejected():
+    with pytest.raises(SecurityViolation):
+        check_code("b = bytearray(b'x')")
+
+
+def test_re_compile_allowed():
+    check_code("import re\npat = re.compile(r'[a-z]+')\npat.match('abc')")
+
+
+def test_dataframe_eval_allowed():
+    check_code("df.eval('a > 1')")
+
+
+def test_scipy_signal_allowed():
+    check_code("import scipy.signal\nscipy.signal.find_peaks([1, 2, 3])")
+
+
+def test_pandas_numpy_ast_allowed():
+    check_code(
+        "import pandas as pd\n"
+        "import numpy as np\n"
+        "df = pd.DataFrame({'a': np.array([1, 2, 3])})\n"
+        "df['b'] = df['a'] * 2\n"
+        "print(df.describe())"
+    )
+
+
+def test_matplotlib_ast_allowed():
+    check_code(
+        "import matplotlib\n"
+        "matplotlib.use('Agg')\n"
+        "import matplotlib.pyplot as plt\n"
+        "plt.plot([1, 2], [3, 4])\n"
+        "plt.savefig('chart.png')\n"
+        "plt.close('all')"
+    )
+
+
+@requires_executor
+def test_escape_via_matplotlib_os_blocked():
+    resp = _execute("matplotlib.os.system('sh')")
+    data = resp.json()
+    assert not data["success"]
+    assert "not allowed" in data["error"].lower()
+
+
+@requires_executor
+def test_escape_via_pandas_sys_blocked():
+    resp = _execute("pandas.sys.modules['subprocess'].run(['id'])")
+    data = resp.json()
+    assert not data["success"]
+    assert "not allowed" in data["error"].lower()
+
+
+@requires_executor
+def test_escape_via_numpy_importlib_blocked():
+    resp = _execute("numpy.importlib.import_module('os')")
+    data = resp.json()
+    assert not data["success"]
+    assert "not allowed" in data["error"].lower()
+
+
+@requires_executor
+def test_escape_via_getattr_blocked():
+    resp = _execute("f = getattr(matplotlib, 'os')\nf.system('sh')")
+    data = resp.json()
+    assert not data["success"]
+
+
+@requires_executor
+def test_pandas_numpy_matplotlib_usage_allowed():
+    resp = _execute(
+        "import pandas as pd\n"
+        "import numpy as np\n"
+        "import matplotlib\n"
+        "matplotlib.use('Agg')\n"
+        "import matplotlib.pyplot as plt\n"
+        "df = pd.DataFrame({'a': np.arange(5)})\n"
+        "df['b'] = np.sqrt(df['a'])\n"
+        "plt.plot(df['a'], df['b'])\n"
+        "print(df['b'].sum())"
+    )
+    data = resp.json()
+    assert data["success"], f"normal usage should work: {data.get('error', '')}"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
             try:
                 fn()
-                print(f"PASS: {name}")
+                print(f"通过：{name}")
             except Exception as e:
-                print(f"FAIL: {name}: {e}")
+                print(f"失败：{name}：{e}")

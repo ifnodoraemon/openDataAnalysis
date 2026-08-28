@@ -3,26 +3,30 @@ package tools
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/ifnodoraemon/openDataAnalysis/config"
+	"github.com/ifnodoraemon/openDataAnalysis/internal/jsoncontract"
+	"github.com/ifnodoraemon/openDataAnalysis/service"
 )
 
 // RunPythonTool 通过 MCP 服务执行 Python 代码
 type RunPythonTool struct {
 	MCPEndpoint string // Python MCP 服务地址，如 http://python-executor:8081
+	FileService *service.FileService
+	ReportState *ReportState
 	childCtx    context.Context
 }
 
@@ -42,32 +46,53 @@ func (t *RunPythonTool) SetExecutionContext(ctx context.Context) {
 
 func init() {
 	RegisterGlobalTool(func(ctx ToolContext) Tool {
-		// PythonTool 的真正激活在引擎层判断，或在执行时进行 health check
-		return &RunPythonTool{MCPEndpoint: ""} // 默认配置，由引擎初始化或读取全局 config
+		endpoint := ""
+		if config.Cfg != nil {
+			endpoint = config.Cfg.PythonMCPURL
+		}
+		return &RunPythonTool{MCPEndpoint: endpoint, FileService: ctx.FileService, ReportState: ctx.ReportState}
 	})
 }
 
 func (t *RunPythonTool) Name() string { return "code_run_python" }
+func (t *RunPythonTool) Capability() ToolCapability {
+	return ToolCapability{Mode: "action", RuntimeEnabled: true, Delegable: true}
+}
 func (t *RunPythonTool) Description() string {
-	return "Execute Python code in a sandboxed environment via MCP service. Returns stdout, stderr, generated file URLs, execution duration, and truncation flag. Side effects: may produce output files accessible via API. Failure conditions: MCP service unavailable, timeout exceeded, runtime error. The code runs in an isolated container with no persistent state between calls; data must be re-read or passed explicitly."
+	return "Execute Python code in an isolated sandbox. Optional inputs mount exact analysis_result or artifact payloads as named files. Generated files are copied into durable object storage and returned as artifact IDs and authenticated API URLs. Returns stdout, stderr, artifacts, duration, and truncation facts."
 }
 
 func (t *RunPythonTool) Parameters() json.RawMessage {
-	return json.RawMessage(`{
+	return json.RawMessage(fmt.Sprintf(`{
 		"type": "object",
+		"additionalProperties": false,
 		"properties": {
 			"code": {"type": "string", "description": "Python code to execute."},
-			"timeout": {"type": "integer", "description": "Timeout in seconds, default 30", "default": 30}
+			"timeout": {"type": "integer", "minimum": 5, "maximum": %d, "description": "Explicit timeout in seconds."},
+			"inputs": {"type":"array","description":"Result or artifact payloads to mount in the sandbox.","items":{"type":"object","additionalProperties":false,"properties":{"kind":{"type":"string","enum":["analysis_result","artifact"]},"id":{"type":"string"},"filename":{"type":"string"}},"required":["kind","id"]}}
 		},
-		"required": ["code"]
-	}`)
+		"required": ["code", "timeout"]
+	}`, pythonMaxTimeout()))
+}
+
+func pythonMaxTimeout() int {
+	if config.Cfg != nil && config.Cfg.PythonMaxTimeoutSec >= 5 {
+		return config.Cfg.PythonMaxTimeoutSec
+	}
+	return 120
 }
 
 type pyExecRequest struct {
-	Code        string `json:"code"`
-	Timeout     int    `json:"timeout"`
-	SessionID   string `json:"session_id,omitempty"`
-	WorkspaceID string `json:"workspace_id,omitempty"`
+	Code        string        `json:"code"`
+	Timeout     int           `json:"timeout"`
+	SessionID   string        `json:"session_id,omitempty"`
+	WorkspaceID string        `json:"workspace_id,omitempty"`
+	Inputs      []pyExecInput `json:"inputs,omitempty"`
+}
+
+type pyExecInput struct {
+	Filename      string `json:"filename"`
+	ContentBase64 string `json:"content_base64"`
 }
 
 type pyExecResponse struct {
@@ -80,29 +105,36 @@ type pyExecResponse struct {
 	Truncated  bool     `json:"truncated"`
 }
 
-func (t *RunPythonTool) Endpoint() string {
-	endpoint := strings.TrimSpace(t.MCPEndpoint)
-	if endpoint == "" {
-		endpoint = "http://python-executor:8081"
+func (t *RunPythonTool) endpointURL(path string) (string, error) {
+	base := t.MCPEndpoint
+	if strings.TrimSpace(base) == "" {
+		return "", fmt.Errorf("PYTHON_MCP_URL is not configured")
 	}
-	return strings.TrimRight(endpoint, "/")
+	if strings.TrimSpace(base) != base || strings.HasSuffix(base, "/") {
+		return "", fmt.Errorf("PYTHON_MCP_URL must be an exact base URL without a trailing slash")
+	}
+	parsed, err := url.Parse(base)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("PYTHON_MCP_URL must be an absolute HTTP(S) base URL")
+	}
+	if path != "" && !strings.HasPrefix(path, "/") {
+		return "", fmt.Errorf("Python executor path must start with a slash")
+	}
+	return base + path, nil
 }
 
 func configuredProxyToken() string {
-	if config.Cfg != nil && strings.TrimSpace(config.Cfg.ProxyToken) != "" {
-		return strings.TrimSpace(config.Cfg.ProxyToken)
+	if config.Cfg != nil && config.Cfg.ProxyToken != "" {
+		return config.Cfg.ProxyToken
 	}
-	return strings.TrimSpace(os.Getenv("PROXY_TOKEN"))
+	return ""
 }
 
-func configuredPublicAPIBaseURL() string {
-	if config.Cfg != nil && strings.TrimSpace(config.Cfg.PublicAPIBaseURL) != "" {
-		return strings.TrimRight(strings.TrimSpace(config.Cfg.PublicAPIBaseURL), "/")
+func (t *RunPythonTool) CheckAvailability(ctx context.Context) error {
+	if _, err := t.endpointURL(""); err != nil {
+		return err
 	}
-	if value := strings.TrimSpace(os.Getenv("PUBLIC_API_BASE_URL")); value != "" {
-		return strings.TrimRight(value, "/")
-	}
-	return strings.TrimRight(strings.TrimSpace(os.Getenv("API_BASE_URL")), "/")
+	return t.HealthCheck(ctx)
 }
 
 func (t *RunPythonTool) HealthCheck(ctx context.Context) error {
@@ -110,7 +142,14 @@ func (t *RunPythonTool) HealthCheck(ctx context.Context) error {
 	if strings.TrimSpace(proxyToken) == "" {
 		return fmt.Errorf("PROXY_TOKEN is not configured")
 	}
-	cacheKey := t.Endpoint() + "\x00" + proxyToken
+	if strings.TrimSpace(proxyToken) != proxyToken {
+		return fmt.Errorf("PROXY_TOKEN must not contain leading or trailing whitespace")
+	}
+	base, err := t.endpointURL("")
+	if err != nil {
+		return err
+	}
+	cacheKey := base + "\x00" + proxyToken
 	pythonHealthCache.Lock()
 	cacheAge := time.Since(pythonHealthCache.checkedAt)
 	cacheTTL := pythonHealthCacheTTL
@@ -128,7 +167,7 @@ func (t *RunPythonTool) HealthCheck(ctx context.Context) error {
 	defer cancel()
 	client := &http.Client{Timeout: 1500 * time.Millisecond}
 
-	err := t.runHealthCheck(healthCtx, client, proxyToken)
+	err = t.runHealthCheck(healthCtx, client, proxyToken)
 	pythonHealthCache.Lock()
 	pythonHealthCache.key = cacheKey
 	pythonHealthCache.checkedAt = time.Now()
@@ -138,7 +177,11 @@ func (t *RunPythonTool) HealthCheck(ctx context.Context) error {
 }
 
 func (t *RunPythonTool) runHealthCheck(ctx context.Context, client *http.Client, proxyToken string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.Endpoint()+"/health", nil)
+	healthURL, err := t.endpointURL("/health")
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
 	if err != nil {
 		return err
 	}
@@ -148,12 +191,23 @@ func (t *RunPythonTool) runHealthCheck(ctx context.Context, client *http.Client,
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if readErr != nil {
+			return fmt.Errorf("status=%d and failed to read response: %w", resp.StatusCode, readErr)
+		}
 		return fmt.Errorf("status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	body, _ := json.Marshal(pyExecRequest{Code: "print('ok')", Timeout: 5})
-	execReq, err := http.NewRequestWithContext(ctx, http.MethodPost, t.Endpoint()+"/execute", bytes.NewReader(body))
+	healthNamespace := strings.ReplaceAll(uuid.NewString(), "-", "")
+	body, err := json.Marshal(pyExecRequest{Code: "print('ok')", Timeout: 5, SessionID: "health_" + healthNamespace, WorkspaceID: "health_" + healthNamespace})
+	if err != nil {
+		return fmt.Errorf("failed to encode execute health request: %w", err)
+	}
+	executeURL, err := t.endpointURL("/execute")
+	if err != nil {
+		return err
+	}
+	execReq, err := http.NewRequestWithContext(ctx, http.MethodPost, executeURL, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -167,12 +221,15 @@ func (t *RunPythonTool) runHealthCheck(ctx context.Context, client *http.Client,
 		return err
 	}
 	defer execResp.Body.Close()
-	execBody, _ := io.ReadAll(io.LimitReader(execResp.Body, 4096))
+	execBody, err := io.ReadAll(io.LimitReader(execResp.Body, 4096))
+	if err != nil {
+		return fmt.Errorf("failed to read execute health response: %w", err)
+	}
 	if execResp.StatusCode >= 300 {
 		return fmt.Errorf("execute status=%d body=%s", execResp.StatusCode, strings.TrimSpace(string(execBody)))
 	}
 	var result pyExecResponse
-	if err := json.Unmarshal(execBody, &result); err != nil {
+	if err := jsoncontract.Decode(execBody, &result); err != nil {
 		return fmt.Errorf("failed to parse execute health response: %w", err)
 	}
 	if !result.Success {
@@ -189,31 +246,53 @@ func (t *RunPythonTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
 		Code    string `json:"code"`
 		Timeout int    `json:"timeout"`
+		Inputs  []struct {
+			Kind     string `json:"kind"`
+			ID       string `json:"id"`
+			Filename string `json:"filename"`
+		} `json:"inputs"`
 	}
-	if err := json.Unmarshal(args, &params); err != nil {
+	if err := decodeToolArgs(args, &params); err != nil {
 		return "", fmt.Errorf("failed to parse parameters: %w", err)
 	}
-	if params.Timeout <= 0 {
-		params.Timeout = 30
+	if params.Timeout < 5 || params.Timeout > pythonMaxTimeout() {
+		return toolFailure("code_run_python", "invalid_timeout", fmt.Sprintf("timeout must be between 5 and %d seconds", pythonMaxTimeout()), map[string]interface{}{"timeout": params.Timeout}), nil
+	}
+	if strings.TrimSpace(params.Code) == "" {
+		return toolFailure("code_run_python", "invalid_code", "code must contain text", nil), nil
 	}
 
 	execCtx := t.childCtx
 	if execCtx == nil {
-		execCtx = context.Background()
+		return toolFailure("code_run_python", "missing_execution_context", "tool execution context is not initialized", nil), nil
 	}
 	meta := ExecutionMetadataFromContext(execCtx)
+	if meta.UserID == "" || meta.WorkspaceID == "" || meta.SessionID == "" || meta.RunID == "" {
+		return toolFailure("code_run_python", "missing_execution_identity", "authenticated user, workspace, session, and run identities are required", nil), nil
+	}
+	inputs, err := t.resolveInputs(execCtx, meta, params.Inputs)
+	if err != nil {
+		return toolFailure("code_run_python", "input_resolution_failed", "Python input could not be resolved", map[string]interface{}{"detail": err.Error()}), nil
+	}
 
-	reqBody, _ := json.Marshal(pyExecRequest{
+	reqBody, err := json.Marshal(pyExecRequest{
 		Code:        params.Code,
 		Timeout:     params.Timeout,
 		SessionID:   meta.SessionID,
 		WorkspaceID: meta.WorkspaceID,
+		Inputs:      inputs,
 	})
+	if err != nil {
+		return "", fmt.Errorf("failed to encode Python execution request: %w", err)
+	}
 	ctx, cancel := context.WithTimeout(execCtx, time.Duration(params.Timeout+5)*time.Second)
 	defer cancel()
 
-	endpoint := t.Endpoint()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/execute", bytes.NewReader(reqBody))
+	executeURL, err := t.endpointURL("/execute")
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, executeURL, bytes.NewReader(reqBody))
 	if err != nil {
 		return "", fmt.Errorf("failed to build request: %w", err)
 	}
@@ -234,74 +313,168 @@ func (t *RunPythonTool) Execute(args json.RawMessage) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+	if err != nil {
+		return "", fmt.Errorf("failed to read Python execution response: %w", err)
+	}
 	if resp.StatusCode >= 300 {
 		return "", fmt.Errorf("Python MCP service returned status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var result pyExecResponse
-	if err := json.Unmarshal(body, &result); err != nil {
+	if err := jsoncontract.Decode(body, &result); err != nil {
 		return "", fmt.Errorf("failed to parse Python execution result: %w", err)
 	}
 
-	apiBaseURL := configuredPublicAPIBaseURL()
-	meta = ExecutionMetadataFromContext(execCtx)
-	for i, f := range result.Files {
-		result.Files[i] = buildPythonFileURL(apiBaseURL, f, meta)
+	artifacts := make([]ArtifactRecord, 0, len(result.Files))
+	for _, filePath := range result.Files {
+		artifact, artifactErr := t.persistExecutorArtifact(ctx, client, proxyToken, filePath, meta)
+		if artifactErr != nil {
+			return toolFailure("code_run_python", "artifact_persistence_failed", "Python output could not be persisted", map[string]interface{}{"detail": artifactErr.Error()}), nil
+		}
+		artifacts = append(artifacts, artifact)
+		if t.ReportState != nil {
+			if err := t.ReportState.RecordArtifact(artifact); err != nil {
+				return "", fmt.Errorf("failed to record Python artifact: %w", err)
+			}
+		}
 	}
 
-	return formatPythonResult(result), nil
+	return formatPythonResult(result, artifacts), nil
 }
 
-func buildPythonFileURL(apiBaseURL, filename string, meta ExecutionMetadata) string {
-	path := fmt.Sprintf("/api/python-files/%s", url.PathEscape(filename))
-	base := strings.TrimRight(strings.TrimSpace(apiBaseURL), "/") + path
-	secret := ""
-	if config.Cfg != nil {
-		secret = strings.TrimSpace(config.Cfg.AuthSecret)
+func (t *RunPythonTool) resolveInputs(ctx context.Context, meta ExecutionMetadata, requested []struct {
+	Kind     string `json:"kind"`
+	ID       string `json:"id"`
+	Filename string `json:"filename"`
+}) ([]pyExecInput, error) {
+	inputs := make([]pyExecInput, 0, len(requested))
+	for _, item := range requested {
+		if item.Kind != strings.TrimSpace(item.Kind) || item.ID == "" || item.ID != strings.TrimSpace(item.ID) || item.Filename != strings.TrimSpace(item.Filename) {
+			return nil, fmt.Errorf("Python input kind, id, and filename must use exact values")
+		}
+		name := item.Filename
+		var content []byte
+		var err error
+		switch item.Kind {
+		case "analysis_result":
+			if t.ReportState == nil {
+				return nil, fmt.Errorf("analysis result store is unavailable")
+			}
+			t.ReportState.RLock()
+			result, ok := t.ReportState.Results[item.ID]
+			t.ReportState.RUnlock()
+			if !ok {
+				return nil, fmt.Errorf("analysis result %s not found", item.ID)
+			}
+			content, err = json.Marshal(result)
+			if err != nil {
+				return nil, fmt.Errorf("failed to encode analysis result %s: %w", item.ID, err)
+			}
+			if name == "" {
+				name = result.ID + ".json"
+			}
+		case "artifact":
+			if t.FileService == nil {
+				return nil, fmt.Errorf("artifact store is unavailable")
+			}
+			reader, file, err := t.FileService.OpenForDownload(ctx, meta.UserID, meta.WorkspaceID, item.ID)
+			if err != nil {
+				return nil, err
+			}
+			content, err = io.ReadAll(io.LimitReader(reader, 50*1024*1024+1))
+			closeErr := reader.Close()
+			if err != nil || closeErr != nil {
+				return nil, fmt.Errorf("failed to read artifact input: %w", errors.Join(err, closeErr))
+			}
+			if len(content) > 50*1024*1024 {
+				return nil, fmt.Errorf("artifact input exceeds the 50 MiB limit")
+			}
+			if name == "" {
+				name = file.DisplayName
+			}
+		default:
+			return nil, fmt.Errorf("unsupported input kind %q", item.Kind)
+		}
+		if name == "." || name == "" || name != filepath.Base(name) || strings.ContainsAny(name, `/\\`) {
+			return nil, fmt.Errorf("invalid input filename %q", name)
+		}
+		inputs = append(inputs, pyExecInput{Filename: name, ContentBase64: base64.StdEncoding.EncodeToString(content)})
 	}
-	if secret == "" || strings.TrimSpace(meta.WorkspaceID) == "" || strings.TrimSpace(meta.SessionID) == "" || strings.TrimSpace(meta.RunID) == "" {
-		return base
+	return inputs, nil
+}
+
+func (t *RunPythonTool) persistExecutorArtifact(ctx context.Context, client *http.Client, proxyToken, filePath string, meta ExecutionMetadata) (ArtifactRecord, error) {
+	if t.FileService == nil {
+		return ArtifactRecord{}, fmt.Errorf("durable artifact store is unavailable")
 	}
-
-	values := url.Values{}
-	values.Set("session_id", meta.SessionID)
-	values.Set("run_id", meta.RunID)
-	values.Set("sig", SignPythonFileAccess(filename, meta, secret))
-	return base + "?" + values.Encode()
-}
-
-func SignPythonFileAccess(filename string, meta ExecutionMetadata, secret string) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(pythonFileAccessMessage(filename, meta)))
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-}
-
-func VerifyPythonFileAccessSignature(filename string, meta ExecutionMetadata, secret, sig string) bool {
-	secret = strings.TrimSpace(secret)
-	sig = strings.TrimSpace(sig)
-	if secret == "" || sig == "" || strings.TrimSpace(filename) == "" ||
-		strings.TrimSpace(meta.WorkspaceID) == "" ||
-		strings.TrimSpace(meta.SessionID) == "" ||
-		strings.TrimSpace(meta.RunID) == "" {
-		return false
+	if strings.TrimSpace(filePath) == "" || strings.TrimSpace(filePath) != filePath || strings.HasPrefix(filePath, "/") || strings.HasSuffix(filePath, "/") {
+		return ArtifactRecord{}, fmt.Errorf("executor file path must be a non-empty exact relative path")
 	}
-	want := SignPythonFileAccess(filename, meta, secret)
-	return hmac.Equal([]byte(want), []byte(sig))
+	parts := strings.Split(filePath, "/")
+	for i := range parts {
+		if parts[i] == "" || parts[i] == "." || parts[i] == ".." {
+			return ArtifactRecord{}, fmt.Errorf("executor file path contains an invalid segment")
+		}
+		parts[i] = url.PathEscape(parts[i])
+	}
+	fileURL, err := t.endpointURL("/files/" + strings.Join(parts, "/"))
+	if err != nil {
+		return ArtifactRecord{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
+	if err != nil {
+		return ArtifactRecord{}, err
+	}
+	req.Header.Set("X-Proxy-Token", proxyToken)
+	resp, err := client.Do(req)
+	if err != nil {
+		return ArtifactRecord{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		if readErr != nil {
+			return ArtifactRecord{}, fmt.Errorf("executor file download status=%d and response read failed: %w", resp.StatusCode, readErr)
+		}
+		return ArtifactRecord{}, fmt.Errorf("executor file download status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 50*1024*1024+1))
+	if err != nil {
+		return ArtifactRecord{}, fmt.Errorf("failed to read executor output: %w", err)
+	}
+	if len(body) > 50*1024*1024 {
+		return ArtifactRecord{}, fmt.Errorf("executor output exceeds the 50 MiB limit")
+	}
+	name := filepath.Base(filePath)
+	file, err := t.FileService.SaveArtifact(ctx, service.SaveArtifactInput{
+		UserID: meta.UserID, WorkspaceID: meta.WorkspaceID, SessionID: meta.SessionID,
+		RunID: meta.RunID, FileName: name, ContentType: resp.Header.Get("Content-Type"),
+		Body: bytes.NewReader(body), Size: int64(len(body)),
+	})
+	if err != nil {
+		return ArtifactRecord{}, err
+	}
+	return ArtifactRecord{ID: file.ID, Name: file.DisplayName, ContentType: file.ContentType, DownloadURL: "/api/files/" + url.PathEscape(file.ID), CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}, nil
 }
 
-func pythonFileAccessMessage(filename string, meta ExecutionMetadata) string {
-	return filename + "\n" + meta.WorkspaceID + "\n" + meta.SessionID + "\n" + meta.RunID
-}
-
-func formatPythonResult(result pyExecResponse) string {
+func formatPythonResult(result pyExecResponse, artifactLists ...[]ArtifactRecord) string {
+	var artifacts []ArtifactRecord
+	if len(artifactLists) > 0 {
+		artifacts = artifactLists[0]
+	}
+	files := make([]string, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		files = append(files, artifact.DownloadURL)
+	}
 	payload := map[string]interface{}{
 		"duration_ms": result.DurationMs,
 		"stdout":      result.Stdout,
 		"stderr":      result.Stderr,
-		"files":       result.Files,
+		"files":       files,
+		"artifacts":   artifacts,
 	}
 	if result.Success {
-		payload["ui_summary"] = fmt.Sprintf("Python execution succeeded (%dms)", result.DurationMs)
+		payload["ui_summary"] = fmt.Sprintf("Python 执行成功，用时 %d 毫秒。", result.DurationMs)
 		return toolSuccess("code_run_python", payload)
 	}
 
@@ -313,6 +486,6 @@ func formatPythonResult(result pyExecResponse) string {
 		errorText = strings.TrimSpace(result.Stderr)
 	}
 	payload["detail"] = errorText
-	payload["ui_summary"] = fmt.Sprintf("Python execution failed (%dms)", result.DurationMs)
+	payload["ui_summary"] = fmt.Sprintf("Python 执行失败，用时 %d 毫秒。", result.DurationMs)
 	return toolFailure("code_run_python", "execution_failed", "Python execution failed", payload)
 }

@@ -2,13 +2,10 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
-	"github.com/jackc/pgx/v5"
 )
 
 type SourceConfigRepository struct {
@@ -37,11 +34,8 @@ func (r *SourceConfigRepository) GetBySourceID(ctx context.Context, sourceID str
 	var cfg domain.SourceConfig
 	var connectorType string
 	err := row.Scan(&cfg.SourceID, &connectorType, &cfg.ConfigJSON, &cfg.CredentialCiphertext, &cfg.LastTestedAt, &cfg.LastTestStatus, &cfg.LastErrorMessage, &cfg.CreatedAt, &cfg.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, sql.ErrNoRows
-	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get source config by source id: %w", err)
+		return nil, fmt.Errorf("failed to get source config by source id: %w", normalizeLookupError(err))
 	}
 	cfg.ConnectorType = domain.SourceType(connectorType)
 	return &cfg, nil

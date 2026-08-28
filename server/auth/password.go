@@ -25,7 +25,7 @@ func VerifyPassword(password, encoded string) bool {
 // and contains both letters and digits.
 func ValidatePasswordStrength(password string) error {
 	if len(password) < 8 {
-		return errors.New("password must be at least 8 characters long")
+		return errors.New("密码长度至少为 8 个字符")
 	}
 	var hasLetter, hasDigit bool
 	for _, char := range password {
@@ -37,7 +37,7 @@ func ValidatePasswordStrength(password string) error {
 		}
 	}
 	if !hasLetter || !hasDigit {
-		return errors.New("password must contain both letters and numbers")
+		return errors.New("密码必须同时包含字母和数字")
 	}
 	return nil
 }

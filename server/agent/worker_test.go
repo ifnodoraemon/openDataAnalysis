@@ -11,10 +11,13 @@ import (
 
 type runtimeAwareTestTool struct {
 	ctx  context.Context
-	emit func(WSEvent)
+	emit func(RuntimeEvent)
 }
 
 func (t *runtimeAwareTestTool) Name() string { return "runtime_aware_test_tool" }
+func (t *runtimeAwareTestTool) Capability() tools.ToolCapability {
+	return tools.ToolCapability{Mode: "observe", RuntimeEnabled: true, Delegable: true}
+}
 func (t *runtimeAwareTestTool) Description() string {
 	return "test runtime-aware tool"
 }
@@ -24,18 +27,24 @@ func (t *runtimeAwareTestTool) Parameters() json.RawMessage {
 func (t *runtimeAwareTestTool) Execute(json.RawMessage) (string, error) {
 	return `{"ok":true}`, nil
 }
-func (t *runtimeAwareTestTool) SetEventEmitter(emit func(WSEvent)) {
+func (t *runtimeAwareTestTool) SetEventEmitter(emit func(RuntimeEvent)) {
 	t.emit = emit
 }
 func (t *runtimeAwareTestTool) SetExecutionContext(ctx context.Context) {
 	t.ctx = ctx
 }
 
+func fixedRegistryFactory(registry *tools.Registry) tools.RegistryFactory {
+	return func(allowed []string) *tools.Registry {
+		return registry.CloneFiltered(allowed)
+	}
+}
+
 func TestDelegateTaskToolReturnsStructuredFailureWhenAllowedToolsUnresolved(t *testing.T) {
 	t.Parallel()
 
 	tool := &DelegateTaskTool{
-		BaseRegistry: tools.NewRegistry(),
+		RegistryFactory: fixedRegistryFactory(tools.NewRegistry()),
 	}
 
 	result, err := tool.Execute(json.RawMessage(`{
@@ -54,7 +63,7 @@ func TestDelegateTaskToolReturnsStructuredFailureWhenAllowedToolsUnresolved(t *t
 	if payload["tool"] != "task_delegate" || payload["ok"] != false {
 		t.Fatalf("unexpected delegate failure payload: %#v", payload)
 	}
-	if payload["error_code"] != "no_allowed_tools_resolved" {
+	if payload["error_code"] != "tools_not_delegable" {
 		t.Fatalf("unexpected error_code: %#v", payload["error_code"])
 	}
 	if payload["delegate_role"] != "researcher" {
@@ -66,7 +75,7 @@ func TestDelegateTaskToolReturnsStructuredFailureForMissingRoleName(t *testing.T
 	t.Parallel()
 
 	tool := &DelegateTaskTool{
-		BaseRegistry: tools.NewRegistry(),
+		RegistryFactory: fixedRegistryFactory(tools.NewRegistry()),
 	}
 
 	result, err := tool.Execute(json.RawMessage(`{
@@ -89,10 +98,36 @@ func TestDelegateTaskToolReturnsStructuredFailureForMissingRoleName(t *testing.T
 	}
 }
 
+func TestDelegateTaskToolReturnsStructuredFailureForMissingRegistryResult(t *testing.T) {
+	t.Parallel()
+
+	tool := &DelegateTaskTool{
+		RegistryFactory: func([]string) *tools.Registry { return nil },
+	}
+	result, err := tool.Execute(json.RawMessage(`{
+		"role_name":"researcher",
+		"task_instruction":"检查数据事实",
+		"allowed_tools":["data_query_sql"]
+	}`))
+	if err != nil {
+		t.Fatalf("expected structured failure instead of error, got %v", err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(result), &payload); err != nil {
+		t.Fatalf("expected JSON payload: %v", err)
+	}
+	if payload["error_code"] != "delegate_registry_unavailable" {
+		t.Fatalf("unexpected error_code: %#v", payload["error_code"])
+	}
+}
+
 func TestDelegateChildToolFailureReturnsStructuredPayload(t *testing.T) {
 	t.Parallel()
 
-	result := delegateChildToolFailure("data_query_sql", "boom")
+	result, err := delegateChildToolFailure("data_query_sql", "boom")
+	if err != nil {
+		t.Fatalf("encode child tool failure: %v", err)
+	}
 
 	var payload map[string]interface{}
 	if err := json.Unmarshal([]byte(result), &payload); err != nil {
@@ -110,7 +145,7 @@ func TestDelegateTaskToolParsesPolicyAppendix(t *testing.T) {
 	t.Parallel()
 
 	tool := &DelegateTaskTool{
-		BaseRegistry: tools.NewRegistry(),
+		RegistryFactory: fixedRegistryFactory(tools.NewRegistry()),
 	}
 	result, err := tool.Execute(json.RawMessage(`{
 		"role_name":"researcher",
@@ -129,16 +164,16 @@ func TestDelegateTaskToolParsesPolicyAppendix(t *testing.T) {
 	if payload["tool"] != "task_delegate" || payload["ok"] != false {
 		t.Fatalf("unexpected delegate failure payload: %#v", payload)
 	}
-	if payload["error_code"] != "no_allowed_tools_resolved" {
+	if payload["error_code"] != "tools_not_delegable" {
 		t.Fatalf("unexpected error_code: %#v", payload["error_code"])
 	}
 }
 
-func TestDelegateTaskToolRejectsContextDumpInPolicyAppendix(t *testing.T) {
+func TestDelegateTaskToolDoesNotGuessPolicyAppendixSemantics(t *testing.T) {
 	t.Parallel()
 
 	tool := &DelegateTaskTool{
-		BaseRegistry: tools.NewRegistry(),
+		RegistryFactory: fixedRegistryFactory(tools.NewRegistry()),
 	}
 	result, err := tool.Execute(json.RawMessage(`{
 		"role_name":"researcher",
@@ -154,16 +189,16 @@ func TestDelegateTaskToolRejectsContextDumpInPolicyAppendix(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &payload); err != nil {
 		t.Fatalf("expected json payload: %v", err)
 	}
-	if payload["error_code"] != "policy_appendix_invalid" {
+	if payload["error_code"] != "tools_not_delegable" {
 		t.Fatalf("unexpected error_code: %#v", payload["error_code"])
 	}
 }
 
-func TestDelegateTaskToolRejectsDisallowedDelegateTools(t *testing.T) {
+func TestDelegateTaskToolUsesCapabilityContractForNonDelegableTools(t *testing.T) {
 	t.Parallel()
 
 	tool := &DelegateTaskTool{
-		BaseRegistry: tools.NewRegistry(),
+		RegistryFactory: fixedRegistryFactory(tools.NewRegistry()),
 	}
 	result, err := tool.Execute(json.RawMessage(`{
 		"role_name":"researcher",
@@ -178,55 +213,94 @@ func TestDelegateTaskToolRejectsDisallowedDelegateTools(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &payload); err != nil {
 		t.Fatalf("expected json payload: %v", err)
 	}
-	if payload["error_code"] != "disallowed_delegate_tools" {
+	if payload["error_code"] != "tools_not_delegable" {
 		t.Fatalf("unexpected error_code: %#v", payload["error_code"])
 	}
 }
 
-func TestDelegateTaskToolContractDeclaresDisallowedTools(t *testing.T) {
+func TestDelegateTaskToolContractUsesCapabilityDiscovery(t *testing.T) {
 	t.Parallel()
 
 	tool := &DelegateTaskTool{}
-	if got := tool.Description(); !strings.Contains(got, "user_request_input") || !strings.Contains(got, "report_finalize") {
-		t.Fatalf("expected description to declare disallowed tools, got %q", got)
+	if got := tool.Description(); !strings.Contains(got, "delegable=true") {
+		t.Fatalf("expected description to declare capability discovery, got %q", got)
 	}
-	if got := string(tool.Parameters()); !strings.Contains(got, "user_request_input") || !strings.Contains(got, "report_finalize") {
-		t.Fatalf("expected parameter schema to declare disallowed tools, got %q", got)
+	if got := string(tool.Parameters()); strings.Contains(got, "user_request_input") || strings.Contains(got, "report_finalize") {
+		t.Fatalf("parameter schema must not encode tool-name special cases, got %q", got)
 	}
 }
 
-func TestDelegateTaskToolRestoresParentRuntimeHooks(t *testing.T) {
+func TestDelegateTaskToolRejectsMissingRuntimeInfrastructure(t *testing.T) {
+	t.Parallel()
+
+	registry := tools.NewRegistry()
+	registry.Register(&runtimeAwareTestTool{})
+	tool := &DelegateTaskTool{RegistryFactory: fixedRegistryFactory(registry)}
+	args := json.RawMessage(`{
+		"role_name":"observer",
+		"task_instruction":"Inspect the available facts.",
+		"allowed_tools":["runtime_aware_test_tool"]
+	}`)
+	assertCode := func(expected string) {
+		result, err := tool.Execute(args)
+		if err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(result), &payload); err != nil {
+			t.Fatalf("decode result: %v", err)
+		}
+		if payload["error_code"] != expected {
+			t.Fatalf("expected %s, got %#v", expected, payload)
+		}
+	}
+
+	assertCode("execution_context_missing")
+	tool.SetExecutionContext(context.Background())
+	assertCode("event_emitter_missing")
+	tool.SetEventEmitter(func(RuntimeEvent) {})
+	assertCode("child_run_persistence_missing")
+}
+
+func TestDelegateRuntimeHooksStayOnIndependentRegistryInstances(t *testing.T) {
 	t.Parallel()
 
 	type ctxKey struct{}
 
-	parentEvents := 0
 	childEvents := 0
-	parentEmit := func(WSEvent) { parentEvents++ }
-	childEmit := func(WSEvent) { childEvents++ }
-	parentCtx := context.WithValue(context.Background(), ctxKey{}, "parent")
+	childEmit := func(RuntimeEvent) { childEvents++ }
 	childCtx := context.WithValue(context.Background(), ctxKey{}, "child")
 
-	runtimeTool := &runtimeAwareTestTool{}
-	registry := tools.NewRegistry()
-	registry.Register(runtimeTool)
+	parentTool := &runtimeAwareTestTool{}
+	childTool := &runtimeAwareTestTool{}
+	childRegistry := tools.NewRegistry()
+	childRegistry.Register(childTool)
 
-	delegate := &DelegateTaskTool{BaseRegistry: registry}
-	prepareRegistryRuntimeTools(registry, childCtx, childEmit)
-	if got := runtimeTool.ctx.Value(ctxKey{}); got != "child" {
+	prepareRegistryRuntimeTools(childRegistry, childCtx, childEmit)
+	if got := childTool.ctx.Value(ctxKey{}); got != "child" {
 		t.Fatalf("expected child context before restore, got %#v", got)
 	}
-	runtimeTool.emit(WSEvent{})
-	if childEvents != 1 || parentEvents != 0 {
-		t.Fatalf("expected child emitter before restore, parent=%d child=%d", parentEvents, childEvents)
+	childTool.emit(RuntimeEvent{})
+	if childEvents != 1 {
+		t.Fatalf("expected child emitter, got %d events", childEvents)
 	}
-
-	delegate.restoreParentRegistryRuntimeTools(parentCtx, parentEmit)
-	if got := runtimeTool.ctx.Value(ctxKey{}); got != "parent" {
-		t.Fatalf("expected parent context after restore, got %#v", got)
-	}
-	runtimeTool.emit(WSEvent{})
-	if parentEvents != 1 || childEvents != 1 {
-		t.Fatalf("expected parent emitter after restore, parent=%d child=%d", parentEvents, childEvents)
+	if parentTool.ctx != nil || parentTool.emit != nil {
+		t.Fatalf("child hook preparation mutated independent parent tool: %#v", parentTool)
 	}
 }
+
+func TestGlobalToolBuildersRejectInvalidAgentStateTypes(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected invalid agent state type to panic")
+		}
+	}()
+	registry := tools.NewRegistry()
+	registry.LoadGlobalTools(tools.ToolContext{Subgoals: mismatchedSubgoalChecker{}})
+}
+
+type mismatchedSubgoalChecker struct{}
+
+func (mismatchedSubgoalChecker) CanFinalize() (bool, []string) { return false, nil }

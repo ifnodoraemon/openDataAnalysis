@@ -9,6 +9,17 @@ import (
 	"github.com/ifnodoraemon/openDataAnalysis/tools"
 )
 
+func TestNewEngineRejectsMissingRegistry(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected missing tool registry to panic")
+		}
+	}()
+	NewEngine(nil)
+}
+
 func TestCompactAssistantMessage(t *testing.T) {
 	t.Parallel()
 
@@ -56,7 +67,10 @@ func TestCompactToolResult(t *testing.T) {
     {"month":"2025-02","revenue":120}
   ]
 }`
-	compactedQuery := compactToolResult("data_query_sql", queryResult)
+	compactedQuery, err := compactToolResult("data_query_sql", queryResult)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if strings.Contains(compactedQuery, "\n") {
 		t.Fatalf("expected minified query result, got %q", compactedQuery)
 	}
@@ -66,7 +80,10 @@ func TestCompactToolResult(t *testing.T) {
   "rowCount":2,
   "columns":[{"name":"month"}]
 }`
-	compactedDescribe := compactToolResult("data_describe_table", describeResult)
+	compactedDescribe, err := compactToolResult("data_describe_table", describeResult)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if strings.Contains(compactedDescribe, "\n") {
 		t.Fatalf("expected minified describe result, got %q", compactedDescribe)
 	}
@@ -77,7 +94,10 @@ func TestCompactToolResult(t *testing.T) {
   "tables": ["sales"],
   "table_count": 1
 }`
-	compactedTables := compactToolResult("data_list_tables", listTablesResult)
+	compactedTables, err := compactToolResult("data_list_tables", listTablesResult)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if strings.Contains(compactedTables, "\n") {
 		t.Fatalf("expected minified data_list_tables result, got %q", compactedTables)
 	}
@@ -89,7 +109,10 @@ func TestCompactToolResult(t *testing.T) {
   "error_code": "execution_failed",
   "detail": "NameError"
 }`
-	compactedPython := compactToolResult("code_run_python", runPythonResult)
+	compactedPython, err := compactToolResult("code_run_python", runPythonResult)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if strings.Contains(compactedPython, "\n") {
 		t.Fatalf("expected minified code_run_python result, got %q", compactedPython)
 	}
@@ -98,69 +121,33 @@ func TestCompactToolResult(t *testing.T) {
 	}
 }
 
-func TestExtractToolSummaryPrefersStructuredFacts(t *testing.T) {
+func TestNormalizeToolExecutionResult(t *testing.T) {
 	t.Parallel()
 
-	raw := `{
-  "ok": false,
-  "tool": "code_run_python",
-  "ui_summary": "Python execution failed (12ms)",
-  "error_code": "execution_failed"
-}`
-	summary := extractToolSummary(raw)
-	if strings.Contains(summary, "Python execution failed") {
-		t.Fatalf("expected structured summary instead of ui_summary, got %q", summary)
+	if _, success, err := normalizeToolExecutionResult("demo", "", errors.New("boom")); err != nil || success {
+		t.Fatalf("expected encoded execution failure, success=%t err=%v", success, err)
 	}
-	if !strings.Contains(summary, "tool=code_run_python") || !strings.Contains(summary, "error_code=execution_failed") {
-		t.Fatalf("expected structured fields in summary, got %q", summary)
+	if _, success, err := normalizeToolExecutionResult("demo", `{"ok":false,"tool":"demo","error_code":"missing_option"}`, nil); err != nil || success {
+		t.Fatalf("expected ok=false result, success=%t err=%v", success, err)
+	}
+	if _, success, err := normalizeToolExecutionResult("demo", `{"ok":true,"tool":"demo"}`, nil); err != nil || !success {
+		t.Fatalf("expected ok=true result, success=%t err=%v", success, err)
+	}
+	if _, success, err := normalizeToolExecutionResult("demo", "plain text result", nil); err == nil || success {
+		t.Fatalf("expected plain text contract failure, success=%t err=%v", success, err)
 	}
 }
 
-func TestExtractToolSummaryPreservesChildResult(t *testing.T) {
-	t.Parallel()
-
-	raw := `{
-  "ok": true,
-  "tool": "task_delegate",
-  "child_result": "I have successfully analyzed the trend.",
-  "child_run_id": "child-123"
-}`
-	summary := extractToolSummary(raw)
-	if !strings.Contains(summary, "child_result=I have successfully analyzed the trend.") {
-		t.Fatalf("expected child_result to be preserved, got %q", summary)
-	}
-	if !strings.Contains(summary, "tool=task_delegate") {
-		t.Fatalf("expected structured core fields to be preserved, got %q", summary)
-	}
-}
-
-func TestToolCallSucceeded(t *testing.T) {
-	t.Parallel()
-
-	if toolCallSucceeded("", errors.New("boom")) {
-		t.Fatal("expected exec error to mark tool call as failed")
-	}
-	if toolCallSucceeded(`{"ok":false,"error_code":"missing_option"}`, nil) {
-		t.Fatal("expected ok=false payload to mark tool call as failed")
-	}
-	if !toolCallSucceeded(`{"ok":true}`, nil) {
-		t.Fatal("expected ok=true payload to mark tool call as successful")
-	}
-	if !toolCallSucceeded("plain text result", nil) {
-		t.Fatal("expected plain text result to remain successful")
-	}
-}
-
-func TestSuccessfulFinalizeResultDetection(t *testing.T) {
+func TestSuccessfulDeliveryBoundaryResultDetection(t *testing.T) {
 	t.Parallel()
 
 	success := `{"ok":true,"tool":"report_finalize","delivery_state":"finalized","is_finalized":true,"report_title":"全面对比分析报告","author":"数据分析助手","block_count":6,"chart_count":6,"ui_summary":"delivery_state=finalized; block_count=6; chart_count=6"}`
-	if !isSuccessfulFinalizeResult(success) {
+	if !isSuccessfulDeliveryBoundaryResult(success) {
 		t.Fatal("expected finalized report result to stop the run")
 	}
 
 	blocked := `{"ok":false,"tool":"report_finalize","delivery_state":"draft","is_finalized":false}`
-	if isSuccessfulFinalizeResult(blocked) {
+	if isSuccessfulDeliveryBoundaryResult(blocked) {
 		t.Fatal("expected blocked finalize result not to stop the run")
 	}
 }
@@ -169,11 +156,11 @@ func TestInspectGoalsToolReturnsFactsOnly(t *testing.T) {
 	t.Parallel()
 
 	sm := NewSubgoalManager()
-	_, _ = sm.AddGoal("Analyze sales", "")
-	_, _ = sm.AddGoal("Analyze marketing", "")
+	_, _ = sm.AddGoalWithBlocking("Analyze sales", "", false)
+	_, _ = sm.AddGoalWithBlocking("Analyze marketing", "", false)
 
 	tool := &InspectGoalsTool{Subgoals: sm}
-	result, err := tool.Execute(nil)
+	result, err := tool.Execute(json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -197,14 +184,14 @@ func TestInspectGoalsToolReturnsFactsOnly(t *testing.T) {
 	}
 }
 
-func TestInspectMemoryToolReturnsFactsOnly(t *testing.T) {
+func TestInspectMemoryToolReturnsTypedEntriesOnly(t *testing.T) {
 	t.Parallel()
 
 	mem := NewWorkingMemory()
-	mem.SaveFact("roi_definition", "ROI = attributed_revenue / ad_spend")
+	mem.SaveEntry("retained_statement", MemoryEntry{Statement: "observed statement", Status: "inferred", CreatedBy: "test"})
 
 	tool := &InspectMemoryTool{Memory: mem}
-	result, err := tool.Execute(nil)
+	result, err := tool.Execute(json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -216,12 +203,13 @@ func TestInspectMemoryToolReturnsFactsOnly(t *testing.T) {
 	if payload["tool"] != "state_memory_inspect" {
 		t.Fatalf("unexpected tool: %#v", payload["tool"])
 	}
-	if payload["fact_count"].(float64) != 1 {
-		t.Fatalf("unexpected fact count: %#v", payload["fact_count"])
+	if payload["entry_count"].(float64) != 1 {
+		t.Fatalf("unexpected entry count: %#v", payload["entry_count"])
 	}
-	facts := payload["facts"].(map[string]interface{})
-	if facts["roi_definition"] != "ROI = attributed_revenue / ad_spend" {
-		t.Fatalf("unexpected facts: %#v", facts)
+	entries := payload["entries"].(map[string]interface{})
+	entry := entries["retained_statement"].(map[string]interface{})
+	if entry["statement"] != "observed statement" || entry["status"] != "inferred" {
+		t.Fatalf("unexpected entries: %#v", entries)
 	}
 }
 
@@ -241,7 +229,7 @@ func TestInspectReportStateToolReturnsFactsOnly(t *testing.T) {
 		},
 	}
 
-	result, err := tool.Execute(nil)
+	result, err := tool.Execute(json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -265,11 +253,11 @@ func TestInspectReportStateToolReturnsFactsOnly(t *testing.T) {
 	if len(payload["unreferenced_charts"].([]interface{})) != 1 {
 		t.Fatalf("expected one unreferenced chart, got %#v", payload["unreferenced_charts"])
 	}
-	if len(payload["blocks_with_duplicate_heading"].([]interface{})) != 1 {
-		t.Fatalf("expected one duplicate heading block, got %#v", payload["blocks_with_duplicate_heading"])
+	if _, exists := payload["blocks_with_duplicate_heading"]; exists {
+		t.Fatalf("report observation must not inject formatting judgments: %#v", payload)
 	}
-	if len(payload["chart_blocks_missing_caption"].([]interface{})) != 1 {
-		t.Fatalf("expected one chart block missing caption, got %#v", payload["chart_blocks_missing_caption"])
+	if _, exists := payload["chart_blocks_missing_caption"]; exists {
+		t.Fatalf("report observation must not inject caption advice: %#v", payload)
 	}
 	if _, exists := payload["can_finalize_structurally"]; exists {
 		t.Fatalf("did not expect can_finalize_structurally in payload: %#v", payload["can_finalize_structurally"])
@@ -284,8 +272,7 @@ func TestInspectReportEditStateToolWholeReportScope(t *testing.T) {
 
 	tool := &InspectReportEditStateTool{
 		EditState: &tools.ReportEditState{
-			Mode:                "revise_report",
-			PreserveOtherBlocks: false,
+			ScopeKindValue: "whole_report",
 		},
 		ReportState: &tools.ReportState{
 			Blocks: []tools.ReportBlock{
@@ -294,7 +281,7 @@ func TestInspectReportEditStateToolWholeReportScope(t *testing.T) {
 		},
 	}
 
-	result, err := tool.Execute(nil)
+	result, err := tool.Execute(json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -309,7 +296,7 @@ func TestInspectReportEditStateToolWholeReportScope(t *testing.T) {
 	if payload["scope_kind"] != "whole_report" {
 		t.Fatalf("expected whole_report scope, got %#v", payload["scope_kind"])
 	}
-	if payload["ui_summary"] != "Active whole-report edit scope." {
+	if payload["ui_summary"] != "当前正在编辑整份报告。" {
 		t.Fatalf("unexpected ui_summary: %#v", payload["ui_summary"])
 	}
 	if _, exists := payload["target_block"]; exists {
@@ -322,9 +309,8 @@ func TestInspectReportEditStateToolChartScope(t *testing.T) {
 
 	tool := &InspectReportEditStateTool{
 		EditState: &tools.ReportEditState{
-			Mode:                "revise_chart",
-			TargetChartID:       "chart_sales",
-			PreserveOtherBlocks: true,
+			ScopeKindValue: "partial_chart",
+			TargetChartID:  "chart_sales",
 		},
 		ReportState: &tools.ReportState{
 			Blocks: []tools.ReportBlock{
@@ -336,7 +322,7 @@ func TestInspectReportEditStateToolChartScope(t *testing.T) {
 		},
 	}
 
-	result, err := tool.Execute(nil)
+	result, err := tool.Execute(json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -348,7 +334,7 @@ func TestInspectReportEditStateToolChartScope(t *testing.T) {
 	if payload["scope_kind"] != "partial_chart" {
 		t.Fatalf("expected partial_chart scope, got %#v", payload["scope_kind"])
 	}
-	if payload["ui_summary"] != "Active partial chart edit scope, target chart: chart_sales." {
+	if payload["ui_summary"] != "当前正在局部编辑图表 chart_sales。" {
 		t.Fatalf("unexpected ui_summary: %#v", payload["ui_summary"])
 	}
 	targetChart, ok := payload["target_chart"].(map[string]interface{})
@@ -365,14 +351,13 @@ func TestInspectReportEditStateToolSelectionScope(t *testing.T) {
 
 	tool := &InspectReportEditStateTool{
 		EditState: &tools.ReportEditState{
-			Mode:                "regenerate_selection",
-			TargetBlockID:       "analysis",
-			TargetBlockLabel:    "销售结论",
-			SelectionText:       "其中这句需要重写",
-			SelectionStart:      12,
-			SelectionEnd:        20,
-			SelectionRangeSet:   true,
-			PreserveOtherBlocks: true,
+			ScopeKindValue:    "partial_selection",
+			TargetBlockID:     "analysis",
+			TargetBlockLabel:  "销售结论",
+			SelectionText:     "其中这句需要重写",
+			SelectionStart:    12,
+			SelectionEnd:      20,
+			SelectionRangeSet: true,
 		},
 		ReportState: &tools.ReportState{
 			Blocks: []tools.ReportBlock{
@@ -381,7 +366,7 @@ func TestInspectReportEditStateToolSelectionScope(t *testing.T) {
 		},
 	}
 
-	result, err := tool.Execute(nil)
+	result, err := tool.Execute(json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -396,7 +381,7 @@ func TestInspectReportEditStateToolSelectionScope(t *testing.T) {
 	if payload["selection_start"] != float64(12) || payload["selection_end"] != float64(20) {
 		t.Fatalf("expected selection range payload, got start=%#v end=%#v", payload["selection_start"], payload["selection_end"])
 	}
-	if payload["ui_summary"] != "Active partial selection edit scope inside block: analysis, range 12-20." {
+	if payload["ui_summary"] != "当前正在局部编辑内容块 analysis 的 12-20 区间。" {
 		t.Fatalf("unexpected ui_summary: %#v", payload["ui_summary"])
 	}
 	if payload["selection_text"] != "其中这句需要重写" {
@@ -409,7 +394,7 @@ func TestInspectReportEditStateToolLayoutScope(t *testing.T) {
 
 	tool := &InspectReportEditStateTool{
 		EditState: &tools.ReportEditState{
-			Mode: "configure_layout",
+			ScopeKindValue: "layout",
 		},
 		ReportState: &tools.ReportState{
 			Blocks: []tools.ReportBlock{
@@ -418,7 +403,7 @@ func TestInspectReportEditStateToolLayoutScope(t *testing.T) {
 		},
 	}
 
-	result, err := tool.Execute(nil)
+	result, err := tool.Execute(json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -430,7 +415,7 @@ func TestInspectReportEditStateToolLayoutScope(t *testing.T) {
 	if payload["scope_kind"] != "layout" {
 		t.Fatalf("expected layout scope, got %#v", payload["scope_kind"])
 	}
-	if payload["ui_summary"] != "Active report layout edit scope." {
+	if payload["ui_summary"] != "当前正在编辑报告布局。" {
 		t.Fatalf("unexpected ui_summary: %#v", payload["ui_summary"])
 	}
 }
@@ -455,8 +440,8 @@ func TestCompactMessagesByMeasuredPromptTokens(t *testing.T) {
 	if len(engine.history) >= 33 {
 		t.Fatalf("expected messages to be compacted, got %d", len(engine.history))
 	}
-	if engine.contextDigest == "" {
-		t.Fatalf("expected digest message in contextDigest")
+	if engine.omittedHistoryMessages == 0 {
+		t.Fatalf("expected omitted-message count after compaction")
 	}
 }
 
@@ -479,76 +464,32 @@ func TestCompactMessagesLockedSkipsWithoutMeasuredTokens(t *testing.T) {
 	}
 }
 
-func TestSpecialToolHandlersFallback(t *testing.T) {
+func TestSanitizeToolErrorRedactsGenericConnectionURI(t *testing.T) {
 	t.Parallel()
 
-	engine := &Engine{}
-	handlers := engine.specialToolHandlers()
+	got := sanitizeToolError("dial customdb://user:secret@db.example/internal failed")
+	if strings.Contains(got, "user:secret") || !strings.Contains(got, "customdb://***") {
+		t.Fatalf("expected generic connection URI redaction, got %q", got)
+	}
+}
 
-	handler, ok := handlers["user_request_input"]
-	if !ok {
-		t.Fatal("expected user_request_input handler")
-	}
+func TestAskUserSuspensionEventRequiresCompleteArguments(t *testing.T) {
+	t.Parallel()
 
-	// 1. Valid arguments should pass
-	toolCall := LLMToolCall{
-		ID:   "call_1",
-		Type: LLMToolTypeFunction,
-		Function: LLMFunctionCall{
-			Name:      "user_request_input",
-			Arguments: `{"question":"How are you?"}`,
-		},
-	}
-	var emitted []WSEvent
-	emit := func(ev WSEvent) {
-		emitted = append(emitted, ev)
-	}
-	res, err, stop := handler(nil, toolCall, "Fallback prompt", emit)
+	tool := &AskUserTool{}
+	event, err := tool.SuspensionEvent(json.RawMessage(`{"question":"How are you?","required":true,"selection_mode":"single","allow_custom":true}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !stop {
-		t.Fatal("expected stop=true")
+	if event.Type != EventUserRequestInput {
+		t.Fatalf("expected user input event, got %#v", event)
 	}
-	if res != "" {
-		t.Fatalf("expected empty result, got %q", res)
-	}
-	if len(emitted) != 1 || emitted[0].Type != EventUserRequestInput {
-		t.Fatalf("expected event user_request_input, got %#v", emitted)
-	}
-	payload := emitted[0].Data.(AskUserData)
+	payload := event.Data.(AskUserData)
 	if payload.Question != "How are you?" {
 		t.Fatalf("expected question 'How are you?', got %q", payload.Question)
 	}
 
-	// 2. Empty arguments but non-empty assistant content should fallback
-	toolCallEmpty := LLMToolCall{
-		ID:   "call_2",
-		Type: LLMToolTypeFunction,
-		Function: LLMFunctionCall{
-			Name:      "user_request_input",
-			Arguments: `{}`,
-		},
-	}
-	emitted = nil
-	res, err, stop = handler(nil, toolCallEmpty, "What is your preference?", emit)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !stop {
-		t.Fatal("expected stop=true")
-	}
-	if len(emitted) != 1 || emitted[0].Type != EventUserRequestInput {
-		t.Fatalf("expected event user_request_input, got %#v", emitted)
-	}
-	payload = emitted[0].Data.(AskUserData)
-	if payload.Question != "What is your preference?" {
-		t.Fatalf("expected fallback question 'What is your preference?', got %q", payload.Question)
-	}
-
-	// 3. Empty arguments and empty assistant content should error
-	emitted = nil
-	_, err, _ = handler(nil, toolCallEmpty, "", emit)
+	_, err = tool.SuspensionEvent(json.RawMessage(`{}`))
 	if err == nil || !strings.Contains(err.Error(), "question is required") {
 		t.Fatalf("expected error containing 'question is required', got: %v", err)
 	}

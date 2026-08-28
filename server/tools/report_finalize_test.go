@@ -13,7 +13,7 @@ func TestFinalizeReportStateDefaultsAuthor(t *testing.T) {
 
 	result, err := finalizeReportState(state, nil, reportFinalizeParams{
 		ReportTitle: "销售分析",
-	}, nil)
+	})
 	if err != nil {
 		t.Fatalf("finalizeReportState: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestFinalizeReportStateRejectsDuplicateFinalize(t *testing.T) {
 
 	if _, err := finalizeReportState(state, nil, reportFinalizeParams{
 		ReportTitle: "再次 finalize",
-	}, nil); err == nil {
+	}); err == nil {
 		t.Fatal("expected duplicate finalize to be rejected")
 	} else {
 		if _, ok := err.(reportAlreadyFinalizedError); !ok {

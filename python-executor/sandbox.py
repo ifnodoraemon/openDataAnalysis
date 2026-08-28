@@ -37,12 +37,28 @@ BLOCKED_BUILTINS = frozenset({
     "eval", "exec", "compile", "__import__", "breakpoint",
     "globals", "locals", "vars",
     "exit", "quit", "help", "input",
+    "license", "copyright", "credits",
     "type",
     "getattr", "setattr", "delattr",
-    "memoryview",
+    "memoryview", "bytearray",
 })
 
-BLOCKED_CALL_NAMES = frozenset(BLOCKED_BUILTINS | {"open"})
+BLOCKED_CALL_NAMES = BLOCKED_BUILTINS
+
+BLOCKED_ATTR_NAMES = frozenset({
+    "os", "sys", "subprocess", "socket", "importlib", "ctypes",
+    "platform", "shutil", "resource", "builtins", "pathlib", "glob",
+    "tempfile", "pickle", "marshal", "code", "opcode", "gc", "weakref",
+    "traceback", "atexit", "threading", "multiprocessing", "concurrent",
+    "asyncio", "runpy", "pkgutil", "site", "sysconfig", "venv",
+    "ensurepip", "distutils", "setuptools", "pip",
+    "io", "urllib", "http", "xml", "operator",
+    "open", "input", "help", "memoryview", "bytearray",
+    "exec", "__import__", "globals", "locals", "vars",
+    "getattr", "setattr", "delattr", "breakpoint",
+})
+
+BLOCKED_ATTRIBUTE_NAMES = BLOCKED_DUNDER_ATTRS | BLOCKED_ATTR_NAMES
 
 
 class SecurityViolation(Exception):
@@ -65,6 +81,11 @@ def check_code(code: str) -> None:
                     raise SecurityViolation(
                         f"import of '{alias.name}' is not allowed"
                     )
+                for part in alias.name.split("."):
+                    if part in BLOCKED_ATTR_NAMES:
+                        raise SecurityViolation(
+                            f"import of '{alias.name}' is not allowed"
+                        )
 
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
@@ -73,9 +94,19 @@ def check_code(code: str) -> None:
                 raise SecurityViolation(
                     f"import from '{module}' is not allowed"
                 )
+            for part in module.split("."):
+                if part in BLOCKED_ATTR_NAMES:
+                    raise SecurityViolation(
+                        f"import from '{module}' is not allowed"
+                    )
+            for alias in node.names:
+                if alias.name in BLOCKED_ATTR_NAMES:
+                    raise SecurityViolation(
+                        f"import from '{module}' is not allowed"
+                    )
 
         elif isinstance(node, ast.Attribute):
-            if node.attr in BLOCKED_DUNDER_ATTRS:
+            if node.attr in BLOCKED_ATTRIBUTE_NAMES:
                 raise SecurityViolation(
                     f"access to '{node.attr}' is not allowed"
                 )
@@ -145,6 +176,19 @@ def create_sandboxed_builtins(work_dir: Path) -> dict:
     for name in BLOCKED_BUILTINS:
         safe.pop(name, None)
     safe["open"] = make_restricted_open(work_dir)
+    real_import = builtins.__import__
+
+    def restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if level:
+            package = (globals or {}).get("__package__", "")
+            root = package.split(".")[0]
+        else:
+            root = str(name).split(".")[0]
+        if root not in ALLOWED_IMPORTS:
+            raise ImportError(f"import of '{name}' is not allowed")
+        return real_import(name, globals, locals, fromlist, level)
+
+    safe["__import__"] = restricted_import
     return safe
 
 

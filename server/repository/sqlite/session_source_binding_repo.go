@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"time"
 
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 )
@@ -46,10 +45,7 @@ func (r *SessionSourceBindingRepository) GetBySessionSourceObject(ctx context.Co
 		`SELECT session_id, source_id, source_object_key, active_snapshot_id, created_at, updated_at FROM session_source_bindings WHERE session_id = ? AND source_id = ? AND source_object_key = ?`, sessionID, sourceID, sourceObjectKey)
 	var b domain.SessionSourceBinding
 	if err := row.Scan(&b.SessionID, &b.SourceID, &b.SourceObjectKey, &b.ActiveSnapshotID, &b.CreatedAt, &b.UpdatedAt); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, err
+		return nil, normalizeLookupError(err)
 	}
 	return &b, nil
 }
@@ -57,32 +53,4 @@ func (r *SessionSourceBindingRepository) GetBySessionSourceObject(ctx context.Co
 func (r *SessionSourceBindingRepository) Delete(ctx context.Context, sessionID, sourceID, sourceObjectKey string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM session_source_bindings WHERE session_id = ? AND source_id = ? AND source_object_key = ?`, sessionID, sourceID, sourceObjectKey)
 	return err
-}
-
-func BackfillSessionSourceBindings(ctx context.Context, db *sql.DB) error {
-	rows, err := db.QueryContext(ctx,
-		`SELECT sf.session_id, ds.id, 'file_upload:' || ds.id, ss.id
-			 FROM session_files sf
-			 JOIN files f ON f.id = sf.file_id
-			 JOIN data_sources ds ON ds.file_id = f.id
-			 JOIN source_snapshots ss ON ss.source_id = ds.id AND ss.session_id = sf.session_id
-			 WHERE NOT EXISTS (
-			   SELECT 1 FROM session_source_bindings b WHERE b.session_id = sf.session_id AND b.source_id = ds.id AND b.source_object_key = 'file_upload:' || ds.id
-			 )`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var sessionID, sourceID, sourceObjectKey, snapshotID string
-		if err := rows.Scan(&sessionID, &sourceID, &sourceObjectKey, &snapshotID); err != nil {
-			continue
-		}
-		now := time.Now()
-		_, _ = db.ExecContext(ctx,
-			`INSERT OR IGNORE INTO session_source_bindings (session_id, source_id, source_object_key, active_snapshot_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			sessionID, sourceID, sourceObjectKey, snapshotID, now, now)
-	}
-	return rows.Err()
 }

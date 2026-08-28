@@ -4,12 +4,9 @@ task_length: short
 prompt: 请快速分析这份零售门店销售数据，给出趋势、门店对比和品类表现。
 files:
   - retail_store_daily_sales.csv
-expected:
-  should_inspect_schema: true
-  should_auto_map: true
-  should_ask_user: false
-  expected_coverage: sufficient
-  required_mentions:
-    - store comparison
-  forbidden_claims:
-    - unnecessary uncertainty about available fields
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
+manual_review:
+  - 门店比较由实际字段和结果支持。

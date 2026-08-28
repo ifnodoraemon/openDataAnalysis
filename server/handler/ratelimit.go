@@ -10,6 +10,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/ifnodoraemon/openDataAnalysis/auth"
+	"github.com/ifnodoraemon/openDataAnalysis/config"
 )
 
 type clientLimiter struct {
@@ -76,7 +77,7 @@ func IPRateLimitMiddleware(requestsPerMinute int, burst int) func(http.Handler) 
 			ip := getClientIP(r)
 			limiter := limiterMap.getLimiter(ip)
 			if !limiter.Allow() {
-				http.Error(w, "rate limit exceeded, please try again later", http.StatusTooManyRequests)
+				http.Error(w, "请求过于频繁，请稍后重试", http.StatusTooManyRequests)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -98,7 +99,7 @@ func UserRateLimitMiddleware(requestsPerMinute int, burst int) func(http.Handler
 
 			limiter := limiterMap.getLimiter(key)
 			if !limiter.Allow() {
-				http.Error(w, "rate limit exceeded, please try again later", http.StatusTooManyRequests)
+				http.Error(w, "请求过于频繁，请稍后重试", http.StatusTooManyRequests)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -106,17 +107,63 @@ func UserRateLimitMiddleware(requestsPerMinute int, burst int) func(http.Handler
 	}
 }
 
+// getClientIP resolves the client IP. Proxy headers are only honored when the
+// direct peer is within a configured trusted proxy CIDR; otherwise RemoteAddr wins.
 func getClientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		return strings.TrimSpace(parts[0])
-	}
-	if xreal := r.Header.Get("X-Real-IP"); xreal != "" {
-		return strings.TrimSpace(xreal)
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
+	if err != nil {
+		host = strings.TrimSpace(r.RemoteAddr)
+	}
+	peer := net.ParseIP(host)
+	if peer == nil {
 		return host
 	}
-	return r.RemoteAddr
+	if !isTrustedProxy(peer) {
+		return peer.String()
+	}
+	if entries := splitForwardedFor(r.Header.Get("X-Forwarded-For")); len(entries) > 0 {
+		for i := len(entries) - 1; i >= 0; i-- {
+			ip := net.ParseIP(entries[i])
+			if ip == nil {
+				return peer.String()
+			}
+			if isTrustedProxy(ip) {
+				continue
+			}
+			return ip.String()
+		}
+		if first := net.ParseIP(entries[0]); first != nil {
+			return first.String()
+		}
+	}
+	if xreal := strings.TrimSpace(r.Header.Get("X-Real-IP")); xreal != "" {
+		if ip := net.ParseIP(xreal); ip != nil {
+			return ip.String()
+		}
+	}
+	return peer.String()
+}
+
+func splitForwardedFor(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	entries := make([]string, 0, len(parts))
+	for _, part := range parts {
+		entries = append(entries, strings.TrimSpace(part))
+	}
+	return entries
+}
+
+func isTrustedProxy(ip net.IP) bool {
+	if config.Cfg == nil {
+		return false
+	}
+	for _, cidr := range config.Cfg.TrustedProxyCIDRs {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

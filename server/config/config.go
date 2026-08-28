@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -13,7 +14,8 @@ import (
 
 type Config struct {
 	// LLM 配置
-	LLMProvider        string // "openai" 或 "anthropic"
+	LLMProvider        string // openai, anthropic, or google
+	LLMAPIProtocol     string // responses or chat_completions for openai-compatible providers
 	LLMBaseURL         string
 	LLMAPIEndpoint     string
 	LLMAPIKey          string
@@ -27,34 +29,38 @@ type Config struct {
 	LLMDebugDir        string
 
 	// 服务配置
-	ServerPort           string
-	DeploymentMode       string
-	AllowedOrigins       []string
-	MetadataStore        string
-	StorageProvider      string
-	RunBackend           string
-	AnalysisStore        string
-	PythonArtifactStore  string
-	StorageRoot          string
-	CacheRoot            string
-	MetadataDBPath       string
-	TempDir              string
-	PythonMCPURL         string
-	ProxyToken           string
-	PublicAPIBaseURL     string
-	AuthSecret           string
-	DefaultUserID        string
-	DefaultUserEmail     string
-	DefaultUserName      string
-	DefaultUserPassword  string
-	DefaultWorkspaceID   string
-	DefaultWorkspaceName string
+	ServerPort               string
+	DeploymentMode           string
+	AllowedOrigins           []string
+	MetadataStore            string
+	StorageProvider          string
+	RunBackend               string
+	AnalysisStore            string
+	PythonArtifactStore      string
+	StorageRoot              string
+	CacheRoot                string
+	MetadataDBPath           string
+	TempDir                  string
+	PythonMCPURL             string
+	PythonMaxTimeoutSec      int
+	ProxyToken               string
+	PublicAPIBaseURL         string
+	AuthSecret               string
+	TrustedProxyCIDRs        []*net.IPNet
+	DefaultUserID            string
+	DefaultUserEmail         string
+	DefaultUserName          string
+	DefaultUserPassword      string
+	DefaultWorkspaceID       string
+	DefaultWorkspaceName     string
+	BootstrapDefaultIdentity bool
 
 	// 生命周期管理
 	SessionTTLHours    int    // 空闲 session 自动清理阈值（小时），0 = 不自动清理
 	TraceRetentionDays int    // LLM debug trace 保留天数，0 = 永久保留
 	TempCleanupOnStart bool   // 启动时清理 TempDir
 	ReportEchartsUrl   string // ECharts 资源路径，默认为前端自托管静态资源
+	MetricsExpose      bool   // 是否公开 /metrics 端点，默认关闭（404）
 
 	// 数据源导入
 	SQLImportRowLimit int // SQL snapshot import row cap, 0 = unlimited
@@ -87,94 +93,80 @@ func Load() {
 		}
 	}
 
-	provider := strings.ToLower(getEnv("LLM_PROVIDER", "openai"))
-
-	// 根据 Provider 设置默认值
-	defaultBaseURL := "https://api.openai.com"
-	defaultModel := "gpt-4o"
-	if provider == "anthropic" {
-		defaultBaseURL = "https://api.anthropic.com"
-		defaultModel = "claude-sonnet-4-20250514"
-	}
-	baseURL := getEnv("LLM_BASE_URL", defaultBaseURL)
-	defaultAPIEndpoint := defaultLLMAPIEndpoint(provider, baseURL)
+	provider := getEnv("LLM_PROVIDER", "")
+	deploymentMode := getEnv("DEPLOYMENT_MODE", "development")
+	baseURL := getEnv("LLM_BASE_URL", "")
+	apiProtocol := getEnv("LLM_API_PROTOCOL", "")
 
 	Cfg = &Config{
-		LLMProvider:          provider,
-		LLMBaseURL:           baseURL,
-		LLMAPIEndpoint:       getEnv("LLM_API_ENDPOINT", defaultAPIEndpoint),
-		LLMAPIKey:            getEnv("LLM_API_KEY", ""),
-		LLMModel:             getEnv("LLM_MODEL", defaultModel),
-		LLMReasoningEffort:   getEnv("LLM_REASONING_EFFORT", ""),
-		LLMTextVerbosity:     getEnv("LLM_TEXT_VERBOSITY", ""),
-		LLMMaxTokens:         getEnvInt("LLM_MAX_TOKENS", 0),
-		LLMHTTPTimeoutSec:    getEnvInt("LLM_HTTP_TIMEOUT_SECONDS", 240),
-		LLMRetryBudgetSec:    getEnvInt("LLM_RETRY_BUDGET_SECONDS", 360),
-		LLMDebug:             getEnvBool("LLM_DEBUG", false),
-		LLMDebugDir:          getEnv("LLM_DEBUG_DIR", "./data/llm-debug"),
-		ServerPort:           getEnv("SERVER_PORT", "8080"),
-		DeploymentMode:       normalizeMode(getEnv("DEPLOYMENT_MODE", "development")),
-		AllowedOrigins:       getEnvList("CORS_ALLOWED_ORIGINS", defaultAllowedOrigins()),
-		MetadataStore:        NormalizeBackend(getEnv("METADATA_STORE", "sqlite")),
-		StorageProvider:      NormalizeBackend(getEnv("STORAGE_PROVIDER", "local")),
-		RunBackend:           NormalizeBackend(getEnv("RUN_BACKEND", "inprocess")),
-		AnalysisStore:        NormalizeBackend(getEnv("ANALYSIS_STORE", "session_sqlite")),
-		PythonArtifactStore:  NormalizeBackend(getEnv("PYTHON_ARTIFACT_STORE", "executor_local")),
-		StorageRoot:          getEnv("STORAGE_ROOT", "./data/storage"),
-		CacheRoot:            getEnv("CACHE_ROOT", "./data/cache"),
-		MetadataDBPath:       getEnv("METADATA_DB_PATH", "./data/metadata/app.db"),
-		TempDir:              getEnv("TEMP_DIR", "./data/tmp"),
-		PythonMCPURL:         getEnv("PYTHON_MCP_URL", ""),
-		ProxyToken:           getEnv("PROXY_TOKEN", ""),
-		PublicAPIBaseURL:     getEnv("PUBLIC_API_BASE_URL", getEnv("API_BASE_URL", "")),
-		AuthSecret:           getEnv("AUTH_SECRET", ""),
-		DefaultUserID:        getEnv("DEFAULT_USER_ID", ""),
-		DefaultUserEmail:     getEnv("DEFAULT_USER_EMAIL", ""),
-		DefaultUserName:      getEnv("DEFAULT_USER_NAME", ""),
-		DefaultUserPassword:  getEnv("DEFAULT_USER_PASSWORD", ""),
-		DefaultWorkspaceID:   getEnv("DEFAULT_WORKSPACE_ID", ""),
-		DefaultWorkspaceName: getEnv("DEFAULT_WORKSPACE_NAME", ""),
+		LLMProvider:              provider,
+		LLMAPIProtocol:           apiProtocol,
+		LLMBaseURL:               baseURL,
+		LLMAPIEndpoint:           getEnv("LLM_API_ENDPOINT", ""),
+		LLMAPIKey:                getEnv("LLM_API_KEY", ""),
+		LLMModel:                 getEnv("LLM_MODEL", ""),
+		LLMReasoningEffort:       getEnv("LLM_REASONING_EFFORT", ""),
+		LLMTextVerbosity:         getEnv("LLM_TEXT_VERBOSITY", ""),
+		LLMMaxTokens:             getEnvInt("LLM_MAX_TOKENS", 0),
+		LLMHTTPTimeoutSec:        getEnvInt("LLM_HTTP_TIMEOUT_SECONDS", 240),
+		LLMRetryBudgetSec:        getEnvInt("LLM_RETRY_BUDGET_SECONDS", 360),
+		LLMDebug:                 getEnvBool("LLM_DEBUG", false),
+		LLMDebugDir:              getEnv("LLM_DEBUG_DIR", "./data/llm-debug"),
+		ServerPort:               getEnv("SERVER_PORT", "8080"),
+		DeploymentMode:           deploymentMode,
+		AllowedOrigins:           getEnvList("CORS_ALLOWED_ORIGINS", defaultAllowedOrigins()),
+		MetadataStore:            getEnv("METADATA_STORE", "sqlite"),
+		StorageProvider:          getEnv("STORAGE_PROVIDER", "local"),
+		RunBackend:               getEnv("RUN_BACKEND", "inprocess"),
+		AnalysisStore:            getEnv("ANALYSIS_STORE", "session_sqlite"),
+		PythonArtifactStore:      getEnv("PYTHON_ARTIFACT_STORE", "object_storage"),
+		StorageRoot:              getEnv("STORAGE_ROOT", "./data/storage"),
+		CacheRoot:                getEnv("CACHE_ROOT", "./data/cache"),
+		MetadataDBPath:           getEnv("METADATA_DB_PATH", "./data/metadata/app.db"),
+		TempDir:                  getEnv("TEMP_DIR", "./data/tmp"),
+		PythonMCPURL:             getEnv("PYTHON_MCP_URL", "http://python-executor:8081"),
+		PythonMaxTimeoutSec:      getEnvInt("PYTHON_MAX_TIMEOUT_SECONDS", 120),
+		ProxyToken:               getEnv("PROXY_TOKEN", ""),
+		PublicAPIBaseURL:         getEnv("PUBLIC_API_BASE_URL", ""),
+		AuthSecret:               getEnv("AUTH_SECRET", ""),
+		TrustedProxyCIDRs:        parseTrustedProxyCIDRs(getEnvList("TRUSTED_PROXY_CIDRS", nil)),
+		DefaultUserID:            getEnv("DEFAULT_USER_ID", ""),
+		DefaultUserEmail:         getEnv("DEFAULT_USER_EMAIL", ""),
+		DefaultUserName:          getEnv("DEFAULT_USER_NAME", ""),
+		DefaultUserPassword:      getEnv("DEFAULT_USER_PASSWORD", ""),
+		DefaultWorkspaceID:       getEnv("DEFAULT_WORKSPACE_ID", ""),
+		DefaultWorkspaceName:     getEnv("DEFAULT_WORKSPACE_NAME", ""),
+		BootstrapDefaultIdentity: getEnvBool("BOOTSTRAP_DEFAULT_IDENTITY", false),
 
 		SessionTTLHours:    getEnvInt("SESSION_TTL_HOURS", 0),
 		TraceRetentionDays: getEnvInt("TRACE_RETENTION_DAYS", 0),
 		TempCleanupOnStart: getEnvBool("TEMP_CLEANUP_ON_START", false),
 		ReportEchartsUrl:   getEnv("REPORT_ECHARTS_URL", "/assets/echarts.min.js"),
+		MetricsExpose:      getEnvBool("METRICS_EXPOSE", false),
 
 		SQLImportRowLimit: getEnvInt("SQL_IMPORT_ROW_LIMIT", 1000000),
 
-		PostgresDSN:      getEnv("POSTGRES_DSN", "postgres://oda:password@localhost:5432/oda?sslmode=disable"),
-		S3Endpoint:       getEnv("S3_ENDPOINT", "http://localhost:9000"),
+		PostgresDSN:      getEnv("POSTGRES_DSN", ""),
+		S3Endpoint:       getEnv("S3_ENDPOINT", ""),
 		S3Region:         getEnv("S3_REGION", "us-east-1"),
-		S3Bucket:         getEnv("S3_BUCKET", "oda-storage"),
-		S3AccessKey:      getEnv("S3_ACCESS_KEY", "minioadmin"),
-		S3SecretKey:      getEnv("S3_SECRET_KEY", "minioadmin"),
+		S3Bucket:         getEnv("S3_BUCKET", ""),
+		S3AccessKey:      getEnv("S3_ACCESS_KEY", ""),
+		S3SecretKey:      getEnv("S3_SECRET_KEY", ""),
 		S3ForcePathStyle: getEnvBool("S3_FORCE_PATH_STYLE", true),
 	}
 
-	if Cfg.LLMAPIKey == "" || IsPlaceholderValue(Cfg.LLMAPIKey) {
-		log.Println("Warning: LLM_API_KEY is not set or uses a placeholder")
-	}
-
-	if Cfg.AuthSecret == "" || IsPlaceholderValue(Cfg.AuthSecret) {
-		log.Println("CRITICAL: AUTH_SECRET is not set or uses the default placeholder. Tokens may be forgeable. Set a strong random secret.")
-	}
-
-	if len(Cfg.AuthSecret) < 32 {
-		log.Printf("Warning: AUTH_SECRET is too short (%d chars). Recommend at least 32 characters.", len(Cfg.AuthSecret))
-	}
-
 	if Cfg.ReportEchartsUrl != "" && !trustedReportScriptURL(Cfg.ReportEchartsUrl) {
-		log.Printf("Warning: REPORT_ECHARTS_URL is not same-origin or an allowed ECharts CDN, ignoring: %s", Cfg.ReportEchartsUrl)
-		Cfg.ReportEchartsUrl = ""
+		panic("REPORT_ECHARTS_URL must be an exact same-origin path or an allowed ECharts HTTPS URL")
 	}
 
-	log.Printf("config loaded mode=%s metadata_store=%s storage_provider=%s run_backend=%s analysis_store=%s llm_provider=%s llm_model=%s llm_endpoint=%s",
+	log.Printf("config loaded mode=%s metadata_store=%s storage_provider=%s run_backend=%s analysis_store=%s llm_provider=%s llm_protocol=%s llm_model=%s llm_endpoint=%s",
 		Cfg.DeploymentMode,
 		Cfg.MetadataStore,
 		Cfg.StorageProvider,
 		Cfg.RunBackend,
 		Cfg.AnalysisStore,
 		Cfg.LLMProvider,
+		Cfg.LLMAPIProtocol,
 		Cfg.LLMModel,
 		Cfg.LLMAPIEndpoint,
 	)
@@ -184,26 +176,124 @@ func (c *Config) IsProduction() bool {
 	if c == nil {
 		return false
 	}
-	return normalizeMode(c.DeploymentMode) == "production"
+	return c.DeploymentMode == "production"
 }
 
 func (c *Config) ValidateProductionReadiness() error {
-	if c == nil || !c.IsProduction() {
+	if c == nil {
+		return fmt.Errorf("configuration is not initialized")
+	}
+	switch c.DeploymentMode {
+	case "development", "test", "production":
+	default:
+		return fmt.Errorf("DEPLOYMENT_MODE must be development, test, or production")
+	}
+	switch c.LLMProvider {
+	case "openai":
+		if c.LLMAPIProtocol != "responses" && c.LLMAPIProtocol != "chat_completions" {
+			return fmt.Errorf("LLM_API_PROTOCOL must be responses or chat_completions when LLM_PROVIDER=openai")
+		}
+	case "anthropic":
+		if c.LLMAPIProtocol != "messages" {
+			return fmt.Errorf("LLM_API_PROTOCOL must be messages when LLM_PROVIDER=anthropic")
+		}
+	case "google":
+		if c.LLMAPIProtocol != "generate_content" {
+			return fmt.Errorf("LLM_API_PROTOCOL must be generate_content when LLM_PROVIDER=google")
+		}
+	default:
+		return fmt.Errorf("LLM_PROVIDER must be openai, anthropic, or google")
+	}
+	for field, value := range map[string]string{
+		"LLM_MODEL":   c.LLMModel,
+		"LLM_API_KEY": c.LLMAPIKey,
+		"AUTH_SECRET": c.AuthSecret,
+	} {
+		if err := validateExactConfigValue(field, value, true); err != nil {
+			return err
+		}
+	}
+	for field, value := range map[string]string{
+		"LLM_REASONING_EFFORT": c.LLMReasoningEffort,
+		"LLM_TEXT_VERBOSITY":   c.LLMTextVerbosity,
+		"PYTHON_MCP_URL":       c.PythonMCPURL,
+		"PROXY_TOKEN":          c.ProxyToken,
+		"PUBLIC_API_BASE_URL":  c.PublicAPIBaseURL,
+		"REPORT_ECHARTS_URL":   c.ReportEchartsUrl,
+	} {
+		if err := validateExactConfigValue(field, value, false); err != nil {
+			return err
+		}
+	}
+	if c.LLMProvider == "openai" || c.LLMProvider == "google" {
+		if err := validateExactConfigValue("LLM_API_ENDPOINT", c.LLMAPIEndpoint, true); err != nil {
+			return err
+		}
+	}
+	if len(c.AuthSecret) < 32 {
+		return fmt.Errorf("AUTH_SECRET must contain at least 32 bytes")
+	}
+	if c.PythonMaxTimeoutSec < 5 {
+		return fmt.Errorf("PYTHON_MAX_TIMEOUT_SECONDS must be at least 5")
+	}
+	if c.LLMHTTPTimeoutSec <= 0 || c.LLMRetryBudgetSec <= 0 {
+		return fmt.Errorf("LLM_HTTP_TIMEOUT_SECONDS and LLM_RETRY_BUDGET_SECONDS must be positive")
+	}
+	if c.LLMMaxTokens < 0 {
+		return fmt.Errorf("LLM_MAX_TOKENS must not be negative")
+	}
+	if c.LLMProvider == "anthropic" {
+		if err := validateExactConfigValue("LLM_BASE_URL", c.LLMBaseURL, true); err != nil {
+			return err
+		}
+	}
+	for _, origin := range c.AllowedOrigins {
+		if err := validateExactConfigValue("CORS_ALLOWED_ORIGINS entry", origin, true); err != nil {
+			return err
+		}
+	}
+	if c.ReportEchartsUrl != "" && !trustedReportScriptURL(c.ReportEchartsUrl) {
+		return fmt.Errorf("REPORT_ECHARTS_URL is not trusted")
+	}
+	if !c.IsProduction() {
 		return nil
 	}
 
 	var issues []string
 	for _, rule := range c.productionBackendRules() {
-		if NormalizeBackend(rule.Value) == rule.DevelopmentOnly {
+		if rule.Value == rule.DevelopmentOnly {
 			issues = append(issues, rule.Issue)
 		}
 	}
 	if len(c.AllowedOrigins) == 0 || containsWildcard(c.AllowedOrigins) || containsLocalOrigin(c.AllowedOrigins) {
 		issues = append(issues, "CORS_ALLOWED_ORIGINS must be explicit production origins; wildcard and localhost origins are not allowed")
 	}
-	issues = append(issues, "DEFAULT_USER_* bootstrap is development-only; production needs managed user/workspace provisioning")
+	if c.BootstrapDefaultIdentity {
+		issues = append(issues, "BOOTSTRAP_DEFAULT_IDENTITY must be false in production; provision users and workspaces through managed identity flows")
+	}
+	if c.MetadataStore == "postgres" && strings.TrimSpace(c.PostgresDSN) == "" {
+		issues = append(issues, "POSTGRES_DSN must be configured when METADATA_STORE=postgres")
+	}
+	if c.StorageProvider == "s3" {
+		if strings.TrimSpace(c.S3Endpoint) == "" || strings.TrimSpace(c.S3Bucket) == "" || strings.TrimSpace(c.S3AccessKey) == "" || strings.TrimSpace(c.S3SecretKey) == "" {
+			issues = append(issues, "S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY, and S3_SECRET_KEY must be configured when STORAGE_PROVIDER=s3")
+		}
+	}
 	if len(issues) > 0 {
 		return fmt.Errorf("production deployment is not ready:\n- %s", strings.Join(issues, "\n- "))
+	}
+	return nil
+}
+
+func validateExactConfigValue(field, value string, required bool) error {
+	if strings.TrimSpace(value) == "" {
+		if required {
+			return fmt.Errorf("%s must be configured", field)
+		}
+		return nil
+	}
+	if strings.TrimSpace(value) != value {
+		return fmt.Errorf("%s must not contain leading or trailing whitespace", field)
 	}
 	return nil
 }
@@ -223,69 +313,34 @@ func (c *Config) productionBackendRules() []productionBackendRule {
 		{
 			Value:           c.RunBackend,
 			DevelopmentOnly: "inprocess",
-			Issue:           "RUN_BACKEND=inprocess is single-server only; production needs a durable run/job backend such as river",
+			Issue:           "RUN_BACKEND=inprocess is single-server only; this binary does not yet ship a durable distributed run backend",
 		},
 		{
 			Value:           c.AnalysisStore,
 			DevelopmentOnly: "session_sqlite",
 			Issue:           "ANALYSIS_STORE=session_sqlite is local scratch state; production needs durable snapshot ownership and worker recovery",
 		},
-		{
-			Value:           c.PythonArtifactStore,
-			DevelopmentOnly: "executor_local",
-			Issue:           "PYTHON_ARTIFACT_STORE=executor_local cannot survive executor restart or multiple executors",
-		},
 	}
 }
 
 func (c *Config) IsOriginAllowed(origin string) bool {
-	origin = strings.TrimSpace(origin)
 	if origin == "" {
 		return true
 	}
 	if c == nil {
 		return false
 	}
-	allowedOrigins := c.AllowedOrigins
-	if len(allowedOrigins) == 0 {
-		allowedOrigins = defaultAllowedOrigins()
-	}
-	for _, allowed := range allowedOrigins {
-		allowed = strings.TrimSpace(allowed)
-		if allowed == "*" || strings.EqualFold(allowed, origin) {
+	for _, allowed := range c.AllowedOrigins {
+		if allowed == "*" || allowed == origin {
 			return true
 		}
 	}
 	return false
 }
 
-func defaultLLMAPIEndpoint(provider, baseURL string) string {
-	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if trimmed == "" {
-		return ""
-	}
-	if provider == "anthropic" {
-		return trimmed + "/v1/messages"
-	}
-	host := ""
-	if parsed, err := url.Parse(trimmed); err == nil {
-		host = strings.ToLower(parsed.Hostname())
-	}
-	if host == "api.openai.com" {
-		return trimmed + "/v1/responses"
-	}
-	if host == "api.deepseek.com" || strings.HasSuffix(host, ".deepseek.com") {
-		return trimmed + "/chat/completions"
-	}
-	if strings.HasSuffix(strings.ToLower(trimmed), "/v1") {
-		return trimmed + "/chat/completions"
-	}
-	return trimmed + "/v1/chat/completions"
-}
-
 func trustedReportScriptURL(raw string) bool {
 	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
+	if trimmed == "" || trimmed != raw {
 		return false
 	}
 	if strings.HasPrefix(trimmed, "/") && !strings.HasPrefix(trimmed, "//") {
@@ -307,6 +362,18 @@ func trustedReportScriptURL(raw string) bool {
 	}
 }
 
+func parseTrustedProxyCIDRs(values []string) []*net.IPNet {
+	cidrs := make([]*net.IPNet, 0, len(values))
+	for _, value := range values {
+		_, parsed, err := net.ParseCIDR(value)
+		if err != nil {
+			panic(fmt.Sprintf("TRUSTED_PROXY_CIDRS entry %q is not a valid CIDR", value))
+		}
+		cidrs = append(cidrs, parsed)
+	}
+	return cidrs
+}
+
 func getEnv(key, defaultValue string) string {
 	if value, ok := os.LookupEnv(key); ok {
 		return value
@@ -322,10 +389,10 @@ func getEnvList(key string, defaultValue []string) []string {
 	parts := strings.Split(raw, ",")
 	values := make([]string, 0, len(parts))
 	for _, part := range parts {
-		value := strings.TrimSpace(part)
-		if value != "" {
-			values = append(values, value)
+		if part == "" || strings.TrimSpace(part) != part {
+			panic(fmt.Sprintf("%s entries must be non-empty exact values", key))
 		}
+		values = append(values, part)
 	}
 	return values
 }
@@ -339,36 +406,9 @@ func defaultAllowedOrigins() []string {
 	}
 }
 
-func normalizeMode(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "prod", "production":
-		return "production"
-	case "test", "testing":
-		return "test"
-	default:
-		return "development"
-	}
-}
-
-func NormalizeBackend(value string) string {
-	return strings.ToLower(strings.TrimSpace(value))
-}
-
-func IsPlaceholderValue(value string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(value))
-	collapsed := strings.NewReplacer("-", "", "_", "", " ", "").Replace(normalized)
-	return strings.HasPrefix(normalized, "change_me") ||
-		strings.HasPrefix(normalized, "change-me") ||
-		strings.HasPrefix(collapsed, "changeme") ||
-		strings.HasPrefix(collapsed, "replacewith") ||
-		normalized == "placeholder" ||
-		normalized == "password" ||
-		normalized == "admin"
-}
-
 func containsWildcard(values []string) bool {
 	for _, value := range values {
-		if strings.TrimSpace(value) == "*" {
+		if value == "*" {
 			return true
 		}
 	}
@@ -377,7 +417,7 @@ func containsWildcard(values []string) bool {
 
 func containsLocalOrigin(values []string) bool {
 	for _, value := range values {
-		parsed, err := url.Parse(strings.TrimSpace(value))
+		parsed, err := url.Parse(value)
 		if err != nil {
 			continue
 		}
@@ -394,13 +434,13 @@ func getEnvBool(key string, defaultValue bool) bool {
 	if !ok {
 		return defaultValue
 	}
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "1", "true", "yes", "on":
+	switch value {
+	case "true":
 		return true
-	case "0", "false", "no", "off":
+	case "false":
 		return false
 	default:
-		return defaultValue
+		panic(fmt.Sprintf("%s must be exactly true or false", key))
 	}
 }
 
@@ -409,9 +449,9 @@ func getEnvInt(key string, defaultValue int) int {
 	if !ok {
 		return defaultValue
 	}
-	result, err := strconv.Atoi(strings.TrimSpace(value))
+	result, err := strconv.Atoi(value)
 	if err != nil {
-		return defaultValue
+		panic(fmt.Sprintf("%s must be an integer", key))
 	}
 	return result
 }

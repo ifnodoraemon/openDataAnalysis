@@ -89,7 +89,7 @@ function getStatusText(status) {
   gap: 4px;
   padding: 8px 10px;
   border-radius: 6px;
-  background: var(--bg-secondary);
+  background: var(--bg-card);
   border-left: 3px solid transparent;
   transition: all 0.3s ease;
 }
@@ -99,7 +99,7 @@ function getStatusText(status) {
 }
 
 .goal-item.status-running {
-  border-left-color: var(--accent-blue);
+  border-left-color: var(--primary-blue);
   background: rgba(47, 129, 247, 0.05);
 }
 
@@ -125,13 +125,13 @@ function getStatusText(status) {
 
 .goal-desc {
   font-size: 0.85rem;
-  color: var(--text-primary);
+  color: var(--text-main);
   line-height: 1.4;
   word-break: break-word;
 }
 
 .status-complete .goal-desc {
-  color: var(--text-secondary);
+  color: var(--text-sub);
 }
 
 .status-rejected .goal-desc {
@@ -163,7 +163,7 @@ function getStatusText(status) {
 .goal-children {
   margin-left: 18px;
   padding-left: 12px;
-  border-left: 1px dashed var(--border);
+  border-left: 1px dashed var(--border-subtle);
   display: flex;
   flex-direction: column;
   gap: 8px;

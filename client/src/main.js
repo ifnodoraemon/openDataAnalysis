@@ -7,7 +7,7 @@ const app = createApp(App);
 app.use(createPinia());
 
 app.config.errorHandler = (err, instance, info) => {
-  console.error("[Vue Error]", info, err);
+  console.error("[界面错误]", info, err);
 };
 
 app.mount("#app");

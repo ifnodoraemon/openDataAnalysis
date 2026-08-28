@@ -5,17 +5,13 @@ prompt: 请先故意调用一次 `task_delegate` 来验证恢复能力：`role_n
 files:
   - marketing_spend_by_channel_month.csv
   - attributed_revenue_by_channel_month.csv
-expected:
-  should_inspect_schema: true
-  should_auto_map: true
-  should_ask_user: false
-  should_finalize_report: true
-  expected_coverage: sufficient
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
   required_tool_calls:
     - task_delegate
   required_tool_result_codes:
     - task_delegate:no_allowed_tools_resolved
-  required_mentions:
-    - month + channel join
-  forbidden_claims:
-    - tables cannot be combined
+manual_review:
+  - 委派失败被当作事实处理，主运行仍完成用户要求的分析。

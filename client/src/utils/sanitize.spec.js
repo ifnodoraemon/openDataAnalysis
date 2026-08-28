@@ -76,4 +76,48 @@ describe("sanitizeReportHTML", () => {
     expect(sanitized).not.toContain("echarts.init(el)");
     expect(sanitized).toContain('src="/oda-chart-runtime.js"');
   });
+
+  it("strips @import and url() constructs from style element text", () => {
+    const html = `<!DOCTYPE html><html><head><style>
+      @import url("http://evil.example/evil.css");
+      .box { background: url(http://evil.example/i.png); color: #333333; }
+    </style></head><body><div class="box">ok</div></body></html>`;
+
+    const sanitized = sanitizeReportHTML(html);
+    expect(sanitized).not.toContain("@import");
+    expect(sanitized).not.toContain("url(");
+    expect(sanitized).toContain("color: #333333");
+  });
+
+  it("restricts link href to same-origin or relative targets", () => {
+    const html = `<!DOCTYPE html><html><head>
+      <link rel="stylesheet" href="https://cdn.evil.example/theme.css">
+      <link rel="stylesheet" href="/assets/report.css">
+    </head><body><p>x</p></body></html>`;
+
+    const sanitized = sanitizeReportHTML(html);
+    expect(sanitized).not.toContain("cdn.evil.example");
+    expect(sanitized).toContain("/assets/report.css");
+  });
+
+  it("rejects protocol-relative URLs in href and src", () => {
+    const html = `<!DOCTYPE html><html><body>
+      <a href="//evil.example/page">link</a>
+      <img src="//evil.example/img.png">
+    </body></html>`;
+
+    const sanitized = sanitizeReportHTML(html);
+    expect(sanitized).not.toContain("//evil.example");
+    expect(sanitized).toContain(">link</a>");
+  });
+
+  it("removes dangerous attributes but keeps allowlisted report ids", () => {
+    const html = `<!DOCTYPE html><html><body>
+      <div id="keep-id" content="evil">x</div>
+    </body></html>`;
+
+    const sanitized = sanitizeReportHTML(html);
+    expect(sanitized).not.toContain("content=");
+    expect(sanitized).toContain('id="keep-id"');
+  });
 });

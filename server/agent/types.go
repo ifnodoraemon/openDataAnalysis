@@ -1,13 +1,14 @@
 package agent
 
 import (
-	"encoding/json"
+	"fmt"
+	"strings"
 
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 )
 
-// WSEvent WebSocket 事件类型
-type WSEvent struct {
+// RuntimeEvent 是运行时事件的传输结构。
+type RuntimeEvent struct {
 	Type      string      `json:"type"`
 	SessionID string      `json:"sessionId,omitempty"`
 	RunID     string      `json:"runId,omitempty"`
@@ -16,9 +17,6 @@ type WSEvent struct {
 
 // 事件类型常量
 const (
-	EventSessionReady           = "session_ready"
-	EventSessionReset           = "session_reset"
-	EventUserMessage            = "user_message"
 	EventRunStarted             = "run_started"
 	EventAssistantStatus        = "assistant_status"
 	EventToolCall               = "tool_call"
@@ -28,8 +26,6 @@ const (
 	EventError                  = "error"
 	EventRunCompleted           = "run_completed"
 	EventRunCancelled           = "run_cancelled"
-	EventStop                   = "stop_run"
-	EventReset                  = "reset_session"
 	EventUserRequestInput       = "user_request_input"
 	EventStateSubgoalsUpdated   = "state_subgoals_updated"
 	EventStateMemoryUpdated     = "state_memory_updated"
@@ -44,38 +40,71 @@ type UserMessage struct {
 	TurnContext *TurnContext       `json:"turnContext,omitempty"`
 }
 
-type ReportEditContext struct {
-	Mode                string `json:"mode,omitempty"`
-	TargetRunID         string `json:"targetRunId,omitempty"`
-	BlockID             string `json:"blockId,omitempty"`
-	BlockLabel          string `json:"blockLabel,omitempty"`
-	ChartID             string `json:"chartId,omitempty"`
-	SelectionText       string `json:"selectionText,omitempty"`
-	SelectionStart      int    `json:"selectionStart,omitempty"`
-	SelectionEnd        int    `json:"selectionEnd,omitempty"`
-	SelectionRangeSet   bool   `json:"selectionRangeSet,omitempty"`
-	PreserveOtherBlocks bool   `json:"preserveOtherBlocks,omitempty"`
+func (m UserMessage) Validate() error {
+	if strings.TrimSpace(m.Content) == "" {
+		return fmt.Errorf("用户消息内容不能为空")
+	}
+	if err := m.EditContext.Validate(); err != nil {
+		return err
+	}
+	if m.TurnContext != nil {
+		if m.TurnContext.ReportTargetRunID != strings.TrimSpace(m.TurnContext.ReportTargetRunID) {
+			return fmt.Errorf("turnContext.reportTargetRunId 必须保持原值")
+		}
+	}
+	return nil
 }
 
-func (c *ReportEditContext) UnmarshalJSON(data []byte) error {
-	type alias ReportEditContext
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
+type ReportEditContext struct {
+	ScopeKind         string `json:"scopeKind"`
+	TargetRunID       string `json:"targetRunId,omitempty"`
+	BlockID           string `json:"blockId,omitempty"`
+	BlockLabel        string `json:"blockLabel,omitempty"`
+	ChartID           string `json:"chartId,omitempty"`
+	SelectionText     string `json:"selectionText,omitempty"`
+	SelectionStart    int    `json:"selectionStart,omitempty"`
+	SelectionEnd      int    `json:"selectionEnd,omitempty"`
+	SelectionRangeSet bool   `json:"selectionRangeSet,omitempty"`
+}
+
+func (c *ReportEditContext) Validate() error {
+	if c == nil {
+		return nil
 	}
-	var decoded alias
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
-	}
-	if rawValue, ok := raw["selectionRangeSet"]; ok {
-		var rangeSet bool
-		if err := json.Unmarshal(rawValue, &rangeSet); err != nil {
-			return err
+	for field, value := range map[string]string{
+		"scopeKind":   c.ScopeKind,
+		"targetRunId": c.TargetRunID,
+		"blockId":     c.BlockID,
+		"chartId":     c.ChartID,
+	} {
+		if value != strings.TrimSpace(value) {
+			return fmt.Errorf("editContext.%s 不能包含首尾空白", field)
 		}
-		decoded.SelectionRangeSet = rangeSet
 	}
-	*c = ReportEditContext(decoded)
-	return nil
+	switch c.ScopeKind {
+	case "whole_report", "layout":
+		return nil
+	case "partial_block":
+		if strings.TrimSpace(c.BlockID) == "" {
+			return fmt.Errorf("partial_block 范围必须提供 editContext.blockId")
+		}
+		return nil
+	case "partial_chart":
+		if strings.TrimSpace(c.ChartID) == "" {
+			return fmt.Errorf("partial_chart 范围必须提供 editContext.chartId")
+		}
+		return nil
+	case "partial_selection":
+		if strings.TrimSpace(c.BlockID) == "" || strings.TrimSpace(c.SelectionText) == "" {
+			return fmt.Errorf("partial_selection 范围必须提供 editContext.blockId 和 selectionText")
+		}
+		if !c.SelectionRangeSet || c.SelectionStart < 0 || c.SelectionEnd <= c.SelectionStart {
+			return fmt.Errorf("partial_selection 范围必须提供明确且有效的选区")
+		}
+		return nil
+	default:
+		return fmt.Errorf("editContext.scopeKind 必须是 whole_report、layout、partial_block、partial_chart 或 partial_selection")
+	}
 }
 
 type TurnContext struct {
@@ -83,37 +112,8 @@ type TurnContext struct {
 	ReportTitle       string `json:"reportTitle,omitempty"`
 }
 
-type StopRunRequest struct {
-	RunID string `json:"runId,omitempty"`
-}
-
-type ResetSessionRequest struct {
-	KeepFiles bool `json:"keepFiles"`
-}
-
-type SessionReadyData struct {
-	SessionID      string                 `json:"sessionId"`
-	Files          []UploadedFile         `json:"files,omitempty"`
-	Subgoals       []Subgoal              `json:"subgoals,omitempty"`
-	Memory         map[string]string      `json:"memory,omitempty"`
-	ReportHTML     string                 `json:"report_html,omitempty"`
-	ReportSnapshot *domain.ReportSnapshot `json:"report_snapshot,omitempty"`
-	EditState      *EditStateUpdatedData  `json:"edit_state,omitempty"`
-}
-
-type SessionResetData struct {
-	KeepFiles bool           `json:"keepFiles"`
-	Files     []UploadedFile `json:"files,omitempty"`
-}
-
 type RunStartedData struct {
 	RunID string `json:"runId"`
-}
-
-type UploadedFile struct {
-	FileID string `json:"fileId"`
-	Name   string `json:"name"`
-	Size   int64  `json:"size"`
 }
 
 // AssistantStatusData is visible progress/status text emitted before tool use.
@@ -146,19 +146,26 @@ type AskUserOption struct {
 
 // AskUserData 等待用户回答的事件。选项只是 UI affordance，用户仍可按配置自行描述。
 type AskUserData struct {
-	Question      string          `json:"question"`
-	Reason        string          `json:"reason,omitempty"`      // 为什么需要用户确认
-	Scope         string          `json:"scope,omitempty"`       // 作用域: join_key | metric | time_grain | filter | general
-	ContextRef    string          `json:"context_ref,omitempty"` // 关联上下文（表名、列名等）
-	InputHint     string          `json:"input_hint,omitempty"`  // 可选的自定义描述提示
-	Required      bool            `json:"required"`
-	SelectionMode string          `json:"selection_mode,omitempty"`
-	AllowCustom   bool            `json:"allow_custom"`
-	Options       []AskUserOption `json:"options,omitempty"`
+	Question      string                      `json:"question"`
+	Reason        string                      `json:"reason,omitempty"`      // 为什么需要用户确认
+	Scope         string                      `json:"scope,omitempty"`       // Uninterpreted caller-defined correlation label.
+	ContextRef    string                      `json:"context_ref,omitempty"` // 关联上下文（表名、列名等）
+	InputHint     string                      `json:"input_hint,omitempty"`  // 可选的自定义描述提示
+	Required      bool                        `json:"required"`
+	SelectionMode string                      `json:"selection_mode,omitempty"`
+	AllowCustom   bool                        `json:"allow_custom"`
+	Options       []AskUserOption             `json:"options,omitempty"`
+	Authorization *ActionAuthorizationRequest `json:"authorization,omitempty"`
+}
+
+type ActionAuthorizationRequest struct {
+	Action      string `json:"action"`
+	ResourceRef string `json:"resource_ref"`
+	PayloadJSON string `json:"payload_json"`
 }
 
 type MemoryUpdatedData struct {
-	Facts map[string]string `json:"facts"`
+	Entries map[string]MemoryEntry `json:"entries"`
 }
 
 type EditStateUpdatedData struct {

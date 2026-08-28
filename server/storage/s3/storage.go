@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -12,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 
 	"github.com/ifnodoraemon/openDataAnalysis/storage"
 )
@@ -139,8 +141,11 @@ func (s *Storage) Exists(ctx context.Context, key string) (bool, error) {
 	if errors.As(err, &nsk) {
 		return false, nil
 	}
-	// Check for 404 response
-	return false, nil
+	var responseErr *smithyhttp.ResponseError
+	if errors.As(err, &responseErr) && responseErr.HTTPStatusCode() == http.StatusNotFound {
+		return false, nil
+	}
+	return false, fmt.Errorf("s3 HeadObject failed key=%s: %w", key, err)
 }
 
 func (s *Storage) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error) {

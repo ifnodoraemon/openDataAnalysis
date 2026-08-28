@@ -49,3 +49,6 @@ server/open-data-analysis-like-claude-code
 
 # Docker overrides
 docker-compose.override.yml
+
+# Go build artifact
+server/openDataAnalysis

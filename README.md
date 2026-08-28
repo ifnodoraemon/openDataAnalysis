@@ -1,10 +1,10 @@
-# Open Data Analysis
+# OpenDataAnalysis
 
 [中文说明](README.zh-CN.md)
 
 Interactive data analysis for tabular data. Users upload CSV/Excel files or import SQL source snapshots, then an agent inspects data, runs SQL/Python when needed, creates charts, and produces reports.
 
-![Open Data Analysis UI](docs/images/screenshot.png)
+![OpenDataAnalysis UI](docs/images/screenshot.png)
 
 ## Current Capabilities
 
@@ -21,11 +21,15 @@ Local development is standardized on Docker Compose.
 
 ```bash
 cp server/.env.example server/.env
-# Configure LLM_PROVIDER / LLM_API_KEY / LLM_MODEL / AUTH_SECRET and related settings.
+# Configure LLM_PROVIDER / LLM_API_PROTOCOL / LLM_API_ENDPOINT / LLM_API_KEY / LLM_MODEL / AUTH_SECRET.
 docker compose up -d --build
 ```
 
 Open `http://localhost`.
+
+For `LLM_PROVIDER=openai`, select `LLM_API_PROTOCOL=responses` or
+`LLM_API_PROTOCOL=chat_completions` explicitly. Compatible-provider hostnames and
+model names are not used to guess or rewrite the protocol or endpoint.
 
 Common commands:
 
@@ -39,7 +43,7 @@ docker compose down
 
 ## Deployment Modes
 
-The default Docker Compose setup is a development profile. It uses local SQLite metadata, local object storage, in-process run execution, session SQLite analysis scratch DBs, and executor-local Python artifacts.
+The default Docker Compose setup is a development profile. It uses local SQLite metadata, local object storage, in-process run execution, and session SQLite analysis scratch DBs. Python artifacts are ingested into the configured object-storage interface.
 
 Production must be configured explicitly with `DEPLOYMENT_MODE=production`. In that mode the server fails closed while any local or single-process backend is still selected:
 
@@ -47,23 +51,22 @@ Production must be configured explicitly with `DEPLOYMENT_MODE=production`. In t
 - `STORAGE_PROVIDER=local`
 - `RUN_BACKEND=inprocess`
 - `ANALYSIS_STORE=session_sqlite`
-- `PYTHON_ARTIFACT_STORE=executor_local`
 - wildcard or localhost `CORS_ALLOWED_ORIGINS`
 
-The target MaaS contract is documented in [`docs/maas-production-architecture.md`](docs/maas-production-architecture.md). Shared local volumes and sticky WebSocket sessions are not considered a production scaling strategy.
+The target MaaS contract is documented in [`docs/maas-production-architecture.md`](docs/maas-production-architecture.md). Shared local volumes and process-local event subscriptions are not considered a production scaling strategy.
 
 ## Architecture
 
 | Layer | Notes |
 |---|---|
 | Frontend | Vue 3 + Vite + Pinia |
-| Backend | Go + Chi + Gorilla WebSocket |
+| Backend | Go + Chi + SSE |
 | Agent Runtime | Tool-calling ReAct loop; runtime exposes state/tools, model judges the path |
 | Analysis DB | Development: one SQLite scratch DB per session. Production target: rebuildable worker scratch state from durable snapshot manifests |
 | Metadata DB | Development: SQLite. Production target: PostgreSQL behind repository interfaces |
 | Python Executor | Separate service for advanced analysis that SQL does not fit |
 | Storage | Development: local object storage. Production target: S3-compatible object storage |
-| Semantic Assets | Workspace-level reusable facts from user-confirmed metric, time, unit, and join semantics |
+| Semantic Assets | Workspace-level reusable assets containing exact user-authorized patches and their schema signatures |
 | Audit | Critical data imports, semantic confirmations, and semantic asset changes are persisted as audit events |
 
 Development runtime data lives under `data/`:
@@ -78,19 +81,17 @@ Development runtime data lives under `data/`:
 
 | Type | Current status |
 |---|---|
-| CSV | Recommended for large files; streaming batch import, no hard row cap |
-| Excel | Hard cap at 100,000 rows per sheet |
+| CSV | Streaming batch import; observed headers and cell text are preserved exactly |
+| Excel | Streaming batch import for a workbook with exactly one worksheet; observed headers and cell text are preserved exactly |
 | PostgreSQL / MySQL | Read-only workspace SQL source imported into session SQLite; default `SQL_IMPORT_ROW_LIMIT=1000000` |
 | Live upstream query | Not supported; should be designed as a separate capability |
 
-Data size tiers:
-
-| Tier | Rows | Default profiling mode |
-|---|---:|---|
-| small | < 10,000 | exact |
-| medium | 10,000 - 99,999 | mixed |
-| large | 100,000 - 999,999 | sampled |
-| xlarge | >= 1,000,000 | sampled; database imports use bounded snapshots by default |
+Every import is written to a snapshot-scoped analysis table. The current binding
+changes only after schema facts and profile state have been persisted; a failed
+replacement therefore leaves the previous snapshot readable. Persisted profiles
+observe the imported snapshot exactly. The model explicitly selects `sample_rows`
+when calling `data_describe_table`; the runtime does not choose sampling from a
+dataset-size tier.
 
 ## Main API Surface
 
@@ -106,7 +107,7 @@ Data size tiers:
 - `POST /api/data-sources/{sourceID}/test`
 - `GET /api/data-sources/{sourceID}/catalog`
 - `POST /api/data-sources/{sourceID}/import`
-- `GET /ws?token=...&session_id=...`
+- `GET /api/sse?session_id=...`
 
 Agent observation tools also include `state_governance_inspect` for general data governance facts in the current session. It does not trigger a fixed workflow.
 
@@ -120,9 +121,9 @@ Connector-backed SQL source creation uses public `config` plus encrypted `creden
     "host": "db.example.com",
     "port": 3306,
     "database_name": "analytics",
-    "default_schema": "public",
+    "tls_mode": "verify_identity",
     "username": "reader",
-    "allowlist": [{ "name": "orders", "kind": "table" }]
+    "allowlist": [{ "schema": "analytics", "name": "orders", "kind": "table" }]
   },
   "credential": { "password": "secret" }
 }

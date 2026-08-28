@@ -10,13 +10,13 @@ func TestPolicyPromptIncludesGuardrails(t *testing.T) {
 
 	prompt := BuildPolicyPrompt()
 	lower := strings.ToLower(prompt)
-	if !strings.Contains(lower, "ambiguity") {
-		t.Fatalf("expected ambiguity guardrail in prompt, got %q", prompt)
+	if !strings.Contains(lower, "unresolved interpretation") {
+		t.Fatalf("expected interpretation guardrail in prompt, got %q", prompt)
 	}
 	if !strings.Contains(lower, "assumptions") {
 		t.Fatalf("expected assumption-related guidance in prompt, got %q", prompt)
 	}
-	if !strings.Contains(lower, "finalize") {
+	if !strings.Contains(lower, "report delivery boundary") {
 		t.Fatalf("expected finalize guardrail in prompt, got %q", prompt)
 	}
 	if !strings.Contains(lower, "data analysis") {

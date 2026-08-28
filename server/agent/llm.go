@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
-	"net/url"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ifnodoraemon/openDataAnalysis/config"
+	"github.com/ifnodoraemon/openDataAnalysis/internal/jsoncontract"
 	"github.com/ifnodoraemon/openDataAnalysis/tools"
 	anthropic "github.com/liushuangls/go-anthropic/v2"
 )
@@ -28,7 +30,7 @@ type LLMClient struct {
 
 // NewLLMClient 创建 LLM 客户端
 func NewLLMClient() *LLMClient {
-	provider := "openai"
+	provider := ""
 	model := ""
 	if config.Cfg != nil {
 		provider = config.Cfg.LLMProvider
@@ -69,73 +71,87 @@ func (l *LLMClient) initAnthropic() {
 	opts := []anthropic.ClientOption{}
 
 	baseURL := config.Cfg.LLMBaseURL
-	if baseURL != "" && baseURL != "https://api.anthropic.com" {
+	if baseURL != "" {
 		opts = append(opts, anthropic.WithBaseURL(baseURL))
 	}
 
 	l.anthropicClient = anthropic.NewClient(config.Cfg.LLMAPIKey, opts...)
 }
 
-// SimpleChatFunc 返回一个简单的聊天函数，适配 data.LLMChatFunc 签名。
-// 用于语义预分析等不需要 tool calling 的场景。
-func (l *LLMClient) SimpleChatFunc() func(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
-	return func(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
-		bundle := &PromptBundle{
-			Policy: systemPrompt,
-			Task:   userPrompt,
-		}
-		resp, err := l.ChatWithTools(ctx, bundle, nil)
-		if err != nil {
-			return "", err
-		}
-		if len(resp.Choices) == 0 {
-			return "", fmt.Errorf("LLM returned empty response")
-		}
-		return resp.Choices[0].Message.Content, nil
-	}
+type retryableError interface {
+	Retryable() bool
 }
 
-// isRetryableLLMError 判断 LLM 调用错误是否属于可重试的瞬态错误。
-// 4xx（认证/权限/请求格式错误）不可重试；5xx 和网络层错误可重试。
+type httpStatusError struct {
+	Operation  string
+	StatusCode int
+	Body       string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("%s: status=%d body=%s", e.Operation, e.StatusCode, e.Body)
+}
+
+func (e *httpStatusError) Retryable() bool {
+	return e.StatusCode == http.StatusRequestTimeout ||
+		e.StatusCode == http.StatusConflict ||
+		e.StatusCode == http.StatusTooEarly ||
+		e.StatusCode == http.StatusTooManyRequests ||
+		e.StatusCode >= http.StatusInternalServerError
+}
+
+func isTransientTransportError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var declared retryableError
+	if errors.As(err, &declared) {
+		return declared.Retryable()
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() || netErr.Temporary() {
+			return true
+		}
+	}
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE)
+}
+
+// isRetryableLLMError uses typed transport and provider errors. It never
+// classifies failures by matching human-readable error text.
 func isRetryableLLMError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	// 非重试：客户端错误（4xx）
-	for _, code := range []string{"status=400", "status=401", "status=403", "status=404", "status=422"} {
-		if strings.Contains(msg, code) {
-			return false
-		}
+	var requestErr *anthropic.RequestError
+	if errors.As(err, &requestErr) {
+		return (&httpStatusError{StatusCode: requestErr.StatusCode}).Retryable()
 	}
-	// 可重试：常见瞬态错误
-	if strings.Contains(msg, "timeout") ||
-		strings.Contains(msg, "tls handshake") ||
-		strings.Contains(msg, "i/o timeout") ||
-		strings.Contains(msg, "eof") ||
-		strings.Contains(msg, "connection refused") ||
-		strings.Contains(msg, "connection reset") ||
-		strings.Contains(msg, "status=429") || // rate limit
-		strings.Contains(msg, "status=500") ||
-		strings.Contains(msg, "status=502") ||
-		strings.Contains(msg, "status=503") ||
-		strings.Contains(msg, "status=504") {
-		return true
+	var apiErr *anthropic.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.IsRateLimitErr() || apiErr.IsApiErr() || apiErr.IsOverloadedErr()
 	}
-	// context 取消不重试
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return false
-	}
-	return false
+	return isTransientTransportError(err)
 }
 
 // ChatWithTools 统一的调用接口，包含对底层网络不稳定的重试逻辑（指数退避，区分可重试错误）
 func (l *LLMClient) ChatWithTools(ctx context.Context, bundle *PromptBundle, toolSpecs []tools.ToolSpec) (*LLMResponse, error) {
+	if err := validatePromptBundle(bundle); err != nil {
+		return nil, err
+	}
 	if config.Cfg == nil {
 		return nil, fmt.Errorf("LLM config is not initialized")
 	}
-	if strings.TrimSpace(config.Cfg.LLMAPIKey) == "" || config.IsPlaceholderValue(config.Cfg.LLMAPIKey) {
+	if strings.TrimSpace(config.Cfg.LLMAPIKey) == "" {
 		return nil, fmt.Errorf("LLM_API_KEY is not configured")
+	}
+	if strings.TrimSpace(config.Cfg.LLMAPIKey) != config.Cfg.LLMAPIKey {
+		return nil, fmt.Errorf("LLM_API_KEY must not contain leading or trailing whitespace")
 	}
 
 	retryCtx, retryCancel := context.WithTimeout(ctx, llmRetryBudget())
@@ -157,8 +173,10 @@ func (l *LLMClient) ChatWithTools(ctx context.Context, bundle *PromptBundle, too
 			resp, err = l.chatAnthropic(retryCtx, bundle, toolSpecs)
 		case "google":
 			resp, err = l.chatGoogle(retryCtx, bundle, toolSpecs)
-		default:
+		case "openai":
 			resp, err = l.chatOpenAI(retryCtx, bundle, toolSpecs)
+		default:
+			return nil, fmt.Errorf("unsupported LLM_PROVIDER %q", l.provider)
 		}
 
 		if err == nil {
@@ -268,7 +286,7 @@ func (l *LLMClient) chatOpenAI(ctx context.Context, bundle *PromptBundle, toolSp
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		responsePath := llmDebugWriter.WriteBlob(span, "response.error.txt", body)
 		l.debugLog(span, "llm.error", map[string]interface{}{
 			"status":          resp.StatusCode,
@@ -278,7 +296,11 @@ func (l *LLMClient) chatOpenAI(ctx context.Context, bundle *PromptBundle, toolSp
 			"response_sha256": blobSHA256(body),
 			"response_path":   responsePath,
 		})
-		return nil, fmt.Errorf("OpenAI Responses API call failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+		statusErr := &httpStatusError{Operation: "OpenAI Responses API call failed", StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body))}
+		if readErr != nil {
+			return nil, errors.Join(statusErr, fmt.Errorf("failed to read error response: %w", readErr))
+		}
+		return nil, statusErr
 	}
 
 	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
@@ -293,6 +315,9 @@ func (l *LLMClient) chatOpenAI(ctx context.Context, bundle *PromptBundle, toolSp
 	}
 	if apiResp.Error != nil {
 		return nil, fmt.Errorf("OpenAI Responses API call failed: code=%s message=%s", apiResp.Error.Code, apiResp.Error.Message)
+	}
+	if err := validateResponsesAPIResponse(apiResp); err != nil {
+		return nil, fmt.Errorf("invalid Responses API response: %w", err)
 	}
 	if hasPromptMismatch(reqBody.Instructions, apiResp.Instructions) && apiResp.isEmptyOutput() {
 		l.debugLog(span, "llm.prompt_mismatch", map[string]interface{}{
@@ -321,90 +346,18 @@ func (l *LLMClient) chatOpenAI(ctx context.Context, bundle *PromptBundle, toolSp
 }
 
 func (l *LLMClient) resolveOpenAIEndpoint() (string, openAIAPIKind, error) {
-	endpoint := strings.TrimSpace(config.Cfg.LLMAPIEndpoint)
-	baseURL := strings.TrimSpace(config.Cfg.LLMBaseURL)
+	endpoint := config.Cfg.LLMAPIEndpoint
 	if endpoint == "" {
-		if baseURL == "" {
-			return "", "", fmt.Errorf("LLM_API_ENDPOINT not configured")
-		}
-		endpoint = defaultOpenAIEndpointForBase(baseURL)
+		return "", "", fmt.Errorf("LLM_API_ENDPOINT not configured")
 	}
-
-	if isDeepSeekEndpoint(endpoint) || isDeepSeekEndpoint(baseURL) {
-		chatEndpoint := endpoint
-		if isDeepSeekEndpoint(baseURL) && !isDeepSeekEndpoint(endpoint) {
-			chatEndpoint = defaultOpenAIEndpointForBase(baseURL)
-		}
-		return normalizeChatCompletionsEndpoint(chatEndpoint), openAIAPIChatCompletions, nil
-	}
-	lowered := strings.ToLower(endpoint)
-	if strings.Contains(lowered, "/chat/completions") {
+	switch config.Cfg.LLMAPIProtocol {
+	case string(openAIAPIChatCompletions):
 		return endpoint, openAIAPIChatCompletions, nil
-	}
-	if strings.Contains(lowered, "/responses") {
+	case string(openAIAPIResponses):
 		return endpoint, openAIAPIResponses, nil
-	}
-	if isBaseLikeEndpoint(endpoint) {
-		return defaultOpenAIEndpointForBase(endpoint), openAIAPIChatCompletions, nil
-	}
-	return endpoint, openAIAPIResponses, nil
-}
-
-func defaultOpenAIEndpointForBase(baseURL string) string {
-	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if trimmed == "" {
-		return ""
-	}
-	if parsed, err := url.Parse(trimmed); err == nil && strings.EqualFold(parsed.Hostname(), "api.openai.com") {
-		return trimmed + "/v1/responses"
-	}
-	if isDeepSeekEndpoint(trimmed) {
-		return trimmed + "/chat/completions"
-	}
-	if strings.HasSuffix(strings.ToLower(trimmed), "/v1") {
-		return trimmed + "/chat/completions"
-	}
-	return trimmed + "/v1/chat/completions"
-}
-
-func isDeepSeekEndpoint(raw string) bool {
-	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
-		return false
-	}
-	host := strings.ToLower(parsed.Hostname())
-	return host == "api.deepseek.com" || strings.HasSuffix(host, ".deepseek.com")
-}
-
-func isBaseLikeEndpoint(raw string) bool {
-	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return false
-	}
-	path := strings.Trim(strings.TrimSpace(parsed.Path), "/")
-	return path == "" || path == "v1"
-}
-
-func normalizeChatCompletionsEndpoint(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	parsed, err := url.Parse(trimmed)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return trimmed
-	}
-	path := strings.TrimRight(parsed.Path, "/")
-	switch {
-	case strings.HasSuffix(strings.ToLower(path), "/chat/completions"):
-		return parsed.String()
-	case path == "" || path == "/":
-		parsed.Path = "/chat/completions"
-	case strings.EqualFold(path, "/v1"):
-		parsed.Path = "/v1/chat/completions"
-	case strings.HasSuffix(strings.ToLower(path), "/responses"):
-		parsed.Path = path[:len(path)-len("/responses")] + "/chat/completions"
 	default:
-		parsed.Path = path + "/chat/completions"
+		return "", "", fmt.Errorf("LLM_API_PROTOCOL must be responses or chat_completions for LLM_PROVIDER=openai")
 	}
-	return parsed.String()
 }
 
 type responsesAPIRequest struct {
@@ -507,17 +460,12 @@ type responsesAPIResponse struct {
 	Output       []responsesOutputItem `json:"output"`
 	Usage        responsesAPIUsage     `json:"usage"`
 	Error        *responsesAPIError    `json:"error"`
-	Message      *responsesMessage     `json:"message"`
-	Content      interface{}           `json:"content"`
-	Text         interface{}           `json:"text"`
 }
 
 type responsesAPIUsage struct {
-	InputTokens      int `json:"input_tokens"`
-	OutputTokens     int `json:"output_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
 }
 
 type responsesAPIError struct {
@@ -542,168 +490,77 @@ type responsesOutputContent struct {
 	Text string `json:"text"`
 }
 
-type responsesMessage struct {
-	Role    string      `json:"role"`
-	Content interface{} `json:"content"`
-}
-
-type responsesSSEEvent struct {
-	Type     string                `json:"type"`
-	Response *responsesAPIResponse `json:"response"`
-	Error    *responsesAPIError    `json:"error"`
-	Delta    string                `json:"delta"`
-}
-
 func parseResponsesBody(body []byte) (*responsesAPIResponse, error) {
-	trimmed := strings.TrimSpace(string(body))
-	if strings.HasPrefix(trimmed, "data:") {
-		return parseResponsesSSE(trimmed)
+	if err := jsoncontract.Validate(body); err != nil {
+		return nil, err
 	}
-
 	var apiResp responsesAPIResponse
 	if err := json.Unmarshal(body, &apiResp); err != nil {
 		return nil, err
 	}
-	apiResp.normalize()
 	return &apiResp, nil
 }
 
-func parseResponsesSSE(body string) (*responsesAPIResponse, error) {
-	var apiResp responsesAPIResponse
-	var deltas []string
-	for _, line := range strings.Split(body, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "data:") {
-			continue
+func validateResponsesAPIResponse(resp *responsesAPIResponse) error {
+	if resp == nil {
+		return fmt.Errorf("response is nil")
+	}
+	if resp.Status != "completed" {
+		return fmt.Errorf("status must be completed, got %q", resp.Status)
+	}
+	for i, item := range resp.Output {
+		switch item.Type {
+		case "message":
+			for j, content := range item.Content {
+				if content.Type != "output_text" {
+					return fmt.Errorf("output[%d].content[%d] has unsupported type %q", i, j, content.Type)
+				}
+			}
+		case "function_call":
+			if strings.TrimSpace(item.CallID) == "" || strings.TrimSpace(item.Name) == "" {
+				return fmt.Errorf("output[%d] function_call requires call_id and name", i)
+			}
+			if strings.TrimSpace(item.CallID) != item.CallID || strings.TrimSpace(item.Name) != item.Name {
+				return fmt.Errorf("output[%d] function_call identifiers must not be padded", i)
+			}
+			var args map[string]interface{}
+			if err := jsoncontract.Decode([]byte(item.Arguments), &args); err != nil {
+				return fmt.Errorf("output[%d] function_call arguments: %w", i, err)
+			}
+		default:
+			return fmt.Errorf("output[%d] has unsupported type %q", i, item.Type)
 		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" || payload == "[DONE]" {
-			continue
-		}
-		var event responsesSSEEvent
-		if err := json.Unmarshal([]byte(payload), &event); err != nil {
-			continue
-		}
-		if event.Response != nil {
-			apiResp = *event.Response
-		}
-		if event.Error != nil {
-			apiResp.Error = event.Error
-		}
-		if event.Type == "response.output_text.delta" && event.Delta != "" {
-			deltas = append(deltas, event.Delta)
-		}
 	}
-	if apiResp.ID == "" && apiResp.Error == nil && len(deltas) == 0 {
-		return nil, fmt.Errorf("no parseable Responses SSE events")
-	}
-	if strings.TrimSpace(apiResp.OutputText) == "" && len(deltas) > 0 {
-		apiResp.OutputText = strings.Join(deltas, "")
-	}
-	apiResp.normalize()
-	return &apiResp, nil
-}
-
-func (r *responsesAPIResponse) normalize() {
-	if r == nil {
-		return
-	}
-	if r.Usage.InputTokens == 0 {
-		r.Usage.InputTokens = r.Usage.PromptTokens
-	}
-	if r.Usage.OutputTokens == 0 {
-		r.Usage.OutputTokens = r.Usage.CompletionTokens
-	}
-	if r.Usage.TotalTokens == 0 {
-		r.Usage.TotalTokens = r.Usage.InputTokens + r.Usage.OutputTokens
-	}
-	if strings.TrimSpace(r.OutputText) == "" {
-		r.OutputText = firstText(contentToText(r.Text), contentToText(r.Content), messageText(r.Message))
-	}
+	return nil
 }
 
 func (r *responsesAPIResponse) isEmptyOutput() bool {
 	if r == nil {
 		return true
 	}
-	if strings.TrimSpace(r.OutputText) != "" || strings.TrimSpace(contentToText(r.Text)) != "" {
-		return false
-	}
-	if strings.TrimSpace(contentToText(r.Content)) != "" || strings.TrimSpace(messageText(r.Message)) != "" {
+	if strings.TrimSpace(r.OutputText) != "" {
 		return false
 	}
 	return len(r.Output) == 0
 }
 
 func hasPromptMismatch(requestInstructions, responseInstructions string) bool {
-	requestInstructions = strings.TrimSpace(requestInstructions)
-	responseInstructions = strings.TrimSpace(responseInstructions)
-	if requestInstructions == "" || responseInstructions == "" {
+	if strings.TrimSpace(requestInstructions) == "" || strings.TrimSpace(responseInstructions) == "" {
 		return false
 	}
 	return requestInstructions != responseInstructions
-}
-
-func firstText(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
-func messageText(message *responsesMessage) string {
-	if message == nil {
-		return ""
-	}
-	return contentToText(message.Content)
-}
-
-func contentToText(content interface{}) string {
-	switch typed := content.(type) {
-	case string:
-		return typed
-	case []interface{}:
-		parts := make([]string, 0, len(typed))
-		for _, item := range typed {
-			if itemMap, ok := item.(map[string]interface{}); ok {
-				if text, ok := itemMap["text"].(string); ok && strings.TrimSpace(text) != "" {
-					parts = append(parts, text)
-					continue
-				}
-				if text, ok := itemMap["content"].(string); ok && strings.TrimSpace(text) != "" {
-					parts = append(parts, text)
-				}
-			}
-		}
-		return strings.Join(parts, "\n")
-	case map[string]interface{}:
-		if text, ok := typed["text"].(string); ok && strings.TrimSpace(text) != "" {
-			return text
-		}
-		if text, ok := typed["content"].(string); ok && strings.TrimSpace(text) != "" {
-			return text
-		}
-		if text, ok := typed["value"].(string); ok && strings.TrimSpace(text) != "" {
-			return text
-		}
-		return ""
-	default:
-		return ""
-	}
 }
 
 func (l *LLMClient) buildResponsesRequest(bundle *PromptBundle, toolSpecs []tools.ToolSpec) (*responsesAPIRequest, error) {
 	req := &responsesAPIRequest{
 		Model: l.model,
 	}
-	if config.Cfg != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(l.model)), "gpt-5") {
-		if effort := strings.TrimSpace(config.Cfg.LLMReasoningEffort); effort != "" {
-			req.Reasoning = &responsesReasoning{Effort: effort}
+	if config.Cfg != nil {
+		if config.Cfg.LLMReasoningEffort != "" {
+			req.Reasoning = &responsesReasoning{Effort: config.Cfg.LLMReasoningEffort}
 		}
-		if verbosity := strings.TrimSpace(config.Cfg.LLMTextVerbosity); verbosity != "" {
-			req.Text = &responsesText{Verbosity: verbosity}
+		if config.Cfg.LLMTextVerbosity != "" {
+			req.Text = &responsesText{Verbosity: config.Cfg.LLMTextVerbosity}
 		}
 	}
 
@@ -822,7 +679,7 @@ func (l *LLMClient) chatOpenAIChatCompletions(ctx context.Context, endpoint stri
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		responsePath := llmDebugWriter.WriteBlob(span, "response.error.txt", body)
 		l.debugLog(span, "llm.error", map[string]interface{}{
 			"status":          resp.StatusCode,
@@ -832,7 +689,11 @@ func (l *LLMClient) chatOpenAIChatCompletions(ctx context.Context, endpoint stri
 			"response_sha256": blobSHA256(body),
 			"response_path":   responsePath,
 		})
-		return nil, fmt.Errorf("OpenAI Chat Completions API call failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+		statusErr := &httpStatusError{Operation: "OpenAI Chat Completions API call failed", StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body))}
+		if readErr != nil {
+			return nil, errors.Join(statusErr, fmt.Errorf("failed to read error response: %w", readErr))
+		}
+		return nil, statusErr
 	}
 
 	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
@@ -841,12 +702,18 @@ func (l *LLMClient) chatOpenAIChatCompletions(ctx context.Context, endpoint stri
 	}
 	responsePath := llmDebugWriter.WriteBlob(span, "response.json", respBytes)
 
+	if err := jsoncontract.Validate(respBytes); err != nil {
+		return nil, fmt.Errorf("failed to validate Chat Completions body: %w", err)
+	}
 	var apiResp chatCompletionsResponse
 	if err := json.Unmarshal(respBytes, &apiResp); err != nil {
 		return nil, fmt.Errorf("failed to parse Chat Completions body: %w", err)
 	}
 	if apiResp.Error != nil {
 		return nil, fmt.Errorf("OpenAI Chat Completions API call failed: code=%s message=%s", apiResp.Error.Code, apiResp.Error.Message)
+	}
+	if err := validateChatCompletionsResponse(&apiResp); err != nil {
+		return nil, fmt.Errorf("invalid Chat Completions response: %w", err)
 	}
 	converted := l.convertChatCompletionsResponse(&apiResp)
 	outputPreview := ""
@@ -870,6 +737,45 @@ func (l *LLMClient) chatOpenAIChatCompletions(ctx context.Context, endpoint stri
 	return converted, nil
 }
 
+func validateChatCompletionsResponse(resp *chatCompletionsResponse) error {
+	if resp == nil || len(resp.Choices) == 0 {
+		return fmt.Errorf("at least one choice is required")
+	}
+	for i, choice := range resp.Choices {
+		if choice.Message.Role != LLMRoleAssistant {
+			return fmt.Errorf("choice[%d] role must be assistant, got %q", i, choice.Message.Role)
+		}
+		switch choice.FinishReason {
+		case LLMFinishReasonStop:
+			if len(choice.Message.ToolCalls) != 0 {
+				return fmt.Errorf("choice[%d] finish_reason stop conflicts with tool calls", i)
+			}
+		case LLMFinishReasonToolCalls:
+			if len(choice.Message.ToolCalls) == 0 {
+				return fmt.Errorf("choice[%d] finish_reason tool_calls requires tool calls", i)
+			}
+		default:
+			return fmt.Errorf("choice[%d] has unsupported finish_reason %q", i, choice.FinishReason)
+		}
+		for j, toolCall := range choice.Message.ToolCalls {
+			if toolCall.Type != LLMToolTypeFunction {
+				return fmt.Errorf("choice[%d].tool_calls[%d] has unsupported type %q", i, j, toolCall.Type)
+			}
+			if strings.TrimSpace(toolCall.ID) == "" || strings.TrimSpace(toolCall.Function.Name) == "" {
+				return fmt.Errorf("choice[%d].tool_calls[%d] requires id and function name", i, j)
+			}
+			if strings.TrimSpace(toolCall.ID) != toolCall.ID || strings.TrimSpace(toolCall.Function.Name) != toolCall.Function.Name {
+				return fmt.Errorf("choice[%d].tool_calls[%d] identifiers must not be padded", i, j)
+			}
+			var args map[string]interface{}
+			if err := jsoncontract.Decode([]byte(toolCall.Function.Arguments), &args); err != nil {
+				return fmt.Errorf("choice[%d].tool_calls[%d] arguments: %w", i, j, err)
+			}
+		}
+	}
+	return nil
+}
+
 func buildChatSystemPrompt(bundle *PromptBundle) string {
 	systemPrompt := bundle.Policy
 	if bundle.PolicyAppendix != "" {
@@ -884,8 +790,8 @@ func (l *LLMClient) buildChatCompletionsRequest(bundle *PromptBundle, toolSpecs 
 		Stream: false,
 	}
 	if config.Cfg != nil {
-		if effort := strings.TrimSpace(config.Cfg.LLMReasoningEffort); effort != "" {
-			req.ReasoningEffort = effort
+		if config.Cfg.LLMReasoningEffort != "" {
+			req.ReasoningEffort = config.Cfg.LLMReasoningEffort
 		}
 		if config.Cfg.LLMMaxTokens > 0 {
 			req.MaxTokens = config.Cfg.LLMMaxTokens
@@ -963,7 +869,6 @@ func (l *LLMClient) buildChatCompletionsRequest(bundle *PromptBundle, toolSpecs 
 }
 
 func (l *LLMClient) convertResponsesResponse(resp *responsesAPIResponse) *LLMResponse {
-	resp.normalize()
 	choice := LLMChoice{
 		Index: 0,
 		Message: LLMMessage{
@@ -974,22 +879,12 @@ func (l *LLMClient) convertResponsesResponse(resp *responsesAPIResponse) *LLMRes
 
 	var textParts []string
 	if strings.TrimSpace(resp.OutputText) != "" {
-		// 如果有聚合好的文本，则直接使用，避免和 message 分块重复
 		textParts = append(textParts, resp.OutputText)
-	}
-	if strings.TrimSpace(resp.OutputText) == "" {
-		if text := contentToText(resp.Content); text != "" {
-			textParts = append(textParts, text)
-		}
-		if text := messageText(resp.Message); text != "" {
-			textParts = append(textParts, text)
-		}
 	}
 
 	for _, item := range resp.Output {
 		switch item.Type {
 		case "message":
-			// 如果 OutputText 为空，才从零散的 message 块聚合文本
 			if strings.TrimSpace(resp.OutputText) == "" {
 				for _, content := range item.Content {
 					if strings.TrimSpace(content.Text) != "" {
@@ -1015,7 +910,7 @@ func (l *LLMClient) convertResponsesResponse(resp *responsesAPIResponse) *LLMRes
 			})
 		}
 	}
-	choice.Message.Content = strings.TrimSpace(strings.Join(textParts, "\n"))
+	choice.Message.Content = strings.Join(textParts, "")
 	return &LLMResponse{
 		Choices: []LLMChoice{choice},
 		Usage: LLMUsage{
@@ -1035,17 +930,10 @@ func (l *LLMClient) convertChatCompletionsResponse(resp *chatCompletionsResponse
 		},
 	}
 	for _, choice := range resp.Choices {
-		finishReason := choice.FinishReason
-		if finishReason == "" {
-			finishReason = LLMFinishReasonStop
-		}
 		msg := LLMMessage{
 			Role:             choice.Message.Role,
-			Content:          strings.TrimSpace(choice.Message.Content),
-			ReasoningContent: strings.TrimSpace(choice.Message.ReasoningContent),
-		}
-		if msg.Role == "" {
-			msg.Role = LLMRoleAssistant
+			Content:          choice.Message.Content,
+			ReasoningContent: choice.Message.ReasoningContent,
 		}
 		for _, tc := range choice.Message.ToolCalls {
 			msg.ToolCalls = append(msg.ToolCalls, LLMToolCall{
@@ -1057,22 +945,10 @@ func (l *LLMClient) convertChatCompletionsResponse(resp *chatCompletionsResponse
 				},
 			})
 		}
-		if len(msg.ToolCalls) > 0 {
-			finishReason = LLMFinishReasonToolCalls
-		}
 		out.Choices = append(out.Choices, LLMChoice{
 			Index:        choice.Index,
 			Message:      msg,
-			FinishReason: finishReason,
-		})
-	}
-	if len(out.Choices) == 0 {
-		out.Choices = append(out.Choices, LLMChoice{
-			Index: 0,
-			Message: LLMMessage{
-				Role: LLMRoleAssistant,
-			},
-			FinishReason: LLMFinishReasonStop,
+			FinishReason: choice.FinishReason,
 		})
 	}
 	return out
@@ -1279,6 +1155,8 @@ func (l *LLMClient) chatAnthropic(ctx context.Context, bundle *PromptBundle, too
 			"request_sha256":        blobSHA256(reqBytes),
 			"request_path":          requestPath,
 		})
+	} else {
+		l.debugLog(span, "llm.debug_serialize_error", map[string]interface{}{"error": err.Error()})
 	}
 	start := time.Now()
 
@@ -1309,11 +1187,11 @@ func (l *LLMClient) chatAnthropic(ctx context.Context, bundle *PromptBundle, too
 	}
 
 	// 转换响应: Anthropic → 内部统一格式
-	return l.convertAnthropicResponse(&resp), nil
+	return l.convertAnthropicResponse(&resp)
 }
 
 // convertAnthropicResponse 将 Anthropic 响应转换为内部统一格式
-func (l *LLMClient) convertAnthropicResponse(resp *anthropic.MessagesResponse) *LLMResponse {
+func (l *LLMClient) convertAnthropicResponse(resp *anthropic.MessagesResponse) (*LLMResponse, error) {
 	choice := LLMChoice{
 		Index: 0,
 		Message: LLMMessage{
@@ -1330,17 +1208,26 @@ func (l *LLMClient) convertAnthropicResponse(resp *anthropic.MessagesResponse) *
 				textParts = append(textParts, *block.Text)
 			}
 		case "tool_use":
-			if block.ID != "" {
-				argsBytes, _ := json.Marshal(block.Input)
-				choice.Message.ToolCalls = append(choice.Message.ToolCalls, LLMToolCall{
-					ID:   block.ID,
-					Type: LLMToolTypeFunction,
-					Function: LLMFunctionCall{
-						Name:      block.Name,
-						Arguments: string(argsBytes),
-					},
-				})
+			if strings.TrimSpace(block.ID) == "" || strings.TrimSpace(block.Name) == "" {
+				return nil, fmt.Errorf("Anthropic tool_use requires id and name")
 			}
+			if strings.TrimSpace(block.ID) != block.ID || strings.TrimSpace(block.Name) != block.Name {
+				return nil, fmt.Errorf("Anthropic tool_use identifiers must not be padded")
+			}
+			argsBytes, err := json.Marshal(block.Input)
+			if err != nil {
+				return nil, fmt.Errorf("failed to serialize Anthropic tool call %s arguments: %w", block.ID, err)
+			}
+			choice.Message.ToolCalls = append(choice.Message.ToolCalls, LLMToolCall{
+				ID:   block.ID,
+				Type: LLMToolTypeFunction,
+				Function: LLMFunctionCall{
+					Name:      block.Name,
+					Arguments: string(argsBytes),
+				},
+			})
+		default:
+			return nil, fmt.Errorf("Anthropic response has unsupported content type %q", block.Type)
 		}
 	}
 
@@ -1352,7 +1239,13 @@ func (l *LLMClient) convertAnthropicResponse(resp *anthropic.MessagesResponse) *
 	case "tool_use":
 		choice.FinishReason = LLMFinishReasonToolCalls
 	default:
-		choice.FinishReason = LLMFinishReasonStop
+		return nil, fmt.Errorf("Anthropic response has unsupported stop_reason %q", resp.StopReason)
+	}
+	if choice.FinishReason == LLMFinishReasonToolCalls && len(choice.Message.ToolCalls) == 0 {
+		return nil, fmt.Errorf("Anthropic stop_reason tool_use requires a tool call")
+	}
+	if choice.FinishReason == LLMFinishReasonStop && len(choice.Message.ToolCalls) != 0 {
+		return nil, fmt.Errorf("Anthropic stop_reason end_turn conflicts with tool calls")
 	}
 
 	return &LLMResponse{
@@ -1362,5 +1255,5 @@ func (l *LLMClient) convertAnthropicResponse(resp *anthropic.MessagesResponse) *
 			CompletionTokens: resp.Usage.OutputTokens,
 			TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
 		},
-	}
+	}, nil
 }

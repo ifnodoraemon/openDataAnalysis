@@ -26,7 +26,7 @@ func (r *DataSourceRepository) GetByID(ctx context.Context, id string) (*domain.
 	var sourceType, status string
 	var fileID sql.NullString
 	if err := row.Scan(&ds.ID, &ds.WorkspaceID, &ds.Name, &sourceType, &status, &fileID, &ds.CreatedBy, &ds.CreatedAt, &ds.UpdatedAt); err != nil {
-		return nil, err
+		return nil, normalizeLookupError(err)
 	}
 	ds.SourceType = domain.SourceType(sourceType)
 	ds.Status = domain.SourceStatus(status)
@@ -43,10 +43,7 @@ func (r *DataSourceRepository) GetByFileID(ctx context.Context, fileID string) (
 	var sourceType, status string
 	var fileIDVal sql.NullString
 	if err := row.Scan(&ds.ID, &ds.WorkspaceID, &ds.Name, &sourceType, &status, &fileIDVal, &ds.CreatedBy, &ds.CreatedAt, &ds.UpdatedAt); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, err
+		return nil, normalizeLookupError(err)
 	}
 	ds.SourceType = domain.SourceType(sourceType)
 	ds.Status = domain.SourceStatus(status)

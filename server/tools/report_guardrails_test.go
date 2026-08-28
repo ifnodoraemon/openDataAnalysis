@@ -26,9 +26,8 @@ func TestReportEditStateRefreshFromReportStateCollectsEditableCharts(t *testing.
 		},
 	}
 	editState := &ReportEditState{
-		Mode:                "regenerate_block",
-		TargetBlockID:       "analysis",
-		PreserveOtherBlocks: true,
+		ScopeKindValue: "partial_block",
+		TargetBlockID:  "analysis",
 	}
 
 	editState.RefreshFromReportState(state)
@@ -68,9 +67,8 @@ func TestReportEditStateChartScopeRestrictsToTargetChart(t *testing.T) {
 		},
 	}
 	editState := &ReportEditState{
-		Mode:                "revise_chart",
-		TargetChartID:       "chart_inline",
-		PreserveOtherBlocks: true,
+		ScopeKindValue: "partial_chart",
+		TargetChartID:  "chart_inline",
 	}
 
 	editState.RefreshFromReportState(state)
@@ -98,13 +96,12 @@ func TestReportEditStateSelectionScopePreservesOutsideText(t *testing.T) {
 		},
 	}
 	editState := &ReportEditState{
-		Mode:                "regenerate_selection",
-		TargetBlockID:       "analysis",
-		SelectionText:       "需要改写的句子",
-		SelectionStart:      3,
-		SelectionEnd:        10,
-		SelectionRangeSet:   true,
-		PreserveOtherBlocks: true,
+		ScopeKindValue:    "partial_selection",
+		TargetBlockID:     "analysis",
+		SelectionText:     "需要改写的句子",
+		SelectionStart:    3,
+		SelectionEnd:      10,
+		SelectionRangeSet: true,
 	}
 	editState.RefreshFromReportState(state)
 
@@ -128,13 +125,12 @@ func TestReportEditStateSelectionScopeUsesRenderedTextProjection(t *testing.T) {
 		},
 	}
 	editState := &ReportEditState{
-		Mode:                "regenerate_selection",
-		TargetBlockID:       "analysis",
-		SelectionText:       "收入",
-		SelectionStart:      8,
-		SelectionEnd:        10,
-		SelectionRangeSet:   true,
-		PreserveOtherBlocks: true,
+		ScopeKindValue:    "partial_selection",
+		TargetBlockID:     "analysis",
+		SelectionText:     "收入",
+		SelectionStart:    8,
+		SelectionEnd:      10,
+		SelectionRangeSet: true,
 	}
 	editState.RefreshFromReportState(state)
 
@@ -156,18 +152,17 @@ func TestReportEditStateSelectionScopePreservesBlockMetadata(t *testing.T) {
 				Kind:    "markdown",
 				Title:   "分析",
 				Content: "前文。需要改写的句子。后文。",
-				Sources: []EvidenceRef{{Kind: "sql", SQL: "select 1"}},
+				Sources: []EvidenceRef{{Kind: "result", ResultID: "res_1"}},
 			},
 		},
 	}
 	editState := &ReportEditState{
-		Mode:                "regenerate_selection",
-		TargetBlockID:       "analysis",
-		SelectionText:       "需要改写的句子",
-		SelectionStart:      3,
-		SelectionEnd:        10,
-		SelectionRangeSet:   true,
-		PreserveOtherBlocks: true,
+		ScopeKindValue:    "partial_selection",
+		TargetBlockID:     "analysis",
+		SelectionText:     "需要改写的句子",
+		SelectionStart:    3,
+		SelectionEnd:      10,
+		SelectionRangeSet: true,
 	}
 	editState.RefreshFromReportState(state)
 
@@ -176,7 +171,7 @@ func TestReportEditStateSelectionScopePreservesBlockMetadata(t *testing.T) {
 		Kind:    "markdown",
 		Title:   "分析",
 		Content: "前文。新的句子。后文。",
-		Sources: []EvidenceRef{{Kind: "sql", SQL: "select 1"}},
+		Sources: []EvidenceRef{{Kind: "result", ResultID: "res_1"}},
 	}) {
 		t.Fatal("expected content-only replacement to be allowed")
 	}
@@ -185,7 +180,7 @@ func TestReportEditStateSelectionScopePreservesBlockMetadata(t *testing.T) {
 		Kind:    "markdown",
 		Title:   "改名",
 		Content: "前文。新的句子。后文。",
-		Sources: []EvidenceRef{{Kind: "sql", SQL: "select 1"}},
+		Sources: []EvidenceRef{{Kind: "result", ResultID: "res_1"}},
 	}) {
 		t.Fatal("expected title mutation outside selected text to be blocked")
 	}
@@ -194,7 +189,7 @@ func TestReportEditStateSelectionScopePreservesBlockMetadata(t *testing.T) {
 		Kind:    "markdown",
 		Title:   "分析",
 		Content: "前文。新的句子。后文。",
-		Sources: []EvidenceRef{{Kind: "sql", SQL: "select 2"}},
+		Sources: []EvidenceRef{{Kind: "result", ResultID: "res_2"}},
 	}) {
 		t.Fatal("expected source mutation outside selected text to be blocked")
 	}
@@ -209,10 +204,9 @@ func TestReportEditStateSelectionScopeRejectsMissingRange(t *testing.T) {
 		},
 	}
 	editState := &ReportEditState{
-		Mode:                "regenerate_selection",
-		TargetBlockID:       "analysis",
-		SelectionText:       "收入",
-		PreserveOtherBlocks: true,
+		ScopeKindValue: "partial_selection",
+		TargetBlockID:  "analysis",
+		SelectionText:  "收入",
 	}
 	editState.RefreshFromReportState(state)
 
@@ -230,13 +224,12 @@ func TestReportEditStateSelectionScopeDecodesHTMLEntities(t *testing.T) {
 		},
 	}
 	editState := &ReportEditState{
-		Mode:                "regenerate_selection",
-		TargetBlockID:       "analysis",
-		SelectionText:       "A & B",
-		SelectionStart:      0,
-		SelectionEnd:        5,
-		SelectionRangeSet:   true,
-		PreserveOtherBlocks: true,
+		ScopeKindValue:    "partial_selection",
+		TargetBlockID:     "analysis",
+		SelectionText:     "A & B",
+		SelectionStart:    0,
+		SelectionEnd:      5,
+		SelectionRangeSet: true,
 	}
 	editState.RefreshFromReportState(state)
 
@@ -257,35 +250,17 @@ func TestReportEditStateSelectionScopeNormalizesDecodedWhitespace(t *testing.T) 
 		},
 	}
 	editState := &ReportEditState{
-		Mode:                "regenerate_selection",
-		TargetBlockID:       "analysis",
-		SelectionText:       "A B",
-		SelectionStart:      0,
-		SelectionEnd:        3,
-		SelectionRangeSet:   true,
-		PreserveOtherBlocks: true,
+		ScopeKindValue:    "partial_selection",
+		TargetBlockID:     "analysis",
+		SelectionText:     "A B",
+		SelectionStart:    0,
+		SelectionEnd:      3,
+		SelectionRangeSet: true,
 	}
 	editState.RefreshFromReportState(state)
 
 	if !editState.SelectionMutationAllowed("analysis", "<p>C&nbsp;D improved.</p>") {
 		t.Fatal("expected selection containing decoded non-breaking space to be allowed")
-	}
-}
-
-func TestNormalizeSectionTitleStripsCommonOrdinalPrefixes(t *testing.T) {
-	t.Parallel()
-
-	cases := map[string]string{
-		"二、各维度分布":      "各维度分布",
-		"2. 各维度分布":     "各维度分布",
-		"第3章 各维度分布":    "各维度分布",
-		"  第十部分 经营分析 ": "经营分析",
-	}
-
-	for input, want := range cases {
-		if got := normalizeSectionTitle(input); got != want {
-			t.Fatalf("normalizeSectionTitle(%q) = %q, want %q", input, got, want)
-		}
 	}
 }
 
@@ -296,9 +271,8 @@ func TestReportEditStateConcurrentRefreshAndSnapshot(t *testing.T) {
 		},
 	}
 	edit := &ReportEditState{
-		Mode:                "regenerate_block",
-		TargetBlockID:       "b1",
-		PreserveOtherBlocks: true,
+		ScopeKindValue: "partial_block",
+		TargetBlockID:  "b1",
 	}
 
 	var wg sync.WaitGroup
@@ -323,9 +297,8 @@ func TestReportEditStateConcurrentChartMutationReadAndRefresh(t *testing.T) {
 		},
 	}
 	edit := &ReportEditState{
-		Mode:                "regenerate_block",
-		TargetBlockID:       "b1",
-		PreserveOtherBlocks: true,
+		ScopeKindValue: "partial_block",
+		TargetBlockID:  "b1",
 	}
 
 	var wg sync.WaitGroup
@@ -345,8 +318,8 @@ func TestReportEditStateConcurrentChartMutationReadAndRefresh(t *testing.T) {
 
 func TestReportEditStateConcurrentResetAndSnapshot(t *testing.T) {
 	edit := &ReportEditState{
-		Mode:          "revise_block",
-		TargetBlockID: "b1",
+		ScopeKindValue: "partial_block",
+		TargetBlockID:  "b1",
 	}
 
 	var wg sync.WaitGroup
@@ -366,10 +339,9 @@ func TestReportEditStateConcurrentResetAndSnapshot(t *testing.T) {
 
 func TestReportEditStateConcurrentScopeKindAndReset(t *testing.T) {
 	edit := &ReportEditState{
-		Mode:                "regenerate_block",
-		TargetBlockID:       "b1",
-		TargetChartID:       "c1",
-		PreserveOtherBlocks: true,
+		ScopeKindValue: "partial_block",
+		TargetBlockID:  "b1",
+		TargetChartID:  "c1",
 	}
 
 	var wg sync.WaitGroup
@@ -389,9 +361,8 @@ func TestReportEditStateConcurrentScopeKindAndReset(t *testing.T) {
 
 func TestReportEditStateConcurrentBlockMutationAndReset(t *testing.T) {
 	edit := &ReportEditState{
-		Mode:                "regenerate_block",
-		TargetBlockID:       "b1",
-		PreserveOtherBlocks: true,
+		ScopeKindValue: "partial_block",
+		TargetBlockID:  "b1",
 	}
 
 	var wg sync.WaitGroup
@@ -409,22 +380,21 @@ func TestReportEditStateConcurrentBlockMutationAndReset(t *testing.T) {
 	wg.Wait()
 }
 
-func TestBlockNeedsEvidenceForGenericNumericClaims(t *testing.T) {
+func TestFinalizeDoesNotInferEvidenceNeedsFromProse(t *testing.T) {
 	t.Parallel()
 
-	if !blockNeedsEvidence(ReportBlock{ID: "analysis", Kind: "markdown", Content: "设备温度升高 3.5 摄氏度。"}) {
-		t.Fatal("expected generic numeric claim to require evidence without domain keywords")
-	}
-	if !blockNeedsEvidence(ReportBlock{ID: "analysis", Kind: "markdown", Content: "模型响应延迟下降 18%。"}) {
-		t.Fatal("expected percentage claim to require evidence without business keywords")
+	state := &ReportState{Blocks: []ReportBlock{{ID: "analysis", Kind: "markdown", Content: "设备温度升高 3.5 摄氏度，模型响应延迟下降 18%。"}}}
+	if issues := reportFinalizeIssues(state); len(issues) != 0 {
+		t.Fatalf("finalize must validate structure rather than interpret prose, got %v", issues)
 	}
 }
 
-func TestBlockNeedsEvidenceIgnoresStructuralSectionOrdinals(t *testing.T) {
+func TestFinalizeRejectsUnverifiableEvidenceReference(t *testing.T) {
 	t.Parallel()
 
-	block := ReportBlock{ID: "overview", Kind: "markdown", Title: "第1章 数据概览", Content: "## 2. 字段说明\n\n正文"}
-	if blockNeedsEvidence(block) {
-		t.Fatal("expected structural section ordinals without numeric claims to skip evidence requirement")
+	state := &ReportState{Blocks: []ReportBlock{{ID: "analysis", Kind: "markdown", Content: "结论", Sources: []EvidenceRef{{Kind: "result"}}}}}
+	issues := reportFinalizeIssues(state)
+	if len(issues) != 1 || issues[0] != "invalid_evidence_ref:block:analysis:0" {
+		t.Fatalf("expected an unresolved ledger reference, got %v", issues)
 	}
 }

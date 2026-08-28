@@ -105,6 +105,14 @@ const REPORT_REMOVE_TAGS = new Set([
 
 const DANGEROUS_ATTRS = new Set(["id", "content"]);
 
+const SCRIPT_ID_ALLOWLIST = new Set([
+  "oda-echarts-loader",
+  "oda-chart-runtime",
+  "oda-math-loader",
+  "oda-math-auto-render",
+  "oda-math-runtime",
+]);
+
 function sanitizeClassList(value) {
   return String(value || "")
     .split(/\s+/)
@@ -116,14 +124,35 @@ function sanitizeClassList(value) {
 function sanitizeURL(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
-  if (raw.startsWith("#") || (raw.startsWith("/") && !raw.startsWith("//")))
-    return raw;
+  if (raw.startsWith("//")) return "";
+  if (raw.startsWith("#") || raw.startsWith("/")) return raw;
   try {
     const parsed = new URL(raw, window.location.origin);
     return SAFE_URL_PROTOCOLS.has(parsed.protocol) ? raw : "";
   } catch {
     return "";
   }
+}
+
+function isSameOriginURL(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return false;
+  if (raw.startsWith("/") && !raw.startsWith("//")) return true;
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    return (
+      parsed.origin === window.location.origin &&
+      SAFE_URL_PROTOCOLS.has(parsed.protocol)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeStyleText(text) {
+  return String(text || "")
+    .replace(/@import[^;]*(?:;|$)/gi, "")
+    .replace(/url\s*\([^)]*\)/gi, "");
 }
 
 function sanitizeStyleValue(value) {
@@ -152,8 +181,23 @@ function cleanAttributes(
       node.removeAttribute(attr.name);
       continue;
     }
+    if (DANGEROUS_ATTRS.has(name)) {
+      const allowed =
+        name === "id" &&
+        (allowReportAttrs ||
+          (node.tagName === "SCRIPT" && SCRIPT_ID_ALLOWLIST.has(value)));
+      if (!allowed) {
+        node.removeAttribute(attr.name);
+      }
+      continue;
+    }
     if (name === "href" || name === "src") {
-      const safe = sanitizeURL(value);
+      const safe =
+        node.tagName === "LINK" && name === "href"
+          ? isSameOriginURL(value)
+            ? value
+            : ""
+          : sanitizeURL(value);
       if (!safe) {
         node.removeAttribute(attr.name);
       } else {
@@ -163,16 +207,6 @@ function cleanAttributes(
         node.setAttribute("rel", "noopener noreferrer");
         node.setAttribute("target", "_blank");
       }
-      continue;
-    }
-    if (
-      node.tagName === "SCRIPT" &&
-      name === "id" &&
-      ["oda-echarts-loader", "oda-chart-runtime", "oda-math-loader", "oda-math-auto-render", "oda-math-runtime"].includes(value)
-    ) {
-      continue;
-    }
-    if (name === "id" && allowReportAttrs) {
       continue;
     }
     if (name === "style") {
@@ -292,9 +326,7 @@ function isEChartsLoaderScript(node) {
     ) {
       return true;
     }
-    return (
-      CDN_HOSTS.has(url.hostname) && path.endsWith("echarts.min.js")
-    );
+    return CDN_HOSTS.has(url.hostname) && path.endsWith("echarts.min.js");
   } catch {
     return false;
   }
@@ -307,10 +339,18 @@ function isMathScript(node) {
   try {
     const url = new URL(src, window.location.origin);
     const path = url.pathname.toLowerCase();
-    if (url.origin === window.location.origin && path === "/oda-math-runtime.js") {
+    if (
+      url.origin === window.location.origin &&
+      path === "/oda-math-runtime.js"
+    ) {
       return true;
     }
-    return CDN_HOSTS.has(url.hostname) && (path.includes("katex") || path.includes("mathjax") || path.includes("auto-render"));
+    return (
+      CDN_HOSTS.has(url.hostname) &&
+      (path.includes("katex") ||
+        path.includes("mathjax") ||
+        path.includes("auto-render"))
+    );
   } catch {
     return false;
   }
@@ -349,6 +389,10 @@ export function sanitizeReportHTML(html) {
     if (!isLoader && !isRuntime && !isMath) {
       node.remove();
     }
+  });
+
+  doc.querySelectorAll("style").forEach((node) => {
+    node.textContent = sanitizeStyleText(node.textContent);
   });
 
   const bodyClass = sanitizeClassList(doc.body.getAttribute("class"));

@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -49,7 +51,7 @@ func TestMCPSyncedToolExecuteUsesParentContext(t *testing.T) {
 	}
 }
 
-func TestMCPSyncedToolExecuteFallsBackToBackground(t *testing.T) {
+func TestMCPSyncedToolExecuteRejectsMissingExecutionContext(t *testing.T) {
 	t.Parallel()
 
 	client := NewClient()
@@ -63,24 +65,40 @@ func TestMCPSyncedToolExecuteFallsBackToBackground(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error (no server registered)")
 	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Logf("got error: %v", err)
+	if !strings.Contains(err.Error(), "execution context is not initialized") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestClientRegisterAndRemoveServer(t *testing.T) {
+func TestClientRejectsDuplicateServerRegistration(t *testing.T) {
 	t.Parallel()
 
 	client := NewClient()
-	client.RegisterServer("test", "http://localhost:8088", "token123")
-
-	if len(client.configs) != 1 {
-		t.Fatalf("expected 1 server, got %d", len(client.configs))
+	if err := client.RegisterServer("test", "http://localhost:8088", "token123"); err != nil {
+		t.Fatalf("register server: %v", err)
 	}
+	if err := client.RegisterServer("test", "http://localhost:8089", "token456"); err == nil {
+		t.Fatal("expected duplicate server name to be rejected")
+	}
+}
 
-	client.RemoveServer("test")
-	if len(client.configs) != 0 {
-		t.Fatalf("expected 0 servers after remove, got %d", len(client.configs))
+func TestClientRejectsInexactServerConfiguration(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient()
+	for _, testCase := range []struct {
+		name     string
+		endpoint string
+	}{
+		{name: "", endpoint: "http://localhost:8088"},
+		{name: " padded ", endpoint: "http://localhost:8088"},
+		{name: "server", endpoint: "localhost:8088"},
+		{name: "server", endpoint: "http://localhost:8088/"},
+		{name: "server", endpoint: "http://localhost:8088?mode=guess"},
+	} {
+		if err := client.RegisterServer(testCase.name, testCase.endpoint, ""); err == nil {
+			t.Fatalf("expected configuration to be rejected: %#v", testCase)
+		}
 	}
 }
 
@@ -120,64 +138,113 @@ func TestClientConcurrency(t *testing.T) {
 	wg.Wait()
 }
 
-type testTool struct{ name string }
-
-func (t *testTool) Name() string        { return t.name }
-func (t *testTool) Description() string { return "test" }
-func (t *testTool) Parameters() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{}}`)
-}
-func (t *testTool) Execute(args json.RawMessage) (string, error) {
-	return "ok", nil
-}
-
-func TestRegistrySyncRemoveOrphaned(t *testing.T) {
+func TestNewRegistrySyncRejectsMissingDependencies(t *testing.T) {
 	t.Parallel()
 
-	client := NewClient()
-	sync := &RegistrySync{
-		Client: client,
-		Target: tools.NewRegistry(),
-		synced: make(map[string]struct{}),
-	}
-
-	sync.Target.Register(&testTool{name: "keep_me"})
-	sync.synced["keep_me"] = struct{}{}
-	sync.synced["orphan"] = struct{}{}
-
-	removed := sync.RemoveOrphaned(context.Background())
-	if removed != 1 {
-		t.Fatalf("expected 1 orphan removed, got %d", removed)
-	}
-	if _, ok := sync.synced["orphan"]; ok {
-		t.Fatal("orphan should be removed from synced map")
-	}
-	if _, ok := sync.synced["keep_me"]; !ok {
-		t.Fatal("keep_me should still be in synced map")
-	}
-}
-
-func TestRegistrySyncCachedToolsForWithMutex(t *testing.T) {
-	t.Parallel()
-
-	client := NewClient()
-	client.RegisterServer("test", "http://127.0.0.1:0", "")
-	rsync := NewRegistrySync(client, nil)
-
-	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_ = rsync.cachedToolsFor("nonexistent")
-		}()
-	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		client.RegisterServer("concurrent", "http://127.0.0.1:0", "")
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected missing target registry to panic")
+		}
 	}()
-	wg.Wait()
+	NewRegistrySync(NewClient(), nil)
+}
+
+func TestRegistrySyncPreservesExactServerOrigin(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tools":[{"name":"remote_observe","description":"Return remote facts.","parameters":{"type":"object","properties":{}}}]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient()
+	if err := client.RegisterServer("facts_server", server.URL, ""); err != nil {
+		t.Fatalf("register server: %v", err)
+	}
+	target := tools.NewRegistry()
+	syncer := NewRegistrySync(client, target)
+	count, err := syncer.Sync(context.Background())
+	if err != nil || count != 1 {
+		t.Fatalf("sync count=%d error=%v", count, err)
+	}
+	registered, err := target.Get("remote_observe")
+	if err != nil {
+		t.Fatalf("get synced tool: %v", err)
+	}
+	if registered.(*MCPSyncedTool).ServerName != "facts_server" {
+		t.Fatalf("unexpected server origin: %#v", registered)
+	}
+	count, err = syncer.Sync(context.Background())
+	if err != nil || count != 0 {
+		t.Fatalf("idempotent sync count=%d error=%v", count, err)
+	}
+}
+
+func TestRegistrySyncRejectsChangedRemoteContract(t *testing.T) {
+	t.Parallel()
+
+	description := "Return remote facts."
+	var responseMu sync.RWMutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		responseMu.RLock()
+		currentDescription := description
+		responseMu.RUnlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"tools": []map[string]interface{}{{
+				"name":        "remote_observe",
+				"description": currentDescription,
+				"parameters":  map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient()
+	if err := client.RegisterServer("facts_server", server.URL, ""); err != nil {
+		t.Fatalf("register server: %v", err)
+	}
+	syncer := NewRegistrySync(client, tools.NewRegistry())
+	if count, err := syncer.Sync(context.Background()); err != nil || count != 1 {
+		t.Fatalf("initial sync count=%d error=%v", count, err)
+	}
+	responseMu.Lock()
+	description = "Return changed remote facts."
+	responseMu.Unlock()
+	if _, err := syncer.Sync(context.Background()); err == nil || !strings.Contains(err.Error(), "changed after registration") {
+		t.Fatalf("expected changed contract error, got %v", err)
+	}
+}
+
+func TestRegistrySyncRejectsDuplicateNamesWithoutMutation(t *testing.T) {
+	t.Parallel()
+
+	newServer := func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tools":[{"name":"duplicate_tool","description":"Return facts.","parameters":{"type":"object","properties":{}}}]}`))
+		}))
+	}
+	first := newServer()
+	defer first.Close()
+	second := newServer()
+	defer second.Close()
+
+	client := NewClient()
+	if err := client.RegisterServer("first", first.URL, ""); err != nil {
+		t.Fatalf("register first server: %v", err)
+	}
+	if err := client.RegisterServer("second", second.URL, ""); err != nil {
+		t.Fatalf("register second server: %v", err)
+	}
+	target := tools.NewRegistry()
+	if _, err := NewRegistrySync(client, target).Sync(context.Background()); err == nil {
+		t.Fatal("expected duplicate remote tool names to be rejected")
+	}
+	if len(target.ListTools()) != 0 {
+		t.Fatalf("expected atomic sync failure, got %#v", target.ListTools())
+	}
 }
 
 func TestClientDiscoverToolsEmpty(t *testing.T) {
@@ -193,5 +260,26 @@ func TestClientDiscoverToolsEmpty(t *testing.T) {
 	}
 	if len(tools) != 0 {
 		t.Fatalf("expected 0 tools from empty registry, got %d", len(tools))
+	}
+}
+
+func TestClientExecuteToolRejectsInexactArgumentsBeforeTransport(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient()
+	for _, testCase := range []struct {
+		serverName string
+		toolName   string
+		args       json.RawMessage
+	}{
+		{serverName: " server", toolName: "tool", args: json.RawMessage(`{}`)},
+		{serverName: "server", toolName: "tool ", args: json.RawMessage(`{}`)},
+		{serverName: "server", toolName: "tool", args: json.RawMessage(`[]`)},
+		{serverName: "server", toolName: "tool", args: json.RawMessage(`null`)},
+		{serverName: "server", toolName: "tool", args: json.RawMessage(`{"key":1,"key":2}`)},
+	} {
+		if _, err := client.ExecuteTool(context.Background(), testCase.serverName, testCase.toolName, testCase.args); err == nil {
+			t.Fatalf("expected request to be rejected: %#v", testCase)
+		}
 	}
 }

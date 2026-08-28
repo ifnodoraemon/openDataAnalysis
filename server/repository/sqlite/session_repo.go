@@ -23,7 +23,7 @@ func (r *SessionRepository) GetByID(ctx context.Context, sessionID string) (*dom
 	var status string
 	var lastRun sql.NullString
 	if err := row.Scan(&session.ID, &session.WorkspaceID, &session.UserID, &session.Title, &status, &lastRun, &session.CreatedAt, &session.UpdatedAt, &session.LastSeenAt); err != nil {
-		return nil, err
+		return nil, normalizeLookupError(err)
 	}
 	session.Status = domain.SessionStatus(status)
 	if lastRun.Valid {

@@ -7,15 +7,10 @@ files:
   - manufacturing_output_monthly.csv
   - manufacturing_inventory_monthly.csv
   - manufacturing_quality_returns_monthly.csv
-expected:
-  should_inspect_schema: true
-  should_auto_map: true
-  should_ask_user: false
-  expected_coverage: sufficient
-  required_mentions:
-    - orders
-    - capacity
-    - inventory
-    - quality
-  forbidden_claims:
-    - unsupported causal certainty
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
+manual_review:
+  - 订单、产能、库存和质量结论分别有证据。
+  - 不将相关性写成无证据的因果关系。

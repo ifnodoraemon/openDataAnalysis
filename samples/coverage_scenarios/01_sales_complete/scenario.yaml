@@ -4,16 +4,10 @@ task_length: medium
 prompt: 请对这份销售数据做全面分析，覆盖趋势、区域、渠道、产品结构和利润表现，并生成图表。
 files:
   - sales_detail_complete.csv
-expected:
-  should_inspect_schema: true
-  should_auto_map: true
-  should_ask_user: false
-  should_finalize_report: true
-  expected_coverage: sufficient
-  required_mentions:
-    - trend
-    - region
-    - channel
-    - product
-  forbidden_claims:
-    - missing critical fields
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
+manual_review:
+  - 趋势、地区、渠道和产品结论均有数据证据。
+  - 不虚构缺失的关键字段。

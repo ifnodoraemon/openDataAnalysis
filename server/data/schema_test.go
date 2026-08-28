@@ -1,6 +1,7 @@
 package data
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"path/filepath"
@@ -16,11 +17,12 @@ func TestNormalizeReadOnlyQuery(t *testing.T) {
 		query   string
 		wantErr bool
 	}{
-		{name: "select", query: "SELECT * FROM sales;", wantErr: false},
+		{name: "select", query: "SELECT * FROM sales", wantErr: false},
+		{name: "trailing semicolon is not rewritten", query: "SELECT * FROM sales;", wantErr: true},
 		{name: "with", query: "WITH cte AS (SELECT 1 AS n) SELECT * FROM cte", wantErr: false},
 		{name: "update", query: "UPDATE sales SET amount = 1", wantErr: true},
 		{name: "multi statement", query: "SELECT 1; SELECT 2", wantErr: true},
-		{name: "cte delete", query: "WITH gone AS (DELETE FROM sales RETURNING *) SELECT * FROM gone", wantErr: true},
+		{name: "with body is delegated to sqlite query-only enforcement", query: "WITH gone AS (DELETE FROM sales RETURNING *) SELECT * FROM gone", wantErr: false},
 	}
 
 	for _, tc := range cases {
@@ -51,7 +53,7 @@ func TestExecuteQueryRejectsOverRowLimit(t *testing.T) {
 		}
 	}
 
-	_, err := ExecuteQuery(db, `SELECT id, name FROM sales ORDER BY id`)
+	_, err := ExecuteQueryDetailedContext(context.Background(), db, `SELECT id, name FROM sales ORDER BY id`, queryTimeout)
 	if err == nil {
 		t.Fatal("expected row limit error")
 	}
@@ -70,12 +72,12 @@ func TestExecuteQueryReturnsRowsWithinLimit(t *testing.T) {
 		}
 	}
 
-	rows, err := ExecuteQuery(db, `SELECT id, name FROM sales ORDER BY id LIMIT 3`)
+	result, err := ExecuteQueryDetailedContext(context.Background(), db, `SELECT id, name FROM sales ORDER BY id LIMIT 3`, queryTimeout)
 	if err != nil {
 		t.Fatalf("ExecuteQuery returned error: %v", err)
 	}
-	if len(rows) != 3 {
-		t.Fatalf("expected 3 rows, got %d", len(rows))
+	if len(result.Rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(result.Rows))
 	}
 }
 
@@ -91,7 +93,7 @@ func TestExecuteQueryRestoresWritableConnection(t *testing.T) {
 		t.Fatalf("insert initial row: %v", err)
 	}
 
-	if _, err := ExecuteQuery(db, `SELECT id, name FROM sales ORDER BY id LIMIT 1`); err != nil {
+	if _, err := ExecuteQueryDetailedContext(context.Background(), db, `SELECT id, name FROM sales ORDER BY id LIMIT 1`, queryTimeout); err != nil {
 		t.Fatalf("ExecuteQuery returned error: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO sales (name) VALUES ('row-2')`); err != nil {
@@ -129,7 +131,7 @@ func TestIngesterInitDBConfiguresSQLite(t *testing.T) {
 	}
 }
 
-func TestExtractSchemaDetectsTimeCoverage(t *testing.T) {
+func TestExtractSchemaReturnsStructuralFactsWithoutSemanticInference(t *testing.T) {
 	t.Parallel()
 
 	db := openTestSQLiteDB(t)
@@ -158,128 +160,22 @@ func TestExtractSchemaDetectsTimeCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExtractSchema returned error: %v", err)
 	}
-	if len(schema.TimeColumns) != 1 {
-		t.Fatalf("expected 1 time column, got %#v", schema.TimeColumns)
-	}
-	timeInfo := schema.TimeColumns[0]
-	if timeInfo.Name != "dt" || timeInfo.Grain != "day" {
-		t.Fatalf("unexpected time info: %#v", timeInfo)
-	}
-	if timeInfo.CoverageStart != "2025-01-05" || timeInfo.CoverageEnd != "2025-02-23" {
-		t.Fatalf("unexpected coverage: %#v", timeInfo)
-	}
-	if timeInfo.DistinctPeriodCount != 12 {
-		t.Fatalf("expected 12 distinct periods, got %#v", timeInfo)
-	}
-	if len(timeInfo.RollupGrains) == 0 || timeInfo.RollupGrains[0] != "month" {
-		t.Fatalf("expected day grain to roll up to month, got %#v", timeInfo.RollupGrains)
-	}
-
 	found := false
 	for _, column := range schema.Columns {
 		if column.Name != "dt" {
 			continue
 		}
 		found = true
-		if column.Type != "TIME" {
-			t.Fatalf("expected dt column type TIME, got %#v", column.Type)
+		if column.DeclaredType != "TEXT" {
+			t.Fatalf("expected declared SQLite type to remain TEXT, got %#v", column.DeclaredType)
 		}
-		if column.TimeProfile == nil || column.TimeProfile.CoverageEnd != "2025-02-23" {
-			t.Fatalf("expected dt column time profile, got %#v", column.TimeProfile)
+		if len(column.SampleValues) == 0 || column.UniqueCount != 12 {
+			t.Fatalf("expected observed values and counts, got %#v", column)
 		}
 	}
 	if !found {
 		t.Fatalf("dt column not found in schema columns: %#v", schema.Columns)
 	}
-}
-
-func TestExtractSchemaDetectsNegativeNumericStats(t *testing.T) {
-	t.Parallel()
-
-	db := openTestSQLiteDB(t)
-	if _, err := db.Exec(`CREATE TABLE margins (delta TEXT)`); err != nil {
-		t.Fatalf("create table: %v", err)
-	}
-	if _, err := db.Exec(`INSERT INTO margins (delta) VALUES ('-5'), ('-2'), ('')`); err != nil {
-		t.Fatalf("insert rows: %v", err)
-	}
-
-	schema, err := ExtractSchema(db, "margins")
-	if err != nil {
-		t.Fatalf("ExtractSchema returned error: %v", err)
-	}
-	for _, column := range schema.Columns {
-		if column.Name != "delta" {
-			continue
-		}
-		if column.Type != "NUMERIC" {
-			t.Fatalf("expected negative-only text column to be numeric, got %#v", column)
-		}
-		if column.Min == nil || column.Max == nil || *column.Min != -5 || *column.Max != -2 {
-			t.Fatalf("unexpected numeric stats: min=%v max=%v", column.Min, column.Max)
-		}
-		return
-	}
-	t.Fatalf("delta column not found in schema columns: %#v", schema.Columns)
-}
-
-func TestExtractSchemaRejectsMixedNumericTextBeyondProbePrefix(t *testing.T) {
-	t.Parallel()
-
-	db := openTestSQLiteDB(t)
-	if _, err := db.Exec(`CREATE TABLE metrics (value TEXT)`); err != nil {
-		t.Fatalf("create table: %v", err)
-	}
-	for i := 0; i < schemaDistinctProbeRows+5; i++ {
-		if _, err := db.Exec(`INSERT INTO metrics (value) VALUES (?)`, fmt.Sprintf("%d", i)); err != nil {
-			t.Fatalf("insert numeric row %d: %v", i, err)
-		}
-	}
-	if _, err := db.Exec(`INSERT INTO metrics (value) VALUES ('N/A')`); err != nil {
-		t.Fatalf("insert text row: %v", err)
-	}
-
-	schema, err := ExtractSchema(db, "metrics")
-	if err != nil {
-		t.Fatalf("ExtractSchema returned error: %v", err)
-	}
-	for _, column := range schema.Columns {
-		if column.Name != "value" {
-			continue
-		}
-		if column.Type == "NUMERIC" {
-			t.Fatalf("expected mixed text column to remain non-numeric, got %#v", column)
-		}
-		return
-	}
-	t.Fatalf("value column not found in schema columns: %#v", schema.Columns)
-}
-
-func TestExtractSchemaRejectsNonFiniteNumericText(t *testing.T) {
-	t.Parallel()
-
-	db := openTestSQLiteDB(t)
-	if _, err := db.Exec(`CREATE TABLE metrics (value TEXT)`); err != nil {
-		t.Fatalf("create table: %v", err)
-	}
-	if _, err := db.Exec(`INSERT INTO metrics (value) VALUES ('1'), ('NaN')`); err != nil {
-		t.Fatalf("insert rows: %v", err)
-	}
-
-	schema, err := ExtractSchema(db, "metrics")
-	if err != nil {
-		t.Fatalf("ExtractSchema returned error: %v", err)
-	}
-	for _, column := range schema.Columns {
-		if column.Name != "value" {
-			continue
-		}
-		if column.Type == "NUMERIC" {
-			t.Fatalf("expected non-finite text column to remain non-numeric, got %#v", column)
-		}
-		return
-	}
-	t.Fatalf("value column not found in schema columns: %#v", schema.Columns)
 }
 
 func openTestSQLiteDB(t *testing.T) *sql.DB {

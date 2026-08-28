@@ -25,12 +25,12 @@
 
 <script setup>
 import { computed, ref } from "vue";
-import { useWebSocket } from "../../composables/useWebSocket.js";
+import { useAgentTransport } from "../../composables/useAgentTransport.js";
 import { useAgentStore } from "../../stores/agent.js";
 import RunTreeNode from "./RunTreeNode.vue";
 
 const store = useAgentStore();
-const { openRun } = useWebSocket();
+const { openRun } = useAgentTransport();
 const runs = computed(() => store.runs || []);
 const selectedRunId = computed(() => store.selectedRunId || "");
 const activeRunId = computed(() => store.activeRunId || "");
@@ -45,8 +45,8 @@ async function handleSelect(runId) {
 <style scoped>
 .run-tree {
   margin: 12px 12px 0;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
   overflow: hidden;
 }
@@ -58,7 +58,7 @@ async function handleSelect(runId) {
   align-items: center;
   cursor: pointer;
   background: var(--bg-card);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .header-title {
@@ -67,7 +67,7 @@ async function handleSelect(runId) {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: var(--text-primary);
+  color: var(--text-main);
 }
 
 .tree-icon {
@@ -77,7 +77,7 @@ async function handleSelect(runId) {
 .toggle-btn {
   background: transparent;
   border: none;
-  color: var(--text-secondary);
+  color: var(--text-sub);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -98,6 +98,6 @@ async function handleSelect(runId) {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  background: var(--bg-primary);
+  background: var(--bg-app);
 }
 </style>

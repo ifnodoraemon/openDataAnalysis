@@ -6,12 +6,10 @@ files:
   - factory_cost_cny.csv
   - factory_revenue_10k_cny.csv
   - factory_output_units.csv
-expected:
-  should_inspect_schema: true
-  should_auto_map: true
-  should_ask_user: false
-  expected_coverage: sufficient
-  required_mentions:
-    - normalized revenue_10k_cny before comparing with cost_cny
-  forbidden_claims:
-    - compared 10k cny revenue directly with cny cost without conversion
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
+manual_review:
+  - 单位换算由显式字段信息支持且在比较前完成。
+  - 不直接比较万元收入与元成本。

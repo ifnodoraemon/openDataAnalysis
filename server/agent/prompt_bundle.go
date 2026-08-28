@@ -1,24 +1,41 @@
 package agent
 
-// PromptLayer 定义了 Prompt 的层级语义
-type PromptLayer string
-
-const (
-	LayerPolicy         PromptLayer = "policy"
-	LayerTask           PromptLayer = "task"
-	LayerRuntimeContext PromptLayer = "runtime_context"
-	LayerHistory        PromptLayer = "history"
+import (
+	"fmt"
+	"strings"
 )
 
 // ConversationItem 表示历史通讯的单轮记录
 type ConversationItem struct {
-	Role             string // "user", "assistant", "system" (for tool)
-	Content          string
-	ReasoningContent string
-	ToolCalls              []LLMToolCall
-	ToolCallID             string
-	ToolCallName           string
+	Role                     string // user, assistant, or tool
+	Content                  string
+	ReasoningContent         string
+	ToolCalls                []LLMToolCall
+	ToolCallID               string
+	ToolCallName             string
 	ToolCallThoughtSignature string
+}
+
+func validatePromptBundle(bundle *PromptBundle) error {
+	if bundle == nil {
+		return fmt.Errorf("prompt bundle is required")
+	}
+	for index, block := range bundle.RuntimeContext {
+		if block.Name == "" || block.Name != strings.TrimSpace(block.Name) {
+			return fmt.Errorf("runtime context block %d name must be a non-empty exact value", index)
+		}
+		if block.Role != LLMRoleUser {
+			return fmt.Errorf("runtime context block %d must use the user transport role", index)
+		}
+	}
+	for index, item := range bundle.History {
+		switch item.Role {
+		case LLMRoleUser, LLMRoleAssistant, LLMRoleTool:
+		default:
+			return fmt.Errorf("history item %d has unsupported role %q", index, item.Role)
+		}
+	}
+	return nil
 }
 
 // RuntimeContextBlock 表示在会话过程中因为摘要、事实等被动态注入的上下文

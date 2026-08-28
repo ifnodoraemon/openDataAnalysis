@@ -29,7 +29,7 @@ func (r *SourceConfigRepository) GetBySourceID(ctx context.Context, sourceID str
 	var lastTestedAt sql.NullTime
 	var lastTestStatus, lastErrMsg sql.NullString
 	if err := row.Scan(&cfg.SourceID, &connectorType, &cfg.ConfigJSON, &cfg.CredentialCiphertext, &lastTestedAt, &lastTestStatus, &lastErrMsg, &cfg.CreatedAt, &cfg.UpdatedAt); err != nil {
-		return nil, err
+		return nil, normalizeLookupError(err)
 	}
 	cfg.ConnectorType = domain.SourceType(connectorType)
 	if lastTestedAt.Valid {

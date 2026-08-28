@@ -5,10 +5,8 @@ import "time"
 type ProfileStatus string
 
 const (
-	ProfileStatusDraft     ProfileStatus = "draft"
 	ProfileStatusProfiled  ProfileStatus = "profiled"
 	ProfileStatusConfirmed ProfileStatus = "confirmed"
-	ProfileStatusRejected  ProfileStatus = "rejected"
 )
 
 type SemanticProfile struct {

@@ -8,12 +8,10 @@ import (
 func TestWorkingMemory(t *testing.T) {
 	mem := NewWorkingMemory()
 
-	// Test SaveFact
-	mem.SaveFact("key1", "fact1")
-	mem.SaveFact("key2", "fact2")
+	mem.SaveEntry("key1", MemoryEntry{Statement: "fact1", Status: "inferred", CreatedBy: "test"})
+	mem.SaveEntry("key2", MemoryEntry{Statement: "fact2", Status: "observed", SourceResultIDs: []string{"res_test"}, CreatedBy: "test"})
 
-	// Test RemoveFact
-	mem.RemoveFact("key1")
+	mem.RemoveEntry("key1")
 	if _, exists := mem.Snapshot()["key1"]; exists {
 		t.Errorf("expected snapshot to not contain key1")
 	}
@@ -33,8 +31,8 @@ func TestSubgoalManager(t *testing.T) {
 	}
 
 	// Test AddGoal
-	id1, _ := sm.AddGoal("goal 1", "")
-	id2, _ := sm.AddGoal("goal 2", id1)
+	id1, _ := sm.AddGoalWithBlocking("goal 1", "", false)
+	id2, _ := sm.AddGoalWithBlocking("goal 2", id1, false)
 
 	canFinalize, blockers = sm.CanFinalize()
 	if !canFinalize || len(blockers) != 0 {
@@ -42,7 +40,7 @@ func TestSubgoalManager(t *testing.T) {
 	}
 
 	blockingRootID, _ := sm.AddGoalWithBlocking("blocking goal", "", true)
-	_, _ = sm.AddGoal("blocking child", blockingRootID)
+	_, _ = sm.AddGoalWithBlocking("blocking child", blockingRootID, false)
 
 	canFinalize, blockers = sm.CanFinalize()
 	if canFinalize || len(blockers) != 1 {
@@ -83,7 +81,7 @@ func TestSubgoalManager(t *testing.T) {
 func TestSubgoalManagerAllowsFinalizeWhenClosedRootHasStaleChildren(t *testing.T) {
 	sm := NewSubgoalManager()
 	rootID, _ := sm.AddGoalWithBlocking("root goal", "", true)
-	childID, _ := sm.AddGoal("stale child", rootID)
+	childID, _ := sm.AddGoalWithBlocking("stale child", rootID, false)
 
 	if err := sm.UpdateGoalStatus(rootID, StatusComplete, "done"); err != nil {
 		t.Fatalf("update root status: %v", err)
@@ -113,9 +111,9 @@ func TestSubgoalManagerAllowsFinalizeWhenClosedRootHasStaleChildren(t *testing.T
 
 func TestSaveMemoryTool(t *testing.T) {
 	mem := NewWorkingMemory()
-	tool := &SaveMemoryTool{Memory: mem}
+	tool := &SaveMemoryTool{Memory: mem, EmitFunc: func(RuntimeEvent) {}}
 
-	args := []byte(`{"key": "test_key", "fact": "test_fact"}`)
+	args := []byte(`{"key":"test_key","statement":"test_fact","status":"inferred"}`)
 	res, err := tool.Execute(args)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -124,11 +122,11 @@ func TestSaveMemoryTool(t *testing.T) {
 	if err := json.Unmarshal([]byte(res), &payload); err != nil {
 		t.Fatalf("expected save memory json payload: %v", err)
 	}
-	if payload["tool"] != "memory_save_fact" || payload["memory_key"] != "test_key" {
+	if payload["tool"] != "memory_save_entry" || payload["memory_key"] != "test_key" {
 		t.Fatalf("unexpected save memory payload: %#v", payload)
 	}
-	if payload["fact_count"] != float64(1) {
-		t.Fatalf("expected fact_count=1, got %#v", payload["fact_count"])
+	if payload["entry_count"] != float64(1) {
+		t.Fatalf("expected entry_count=1, got %#v", payload["entry_count"])
 	}
 	if payload["overwrote_existing"] != false {
 		t.Fatalf("expected overwrote_existing=false, got %#v", payload["overwrote_existing"])
@@ -136,17 +134,17 @@ func TestSaveMemoryTool(t *testing.T) {
 	if payload["affects_report_delivery"] != false {
 		t.Fatalf("expected affects_report_delivery=false, got %#v", payload["affects_report_delivery"])
 	}
-	if mem.Facts["test_key"] != "test_fact" {
+	if mem.EntrySnapshot()["test_key"].Statement != "test_fact" {
 		t.Errorf("expected fact to be saved in memory")
 	}
 }
 
 func TestSaveMemoryToolReportsOverwrite(t *testing.T) {
 	mem := NewWorkingMemory()
-	mem.SaveFact("test_key", "old_fact")
-	tool := &SaveMemoryTool{Memory: mem}
+	mem.SaveEntry("test_key", MemoryEntry{Statement: "old_fact", Status: "inferred", CreatedBy: "test"})
+	tool := &SaveMemoryTool{Memory: mem, EmitFunc: func(RuntimeEvent) {}}
 
-	res, err := tool.Execute([]byte(`{"key":"test_key","fact":"new_fact"}`))
+	res, err := tool.Execute([]byte(`{"key":"test_key","statement":"new_fact","status":"assumed"}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -158,8 +156,8 @@ func TestSaveMemoryToolReportsOverwrite(t *testing.T) {
 	if payload["overwrote_existing"] != true {
 		t.Fatalf("expected overwrite flag, got %#v", payload["overwrote_existing"])
 	}
-	if mem.Facts["test_key"] != "new_fact" {
-		t.Fatalf("expected fact overwrite, got %#v", mem.Facts["test_key"])
+	if mem.EntrySnapshot()["test_key"].Statement != "new_fact" {
+		t.Fatalf("expected entry overwrite, got %#v", mem.EntrySnapshot()["test_key"])
 	}
 }
 
@@ -168,7 +166,7 @@ func TestSaveMemoryToolEmitsUpdate(t *testing.T) {
 	var emitted bool
 	tool := &SaveMemoryTool{
 		Memory: mem,
-		EmitFunc: func(event WSEvent) {
+		EmitFunc: func(event RuntimeEvent) {
 			if event.Type != EventStateMemoryUpdated {
 				t.Fatalf("unexpected event type: %s", event.Type)
 			}
@@ -176,14 +174,14 @@ func TestSaveMemoryToolEmitsUpdate(t *testing.T) {
 			if !ok {
 				t.Fatalf("unexpected payload type: %T", event.Data)
 			}
-			if payload.Facts["alpha"] != "beta" {
-				t.Fatalf("expected emitted facts to contain saved value")
+			if payload.Entries["alpha"].Statement != "beta" {
+				t.Fatalf("expected emitted entries to contain saved value")
 			}
 			emitted = true
 		},
 	}
 
-	if _, err := tool.Execute([]byte(`{"key":"alpha","fact":"beta"}`)); err != nil {
+	if _, err := tool.Execute([]byte(`{"key":"alpha","statement":"beta","status":"inferred"}`)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !emitted {
@@ -193,10 +191,10 @@ func TestSaveMemoryToolEmitsUpdate(t *testing.T) {
 
 func TestManageSubgoalsTool(t *testing.T) {
 	sm := NewSubgoalManager()
-	tool := &ManageSubgoalsTool{Subgoals: sm}
+	tool := &ManageSubgoalsTool{Subgoals: sm, EmitFunc: func(RuntimeEvent) {}}
 
 	// Add
-	args := []byte(`{"action": "add", "description": "new goal"}`)
+	args := []byte(`{"action": "add", "description": "new goal", "blocking": false}`)
 	res, err := tool.Execute(args)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -215,12 +213,12 @@ func TestManageSubgoalsTool(t *testing.T) {
 		t.Fatalf("did not expect add payload to expose can_finalize: %#v", addPayload["can_finalize"])
 	}
 	if addPayload["blocking"] != false {
-		t.Fatalf("expected scratchpad goal to default blocking=false, got %#v", addPayload["blocking"])
+		t.Fatalf("expected explicit blocking=false to be preserved, got %#v", addPayload["blocking"])
 	}
 
 	id := sm.Goals[0].ID
 
-	argsChild := []byte(`{"action": "add", "description": "child goal", "parent_goal_id": "` + id + `"}`)
+	argsChild := []byte(`{"action": "add", "description": "child goal", "parent_goal_id": "` + id + `", "blocking": false}`)
 	if _, err := tool.Execute(argsChild); err != nil {
 		t.Errorf("unexpected error adding child goal: %v", err)
 	}

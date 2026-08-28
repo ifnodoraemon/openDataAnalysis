@@ -70,13 +70,14 @@ func TestNewLLMClientWithoutConfigDoesNotPanic(t *testing.T) {
 	}
 }
 
-func TestChatWithToolsRejectsPlaceholderAPIKey(t *testing.T) {
+func TestChatWithToolsRejectsEmptyAPIKey(t *testing.T) {
 	previous := config.Cfg
 	config.Cfg = &config.Config{
 		LLMProvider:    "openai",
 		LLMModel:       "gpt-4o",
-		LLMAPIKey:      "REPLACE_WITH_YOUR_API_KEY",
+		LLMAPIKey:      "",
 		LLMAPIEndpoint: "https://api.openai.com/v1/responses",
+		LLMAPIProtocol: "responses",
 	}
 	t.Cleanup(func() { config.Cfg = previous })
 
@@ -87,7 +88,7 @@ func TestChatWithToolsRejectsPlaceholderAPIKey(t *testing.T) {
 	}
 }
 
-func TestParseResponsesBodySupportsSSECompletedEvent(t *testing.T) {
+func TestParseResponsesBodyRejectsSSEWhenRequestIsNonStreaming(t *testing.T) {
 	t.Parallel()
 
 	body := []byte(`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}
@@ -96,15 +97,8 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
 
 data: [DONE]
 `)
-	resp, err := parseResponsesBody(body)
-	if err != nil {
-		t.Fatalf("expected SSE body to parse: %v", err)
-	}
-	if resp.OutputText != "done" {
-		t.Fatalf("expected output_text done, got %q", resp.OutputText)
-	}
-	if resp.Usage.TotalTokens != 5 {
-		t.Fatalf("expected total tokens 5, got %d", resp.Usage.TotalTokens)
+	if _, err := parseResponsesBody(body); err == nil {
+		t.Fatal("expected SSE body to be rejected for a non-streaming Responses request")
 	}
 }
 
@@ -155,7 +149,7 @@ func TestConvertAnthropicResponseMapsUsage(t *testing.T) {
 
 	client := &LLMClient{}
 	text := "done"
-	resp := client.convertAnthropicResponse(&anthropic.MessagesResponse{
+	resp, err := client.convertAnthropicResponse(&anthropic.MessagesResponse{
 		Content: []anthropic.MessageContent{
 			anthropic.NewTextMessageContent(text),
 		},
@@ -165,6 +159,9 @@ func TestConvertAnthropicResponseMapsUsage(t *testing.T) {
 			OutputTokens: 22,
 		},
 	})
+	if err != nil {
+		t.Fatalf("convert response: %v", err)
+	}
 
 	if resp.Choices[0].FinishReason != LLMFinishReasonStop {
 		t.Fatalf("expected stop finish reason, got %s", resp.Choices[0].FinishReason)
@@ -237,12 +234,12 @@ func TestBuildResponsesRequestIncludesStrictToolSpecs(t *testing.T) {
 	}
 }
 
-func TestResolveOpenAIEndpointUsesDeepSeekChatCompletions(t *testing.T) {
+func TestResolveOpenAIEndpointUsesExplicitChatCompletionsProtocol(t *testing.T) {
 	previous := config.Cfg
 	defer func() { config.Cfg = previous }()
 	config.Cfg = &config.Config{
-		LLMBaseURL:     "https://api.deepseek.com",
-		LLMAPIEndpoint: "https://api.openai.com/v1/responses",
+		LLMAPIProtocol: "chat_completions",
+		LLMAPIEndpoint: "https://compatible-provider.example/custom/chat",
 	}
 
 	client := &LLMClient{}
@@ -253,17 +250,17 @@ func TestResolveOpenAIEndpointUsesDeepSeekChatCompletions(t *testing.T) {
 	if apiKind != openAIAPIChatCompletions {
 		t.Fatalf("expected chat completions kind, got %s", apiKind)
 	}
-	if endpoint != "https://api.deepseek.com/chat/completions" {
+	if endpoint != "https://compatible-provider.example/custom/chat" {
 		t.Fatalf("unexpected endpoint: %s", endpoint)
 	}
 }
 
-func TestNormalizeDeepSeekResponsesEndpointToChatCompletions(t *testing.T) {
+func TestResolveOpenAIEndpointUsesExplicitResponsesProtocolWithoutRewriting(t *testing.T) {
 	previous := config.Cfg
 	defer func() { config.Cfg = previous }()
 	config.Cfg = &config.Config{
-		LLMBaseURL:     "https://api.deepseek.com",
-		LLMAPIEndpoint: "https://api.deepseek.com/v1/responses",
+		LLMAPIProtocol: "responses",
+		LLMAPIEndpoint: "https://compatible-provider.example/custom/responses",
 	}
 
 	client := &LLMClient{}
@@ -271,10 +268,10 @@ func TestNormalizeDeepSeekResponsesEndpointToChatCompletions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveOpenAIEndpoint: %v", err)
 	}
-	if apiKind != openAIAPIChatCompletions {
-		t.Fatalf("expected chat completions kind, got %s", apiKind)
+	if apiKind != openAIAPIResponses {
+		t.Fatalf("expected responses kind, got %s", apiKind)
 	}
-	if endpoint != "https://api.deepseek.com/v1/chat/completions" {
+	if endpoint != "https://compatible-provider.example/custom/responses" {
 		t.Fatalf("unexpected endpoint: %s", endpoint)
 	}
 }

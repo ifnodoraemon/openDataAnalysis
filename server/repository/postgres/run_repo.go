@@ -2,8 +2,6 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 
@@ -38,11 +36,8 @@ func (r *RunRepository) GetByID(ctx context.Context, runID string) (*domain.Anal
 	var run domain.AnalysisRun
 	var runKind, status string
 	err := row.Scan(&run.ID, &run.SessionID, &run.WorkspaceID, &run.UserID, &run.ParentRunID, &runKind, &run.DelegateRole, &run.GoalID, &status, &run.InputMessage, &run.Summary, &run.ErrorMessage, &run.ReportFileID, &run.StartedAt, &run.FinishedAt, &run.CreatedAt, &run.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, sql.ErrNoRows
-	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get run by id: %w", err)
+		return nil, fmt.Errorf("failed to get run by id: %w", normalizeLookupError(err))
 	}
 	run.RunKind = domain.RunKind(runKind)
 	run.Status = domain.RunStatus(status)

@@ -13,19 +13,10 @@ func ensureSession(ctx context.Context, identity auth.Identity) (*domain.Session
 		return nil, err
 	}
 	record, err := sessionRepo.GetByID(ctx, sess.ID)
-	if err == nil {
-		return record, nil
+	if err != nil {
+		return nil, err
 	}
-	return &domain.Session{
-		ID:          sess.ID,
-		WorkspaceID: sess.WorkspaceID,
-		UserID:      sess.UserID,
-		Title:       "Untitled Analysis",
-		Status:      domain.SessionStatusActive,
-		CreatedAt:   sess.CreatedAt,
-		UpdatedAt:   sess.LastSeenAt,
-		LastSeenAt:  sess.LastSeenAt,
-	}, nil
+	return record, nil
 }
 
 func serializeSession(session domain.Session) map[string]interface{} {

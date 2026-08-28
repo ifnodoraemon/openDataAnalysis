@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -11,7 +13,6 @@ import (
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 	"github.com/ifnodoraemon/openDataAnalysis/metadata"
 	"github.com/ifnodoraemon/openDataAnalysis/repository"
-	"github.com/ifnodoraemon/openDataAnalysis/queue"
 	pgrepo "github.com/ifnodoraemon/openDataAnalysis/repository/postgres"
 	sqliterepo "github.com/ifnodoraemon/openDataAnalysis/repository/sqlite"
 	"github.com/ifnodoraemon/openDataAnalysis/service"
@@ -19,7 +20,6 @@ import (
 	"github.com/ifnodoraemon/openDataAnalysis/storage"
 	localstorage "github.com/ifnodoraemon/openDataAnalysis/storage/local"
 	s3storage "github.com/ifnodoraemon/openDataAnalysis/storage/s3"
-	"github.com/riverqueue/river"
 )
 
 var (
@@ -46,58 +46,37 @@ var (
 	ShutdownEventPersistWorker func()
 )
 
-
 func Initialize() {
 	ensureProductionReadiness()
 	ensureSupportedBackends()
 	ensureRequiredConfig()
 	tokenManager = auth.NewTokenManager(config.Cfg.AuthSecret)
-	defaultIdentity = auth.Identity{
-		UserID:      config.Cfg.DefaultUserID,
-		UserName:    config.Cfg.DefaultUserName,
-		UserEmail:   config.Cfg.DefaultUserEmail,
-		WorkspaceID: config.Cfg.DefaultWorkspaceID,
-		Workspace:   config.Cfg.DefaultWorkspaceName,
+	if config.Cfg.BootstrapDefaultIdentity {
+		defaultIdentity = auth.Identity{
+			UserID: config.Cfg.DefaultUserID, UserName: config.Cfg.DefaultUserName,
+			UserEmail: config.Cfg.DefaultUserEmail, WorkspaceID: config.Cfg.DefaultWorkspaceID,
+			Workspace: config.Cfg.DefaultWorkspaceName,
+		}
+	} else {
+		defaultIdentity = auth.Identity{}
 	}
 
 	var fileRepo repository.FileRepository
 
-	switch config.NormalizeBackend(config.Cfg.MetadataStore) {
+	switch config.Cfg.MetadataStore {
 	case "postgres":
 		fileRepo = initPostgresBackend()
-	default:
+	case "sqlite":
 		fileRepo = initSQLiteBackend()
+	default:
+		panic("unsupported metadata store: " + config.Cfg.MetadataStore)
 	}
 
-	now := time.Now()
-	defaultPasswordHash, err := auth.HashPassword(config.Cfg.DefaultUserPassword)
-	if err != nil {
-		panic(err)
+	if config.Cfg.BootstrapDefaultIdentity {
+		if err := ensureBootstrapIdentity(context.Background()); err != nil {
+			panic(err)
+		}
 	}
-	_ = userRepo.Create(context.Background(), &domain.User{
-		ID:           defaultIdentity.UserID,
-		Email:        defaultIdentity.UserEmail,
-		PasswordHash: defaultPasswordHash,
-		Name:         defaultIdentity.UserName,
-		Status:       domain.UserStatusActive,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	})
-	_ = workspaceRepo.CreateWorkspace(context.Background(), &domain.Workspace{
-		ID:          defaultIdentity.WorkspaceID,
-		Name:        defaultIdentity.Workspace,
-		Slug:        defaultIdentity.WorkspaceID,
-		OwnerUserID: defaultIdentity.UserID,
-		Status:      domain.WorkspaceStatusActive,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	})
-	_ = workspaceRepo.AddMember(context.Background(), &domain.WorkspaceMember{
-		WorkspaceID: defaultIdentity.WorkspaceID,
-		UserID:      defaultIdentity.UserID,
-		Role:        domain.WorkspaceRoleOwner,
-		CreatedAt:   now,
-	})
 
 	fileService = &service.FileService{
 		Storage:       configuredObjectStorage(),
@@ -176,7 +155,7 @@ func initPostgresBackend() repository.FileRepository {
 	if err != nil {
 		panic("failed to run postgres migrations: " + err.Error())
 	}
-	_ = pgStore
+	metadataStore = &metadata.Store{DB: pgStore.DB, Dialect: metadata.DialectPostgres}
 
 	pool, err := pgrepo.NewPool(ctx, config.Cfg.PostgresDSN)
 	if err != nil {
@@ -199,18 +178,71 @@ func initPostgresBackend() repository.FileRepository {
 	semanticAssetRepo = pgrepo.NewSemanticAssetRepository(pool)
 	auditEventRepo = pgrepo.NewAuditEventRepository(pool)
 
-	if config.NormalizeBackend(config.Cfg.RunBackend) == "river" {
-		workers := river.NewWorkers()
-		river.AddWorker(workers, &queue.AnalysisRunWorker{})
-		river.AddWorker(workers, &queue.SessionCleanupWorker{})
-		riverClient, err := queue.SetupRiverClient(ctx, pool, workers)
-		if err != nil {
-			panic("failed to initialize River queue: " + err.Error())
+	return fileRepo
+}
+
+func ensureBootstrapIdentity(ctx context.Context) error {
+	user, err := userRepo.GetByID(ctx, defaultIdentity.UserID)
+	if errors.Is(err, repository.ErrNotFound) {
+		passwordHash, hashErr := auth.HashPassword(config.Cfg.DefaultUserPassword)
+		if hashErr != nil {
+			return fmt.Errorf("hash bootstrap password: %w", hashErr)
 		}
-		_ = riverClient
+		now := time.Now()
+		user = &domain.User{
+			ID:           defaultIdentity.UserID,
+			Email:        defaultIdentity.UserEmail,
+			PasswordHash: passwordHash,
+			Name:         defaultIdentity.UserName,
+			Status:       domain.UserStatusActive,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		if err := userRepo.Create(ctx, user); err != nil {
+			return fmt.Errorf("create bootstrap user: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("read bootstrap user: %w", err)
+	} else if user.Email != defaultIdentity.UserEmail || user.Name != defaultIdentity.UserName || user.Status != domain.UserStatusActive || !auth.VerifyPassword(config.Cfg.DefaultUserPassword, user.PasswordHash) {
+		return fmt.Errorf("persisted bootstrap user does not exactly match configured identity")
 	}
 
-	return fileRepo
+	workspace, err := workspaceRepo.GetByID(ctx, defaultIdentity.WorkspaceID)
+	if errors.Is(err, repository.ErrNotFound) {
+		now := time.Now()
+		workspace = &domain.Workspace{
+			ID:          defaultIdentity.WorkspaceID,
+			Name:        defaultIdentity.Workspace,
+			Slug:        defaultIdentity.WorkspaceID,
+			OwnerUserID: defaultIdentity.UserID,
+			Status:      domain.WorkspaceStatusActive,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		if err := workspaceRepo.CreateWorkspace(ctx, workspace); err != nil {
+			return fmt.Errorf("create bootstrap workspace: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("read bootstrap workspace: %w", err)
+	} else if workspace.Name != defaultIdentity.Workspace || workspace.Slug != defaultIdentity.WorkspaceID || workspace.OwnerUserID != defaultIdentity.UserID || workspace.Status != domain.WorkspaceStatusActive {
+		return fmt.Errorf("persisted bootstrap workspace does not exactly match configured workspace")
+	}
+
+	isMember, err := workspaceRepo.IsMember(ctx, defaultIdentity.WorkspaceID, defaultIdentity.UserID)
+	if err != nil {
+		return fmt.Errorf("read bootstrap workspace membership: %w", err)
+	}
+	if !isMember {
+		if err := workspaceRepo.AddMember(ctx, &domain.WorkspaceMember{
+			WorkspaceID: defaultIdentity.WorkspaceID,
+			UserID:      defaultIdentity.UserID,
+			Role:        domain.WorkspaceRoleOwner,
+			CreatedAt:   time.Now(),
+		}); err != nil {
+			return fmt.Errorf("create bootstrap workspace membership: %w", err)
+		}
+	}
+	return nil
 }
 
 func ensureProductionReadiness() {
@@ -227,18 +259,14 @@ func ensureSupportedBackends() {
 	}{
 		{Env: "METADATA_STORE", Value: config.Cfg.MetadataStore, Supported: []string{"sqlite", "postgres"}},
 		{Env: "STORAGE_PROVIDER", Value: config.Cfg.StorageProvider, Supported: []string{"local", "s3"}},
-		{Env: "RUN_BACKEND", Value: config.Cfg.RunBackend, Supported: []string{"inprocess", "river"}},
+		{Env: "RUN_BACKEND", Value: config.Cfg.RunBackend, Supported: []string{"inprocess"}},
 		{Env: "ANALYSIS_STORE", Value: config.Cfg.AnalysisStore, Supported: []string{"session_sqlite"}},
-		{Env: "PYTHON_ARTIFACT_STORE", Value: config.Cfg.PythonArtifactStore, Supported: []string{"executor_local"}},
+		{Env: "PYTHON_ARTIFACT_STORE", Value: config.Cfg.PythonArtifactStore, Supported: []string{"object_storage"}},
 	}
 	for _, requirement := range requirements {
-		normalized := config.NormalizeBackend(requirement.Value)
-		if normalized == "" {
-			continue
-		}
 		isSupported := false
 		for _, s := range requirement.Supported {
-			if normalized == s {
+			if requirement.Value == s {
 				isSupported = true
 				break
 			}
@@ -250,8 +278,8 @@ func ensureSupportedBackends() {
 }
 
 func configuredObjectStorage() storage.ObjectStorage {
-	switch config.NormalizeBackend(config.Cfg.StorageProvider) {
-	case "", "local":
+	switch config.Cfg.StorageProvider {
+	case "local":
 		return localstorage.New(config.Cfg.StorageRoot, "")
 	case "s3":
 		s3Store, err := s3storage.New(context.Background(), s3storage.Config{
@@ -277,20 +305,25 @@ func AuthMiddleware(next http.Handler) http.Handler {
 
 func ensureRequiredConfig() {
 	required := map[string]string{
-		"AUTH_SECRET":            config.Cfg.AuthSecret,
-		"DEFAULT_USER_ID":        config.Cfg.DefaultUserID,
-		"DEFAULT_USER_EMAIL":     config.Cfg.DefaultUserEmail,
-		"DEFAULT_USER_NAME":      config.Cfg.DefaultUserName,
-		"DEFAULT_USER_PASSWORD":  config.Cfg.DefaultUserPassword,
-		"DEFAULT_WORKSPACE_ID":   config.Cfg.DefaultWorkspaceID,
-		"DEFAULT_WORKSPACE_NAME": config.Cfg.DefaultWorkspaceName,
+		"AUTH_SECRET": config.Cfg.AuthSecret,
+	}
+	if config.Cfg.BootstrapDefaultIdentity {
+		required["DEFAULT_USER_ID"] = config.Cfg.DefaultUserID
+		required["DEFAULT_USER_EMAIL"] = config.Cfg.DefaultUserEmail
+		required["DEFAULT_USER_NAME"] = config.Cfg.DefaultUserName
+		required["DEFAULT_USER_PASSWORD"] = config.Cfg.DefaultUserPassword
+		required["DEFAULT_WORKSPACE_ID"] = config.Cfg.DefaultWorkspaceID
+		required["DEFAULT_WORKSPACE_NAME"] = config.Cfg.DefaultWorkspaceName
 	}
 	for key, value := range required {
 		if strings.TrimSpace(value) == "" {
 			panic("missing required config: " + key)
 		}
-		if config.IsPlaceholderValue(value) {
-			panic("insecure placeholder config: " + key)
+		if strings.TrimSpace(value) != value {
+			panic(key + " must not contain leading or trailing whitespace")
 		}
+	}
+	if len(config.Cfg.AuthSecret) < 32 {
+		panic("AUTH_SECRET must contain at least 32 bytes")
 	}
 }
