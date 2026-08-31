@@ -354,11 +354,16 @@ func (s *FileService) OpenStoredObject(ctx context.Context, userID, workspaceID,
 	return s.Storage.Get(ctx, storageKey)
 }
 
-var safeFilePattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
+// unsafeFilenameChars covers path separators and shell/URI-significant
+// characters; Unicode letters (e.g. Chinese filenames) are kept as-is.
+var unsafeFilenameChars = regexp.MustCompile(`[\x00-\x1f\x7f/\\:*?"<>|]`)
 
 func sanitizeFilename(name string) string {
-	name = filepath.Base(strings.TrimSpace(name))
-	if name == "" || name == "." || name == ".." || !safeFilePattern.MatchString(name) {
+	name = strings.TrimSpace(filepath.Base(name))
+	if name == "" || name == "." || name == ".." {
+		return "upload.bin"
+	}
+	if unsafeFilenameChars.MatchString(name) || len(name) > 128 {
 		return "upload.bin"
 	}
 	return name

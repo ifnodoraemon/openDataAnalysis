@@ -113,6 +113,13 @@ func (r *statusRecorder) Flush() {
 	}
 }
 
+// Unwrap lets http.ResponseController reach the underlying writer, so
+// long-lived handlers (the SSE stream clears its write deadline) keep working
+// through this middleware.
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
 // routeLabel returns a bounded-cardinality path label. Registered route
 // patterns (e.g. "/api/sessions/{sessionID}") collapse URL parameters;
 // unmatched requests collapse to a single "unmatched" label so arbitrary
