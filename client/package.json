@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "node scripts/copy-katex.mjs && vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "format": "prettier --write \"src/**/*.{js,vue,css}\" package.json",
@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "highlight.js": "^11.11.0",
+    "katex": "^0.16.9",
     "marked": "^15.0.0",
     "pinia": "^3.0.0",
     "vue": "^3.5.0"

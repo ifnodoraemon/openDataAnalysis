@@ -198,7 +198,7 @@ func reportLifecycleHook(scope runtimeEventScope, ev agent.RuntimeEvent) {
 				scope.session.CancelRun(scope.runID)
 			}
 			if finishTerminalRun(scope, "failed") && scope.setRunStatus != nil {
-				msg := "report saved but binding failed: " + err.Error()
+				msg := "报告交付失败，本次运行不会产出最终报告：" + err.Error()
 				scope.setRunStatus(domain.RunStatusFailed, &msg)
 			}
 		}

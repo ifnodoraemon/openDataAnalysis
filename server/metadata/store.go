@@ -309,6 +309,11 @@ func (s *Store) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_events_workspace ON audit_events(workspace_id, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_events_resource ON audit_events(resource_type, resource_id)`,
+
+		`CREATE TABLE IF NOT EXISTS revoked_tokens (
+			jti TEXT PRIMARY KEY,
+			expires_at_unix INTEGER NOT NULL
+		)`,
 	}
 
 	for _, stmt := range stmts {

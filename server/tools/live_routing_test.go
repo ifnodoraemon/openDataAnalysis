@@ -102,6 +102,7 @@ func TestListTablesToolRoutesLiveSource(t *testing.T) {
 			}}, nil
 		},
 	}
+	tool.SetExecutionContext(context.Background())
 	result, err := tool.Execute(json.RawMessage(`{"source_id":"ds_live"}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
@@ -178,6 +179,7 @@ func TestDescribeDataToolLiveReturnsStructuralFacts(t *testing.T) {
 			}, nil
 		},
 	}
+	tool.SetExecutionContext(context.Background())
 	result, err := tool.Execute(json.RawMessage(`{"table_name":"orders","sample_rows":0,"source_id":"ds_live","schema_name":"public"}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)

@@ -35,8 +35,15 @@ type PostgresCredential struct {
 	Password string `json:"password"`
 }
 
+// credentialEncryptionKey derives the AES key for datasource credentials
+// with domain separation, so the same AUTH_SECRET never signs tokens and
+// encrypts credentials with identical key material.
+func credentialEncryptionKey(secret string) [32]byte {
+	return sha256.Sum256([]byte("oda:datasource-credential-encryption:v1:" + secret))
+}
+
 func EncryptCredential(payload interface{}, authSecret string) ([]byte, error) {
-	key := sha256.Sum256([]byte(authSecret))
+	key := credentialEncryptionKey(authSecret)
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
 		return nil, fmt.Errorf("failed to create AES cipher: %w", err)
@@ -62,7 +69,7 @@ func EncryptCredential(payload interface{}, authSecret string) ([]byte, error) {
 }
 
 func DecryptCredential(ciphertext []byte, authSecret string, out interface{}) error {
-	key := sha256.Sum256([]byte(authSecret))
+	key := credentialEncryptionKey(authSecret)
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
 		return fmt.Errorf("failed to create AES cipher: %w", err)
@@ -244,7 +251,9 @@ func (s *SourceService) FetchPostgresLiveObjectMetadata(ctx context.Context, sou
 		if errors.Is(estimateErr, sql.ErrNoRows) {
 			return nil, fmt.Errorf("upstream object %s.%s does not exist", object.Schema, object.Name)
 		}
-		estimate = 0
+		// A failed estimate must surface as an error, not silently become the
+		// structural fact row_count_estimate=0.
+		return nil, fmt.Errorf("failed to estimate row count for %s.%s: %w", object.Schema, object.Name, estimateErr)
 	}
 
 	return &LiveObjectMetadata{Columns: columns, RowCountEstimate: estimate}, nil
@@ -291,7 +300,7 @@ func (s *SourceService) ExecutePostgresLiveQuery(ctx context.Context, sourceConf
 		return nil, fmt.Errorf("live query execution failed: %w", err)
 	}
 	defer rows.Close()
-	return scanLiveQueryRows(queryCtx, rows, "postgres")
+	return scanLiveQueryRows(queryCtx, rows, "postgres", maxRows)
 }
 
 func quotePGIdentifier(name string) (string, error) {

@@ -125,6 +125,9 @@ function sanitizeURL(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
   if (raw.startsWith("//")) return "";
+  // Browsers normalize backslashes to slashes, so "/\evil.com" parses as the
+  // protocol-relative URL "//evil.com" despite not starting with "//".
+  if (raw.includes("\\")) return "";
   if (raw.startsWith("#") || raw.startsWith("/")) return raw;
   try {
     const parsed = new URL(raw, window.location.origin);
@@ -137,6 +140,7 @@ function sanitizeURL(value) {
 function isSameOriginURL(value) {
   const raw = String(value || "").trim();
   if (!raw) return false;
+  if (raw.includes("\\")) return false;
   if (raw.startsWith("/") && !raw.startsWith("//")) return true;
   try {
     const parsed = new URL(raw, window.location.origin);
@@ -160,8 +164,9 @@ function sanitizeStyleValue(value) {
   if (/[<]/.test(value)) return "";
   if (/(?:expression|javascript|vbscript|behavior|@import)\s*\(/i.test(value))
     return "";
-  if (/url\s*\(\s*["']?(?:javascript|vbscript|data|blob)\s*:/i.test(value))
-    return "";
+  // Inline style values must not carry any url() load; background images can
+  // use <img> elements that go through the attribute sanitizer instead.
+  if (/url\s*\(/i.test(value)) return "";
   return value;
 }
 
@@ -311,61 +316,26 @@ export function sanitizeMarkdownHTML(html) {
   return doc.body.innerHTML;
 }
 
-const CDN_HOSTS = new Set(["cdn.jsdelivr.net", "cdnjs.cloudflare.com"]);
+// Report scripts load exclusively from same-origin static assets; every
+// (id, path) pair is an exact match, so CDN URLs and path tricks like
+// /assets/echarts.min.js/../../evil.js are rejected.
+const REPORT_SCRIPT_SOURCES = new Map([
+  ["oda-echarts-loader", "/assets/echarts.min.js"],
+  ["oda-chart-runtime", "/oda-chart-runtime.js"],
+  ["oda-math-loader", "/assets/katex/katex.min.js"],
+  ["oda-math-auto-render", "/assets/katex/contrib/auto-render.min.js"],
+  ["oda-math-runtime", "/oda-math-runtime.js"],
+]);
 
-function isEChartsLoaderScript(node) {
+function isAllowedReportScript(node) {
   const src = node.getAttribute("src") || "";
   const id = node.getAttribute("id") || "";
-  if (id !== "oda-echarts-loader" || !src) return false;
+  if (!id || !src) return false;
+  const expected = REPORT_SCRIPT_SOURCES.get(id);
+  if (!expected) return false;
   try {
     const url = new URL(src, window.location.origin);
-    const path = url.pathname.toLowerCase();
-    if (
-      url.origin === window.location.origin &&
-      path === "/assets/echarts.min.js"
-    ) {
-      return true;
-    }
-    return CDN_HOSTS.has(url.hostname) && path.endsWith("echarts.min.js");
-  } catch {
-    return false;
-  }
-}
-
-function isMathScript(node) {
-  const src = node.getAttribute("src") || "";
-  const id = node.getAttribute("id") || "";
-  if (!id.startsWith("oda-math") || !src) return false;
-  try {
-    const url = new URL(src, window.location.origin);
-    const path = url.pathname.toLowerCase();
-    if (
-      url.origin === window.location.origin &&
-      path === "/oda-math-runtime.js"
-    ) {
-      return true;
-    }
-    return (
-      CDN_HOSTS.has(url.hostname) &&
-      (path.includes("katex") ||
-        path.includes("mathjax") ||
-        path.includes("auto-render"))
-    );
-  } catch {
-    return false;
-  }
-}
-
-function isChartRuntimeScript(node) {
-  const src = node.getAttribute("src") || "";
-  const id = node.getAttribute("id") || "";
-  if (id !== "oda-chart-runtime" || !src) return false;
-  try {
-    const url = new URL(src, window.location.origin);
-    return (
-      url.origin === window.location.origin &&
-      url.pathname === "/oda-chart-runtime.js"
-    );
+    return url.origin === window.location.origin && url.pathname === expected;
   } catch {
     return false;
   }
@@ -383,10 +353,7 @@ export function sanitizeReportHTML(html) {
   });
 
   doc.querySelectorAll("script").forEach((node) => {
-    const isLoader = isEChartsLoaderScript(node);
-    const isRuntime = isChartRuntimeScript(node);
-    const isMath = isMathScript(node);
-    if (!isLoader && !isRuntime && !isMath) {
+    if (!isAllowedReportScript(node)) {
       node.remove();
     }
   });

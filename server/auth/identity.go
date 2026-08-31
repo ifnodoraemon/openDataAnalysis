@@ -37,9 +37,6 @@ func Middleware(tokenManager *TokenManager) func(http.Handler) http.Handler {
 			if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
 				token = strings.TrimSpace(authHeader[7:])
 			}
-			if token == "" && r.URL.Path == "/api/sse" {
-				token = strings.TrimSpace(r.URL.Query().Get("token"))
-			}
 			if token == "" {
 				if cookie, err := r.Cookie("oda_token"); err == nil {
 					token = cookie.Value

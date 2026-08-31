@@ -97,9 +97,9 @@ func RenderReportHTML(title, author string, state *ReportState) string {
 	}
 	echartsScriptNode := fmt.Sprintf(`<script id="oda-echarts-loader" src="%s"></script>`, escapeHTMLAttr(echartsURL))
 
-	katexCSS := `<link rel="stylesheet" href="` + ReportKaTeXCDNBaseURL + `katex.min.css">`
-	katexScripts := `<script id="oda-math-loader" defer src="` + ReportKaTeXCDNBaseURL + `katex.min.js"></script>
-<script id="oda-math-auto-render" defer src="` + ReportKaTeXCDNBaseURL + `contrib/auto-render.min.js"></script>
+	katexCSS := `<link rel="stylesheet" href="` + ReportKaTeXAssetBaseURL + `katex.min.css">`
+	katexScripts := `<script id="oda-math-loader" defer src="` + ReportKaTeXAssetBaseURL + `katex.min.js"></script>
+<script id="oda-math-auto-render" defer src="` + ReportKaTeXAssetBaseURL + `contrib/auto-render.min.js"></script>
 <script id="oda-math-runtime" defer src="/oda-math-runtime.js"></script>`
 
 	return fmt.Sprintf(`<!DOCTYPE html>
@@ -977,33 +977,20 @@ func sanitizeCSS(value string) string {
 	if css == "" {
 		return ""
 	}
-	replacements := []string{
+	// Scheme keywords and CSS code-execution vectors are stripped with a
+	// case-insensitive regex so mixed-case variants (JaVaScRiPt:, expr/*x*/ession)
+	// cannot slip past exact-case replacements.
+	replacer := strings.NewReplacer(
 		"</style", "",
 		"</Style", "",
 		"</STYLE", "",
-		"@import", "",
-		"@Import", "",
-		"@IMPORT", "",
-		"expression(", "",
-		"Expression(", "",
-		"EXPRESSION(", "",
-		"javascript:", "",
-		"Javascript:", "",
-		"JAVASCRIPT:", "",
-		"behavior:", "",
-		"Behavior:", "",
-		"BEHAVIOR:", "",
-		"vbscript:", "",
-		"Vbscript:", "",
-		"VBSCRIPT:", "",
-	}
-	replacer := strings.NewReplacer(replacements...)
+	)
 	css = replacer.Replace(css)
 	css = cssStripRe.ReplaceAllString(css, "")
 	return css
 }
 
-var cssStripRe = regexp.MustCompile(`(?i)(@[\s]*import|expression[\s]*\(|behavior[\s]*:)`)
+var cssStripRe = regexp.MustCompile(`(?i)(@[\s]*import|expression[\s]*\(|behavior[\s]*\s*:|(javascript|vbscript|data)\s*:)`)
 
 func safeJSONForInlineScript(raw json.RawMessage) string {
 	option := strings.TrimSpace(string(raw))
@@ -1032,10 +1019,10 @@ func escapeInlineScript(value string) string {
 	return replacer.Replace(value)
 }
 
-const (
-	ReportKaTeXVersion    = "0.16.9"
-	ReportKaTeXCDNBaseURL = "https://cdn.jsdelivr.net/npm/katex@" + ReportKaTeXVersion + "/dist/"
-)
+// Report math rendering loads from same-origin static assets (shipped by the
+// frontend build via client/scripts/copy-katex.mjs), consistent with the
+// ECharts loader; no third-party CDN.
+const ReportKaTeXAssetBaseURL = "/assets/katex/"
 
 var allowedHTMLBlockTags = map[string]struct{}{
 	"a": {}, "b": {}, "blockquote": {}, "br": {}, "code": {}, "div": {}, "em": {}, "h1": {}, "h2": {}, "h3": {}, "h4": {}, "h5": {}, "h6": {},
@@ -1130,6 +1117,12 @@ func sanitizeHTMLAttrs(tag string, attrs []htmlnode.Attribute) []htmlnode.Attrib
 
 func sanitizeURL(value string) (string, bool) {
 	if value == "" {
+		return "", false
+	}
+	// Protocol-relative URLs (//host) and backslash variants (/\host) point at
+	// external origins; reject them alongside scheme-less relative paths that
+	// contain a backslash before the leading-slash allowlist.
+	if strings.HasPrefix(value, "//") || strings.HasPrefix(value, `/\`) {
 		return "", false
 	}
 	if strings.HasPrefix(value, "#") || strings.HasPrefix(value, "/") {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 	"time"
 
@@ -316,7 +317,7 @@ func ExecuteQueryDetailedContext(parent context.Context, db *sql.DB, query strin
 		}
 		result = append(result, row)
 		if len(result) >= queryProbeRows {
-			return nil, fmt.Errorf("query probe exceeds %d row limit", queryProbeRows)
+			return nil, fmt.Errorf("query probe exceeds %d row limit", queryRowLimit)
 		}
 	}
 
@@ -497,4 +498,43 @@ func stripSQLStringsAndComments(query string) string {
 	}
 
 	return b.String()
+}
+
+var (
+	queryTableRefPattern = regexp.MustCompile(`(?i)\b(?:FROM|JOIN)\s+((?:"[^"]+"|` + "`[^`]+`" + `|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*\.\s*(?:"[^"]+"|` + "`[^`]+`" + `|[A-Za-z_][A-Za-z0-9_$]*))?)`)
+	queryCTEPattern      = regexp.MustCompile(`(?i)\b(?:WITH|,)\s*([A-Za-z_][A-Za-z0-9_$]*)\s+AS\s*\(`)
+)
+
+func unquoteSQLIdentifier(part string) string {
+	trimmed := strings.TrimSpace(part)
+	if len(trimmed) >= 2 {
+		if strings.HasPrefix(trimmed, `"`) && strings.HasSuffix(trimmed, `"`) {
+			return strings.ReplaceAll(trimmed[1:len(trimmed)-1], `""`, `"`)
+		}
+		if strings.HasPrefix(trimmed, "`") && strings.HasSuffix(trimmed, "`") {
+			return strings.ReplaceAll(trimmed[1:len(trimmed)-1], "``", "`")
+		}
+	}
+	return trimmed
+}
+
+// ExtractQueryTableRefs returns the table references mentioned after FROM or
+// JOIN in a read-only SELECT/WITH query, plus the CTE names defined in the
+// query itself (CTE names are not upstream objects). String literals and
+// comments are stripped first so their contents cannot spoof references.
+func ExtractQueryTableRefs(query string) []string {
+	inspection := stripSQLStringsAndComments(query)
+	refs := make([]string, 0, 4)
+	for _, match := range queryTableRefPattern.FindAllStringSubmatch(inspection, -1) {
+		parts := strings.Split(match[1], ".")
+		unquoted := make([]string, 0, len(parts))
+		for _, part := range parts {
+			unquoted = append(unquoted, unquoteSQLIdentifier(part))
+		}
+		refs = append(refs, strings.Join(unquoted, "."))
+	}
+	for _, match := range queryCTEPattern.FindAllStringSubmatch(inspection, -1) {
+		refs = append(refs, unquoteSQLIdentifier(match[1]))
+	}
+	return refs
 }

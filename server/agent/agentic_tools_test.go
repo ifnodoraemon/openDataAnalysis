@@ -138,7 +138,7 @@ func TestActionAuthorizationReceiptBindsActorActionResourceAndPayload(t *testing
 	if err := json.Unmarshal([]byte(engine.history[1].Content), &result); err != nil {
 		t.Fatal(err)
 	}
-	receiptID, _ := result["authorization_receipt_id"].(string)
+	receiptID, _ := result["confirmation_receipt_id"].(string)
 	if !strings.HasPrefix(receiptID, "ucr_") {
 		t.Fatalf("expected authorization receipt, got %#v", result)
 	}
@@ -171,7 +171,7 @@ func TestActionAuthorizationRejectDoesNotMintReceipt(t *testing.T) {
 	if err := engine.ProvideAskUserResult(answer, "user_1"); err != nil {
 		t.Fatal(err)
 	}
-	if len(engine.confirmationReceipts) != 0 || strings.Contains(engine.history[1].Content, "authorization_receipt_id") {
+	if len(engine.confirmationReceipts) != 0 || strings.Contains(engine.history[1].Content, "confirmation_receipt_id") {
 		t.Fatalf("rejection must not authorize action: %#v", engine.confirmationReceipts)
 	}
 }

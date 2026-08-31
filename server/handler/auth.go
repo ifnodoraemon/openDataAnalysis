@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ifnodoraemon/openDataAnalysis/auth"
+	"github.com/ifnodoraemon/openDataAnalysis/config"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 	"github.com/ifnodoraemon/openDataAnalysis/repository"
 	"golang.org/x/time/rate"
@@ -134,6 +135,11 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	user, err := userRepo.GetByEmail(r.Context(), req.Email)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
+			// Pay the bcrypt cost on the unknown-email path too, so response
+			// latency does not reveal whether the account exists.
+			if dummyHash := auth.DummyPasswordHash(); dummyHash != "" {
+				auth.VerifyPassword(req.Password, dummyHash)
+			}
 			recordLoginAttempt(req.Email)
 			http.Error(w, "邮箱或密码错误", http.StatusUnauthorized)
 			return
@@ -199,6 +205,10 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func authCookieSecure() bool {
+	return config.Cfg == nil || config.Cfg.AuthCookieSecure
+}
+
 func setAuthCookie(w http.ResponseWriter, token string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "oda_token",
@@ -206,7 +216,7 @@ func setAuthCookie(w http.ResponseWriter, token string) {
 		Path:     "/",
 		MaxAge:   604800,
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   authCookieSecure(),
 		SameSite: http.SameSiteStrictMode,
 	})
 }
@@ -218,15 +228,30 @@ func clearAuthCookie(w http.ResponseWriter) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   authCookieSecure(),
 		SameSite: http.SameSiteStrictMode,
 	})
 }
 
+func bearerTokenFromRequest(r *http.Request) string {
+	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+		return strings.TrimSpace(authHeader[7:])
+	}
+	return ""
+}
+
 func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	if tokenManager != nil {
+		tokens := make([]string, 0, 2)
+		if bearer := bearerTokenFromRequest(r); bearer != "" {
+			tokens = append(tokens, bearer)
+		}
 		if cookie, err := r.Cookie("oda_token"); err == nil && cookie.Value != "" {
-			if err := tokenManager.Revoke(cookie.Value); err != nil {
+			tokens = append(tokens, cookie.Value)
+		}
+		for _, token := range tokens {
+			if err := tokenManager.Revoke(token); err != nil {
 				log.Printf("logout token revocation skipped: %v", err)
 			}
 		}

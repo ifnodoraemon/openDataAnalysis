@@ -63,14 +63,23 @@ jobs:
         env:
           PROXY_TOKEN: ci-test-token
           WORK_DIR: ${{ runner.temp }}/python-executor-workspace
+          # A broken executor must fail the job instead of silently skipping
+          # the HTTP-level tests.
+          REQUIRE_EXECUTOR: "1"
         run: |
           python main.py &
+          EXECUTOR_READY=0
           for i in {1..20}; do
             if curl -fsS http://127.0.0.1:8081/health >/dev/null; then
+              EXECUTOR_READY=1
               break
             fi
             sleep 1
           done
+          if [ "$EXECUTOR_READY" -ne 1 ]; then
+            echo "python executor failed to become healthy"
+            exit 1
+          fi
           python -m pytest -q test_sandbox.py
 
   security-scan:
@@ -84,14 +93,13 @@ jobs:
       - name: npm audit
         working-directory: ./client
         run: npm audit --audit-level=high
-        continue-on-error: true
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
           scan-ref: .
           severity: CRITICAL,HIGH
-          exit-code: "0"
+          exit-code: "1"
 
   build-docker:
     runs-on: ubuntu-latest
@@ -231,6 +239,12 @@ jobs:
           # Ensure host-side data directories exist for bind mount with write perms
           mkdir -p data/metadata data/cache data/storage data/tmp
           chmod -R 777 data/
+          # Compose-level shared secrets (PROXY_TOKEN is required by both the
+          # backend and the python-executor service definitions).
+          cat > .env <<'OVEOF'
+          PROXY_TOKEN=ci-smoke-token
+          METRICS_AUTH_TOKEN=ci-metrics-token
+          OVEOF
           # Create CI override to expose server port for smoke test
           cat > docker-compose.ci.yml <<'OVEOF'
           services:

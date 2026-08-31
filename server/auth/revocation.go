@@ -7,6 +7,8 @@ import (
 
 // Revoker is an in-memory jti denylist. Entries are evicted once their
 // recorded token expiry passes, so the map never grows without bound.
+// Lookups only inspect the requested entry; full sweeps run on writes and
+// when loading persisted revocations.
 type Revoker struct {
 	mu      sync.Mutex
 	revoked map[string]time.Time
@@ -36,7 +38,6 @@ func (r *Revoker) IsRevoked(jti string) bool {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.evictExpiredLocked(time.Now())
 	expiresAt, ok := r.revoked[jti]
 	if !ok {
 		return false
@@ -46,6 +47,23 @@ func (r *Revoker) IsRevoked(jti string) bool {
 		return false
 	}
 	return true
+}
+
+// ReplaceAll swaps the in-memory denylist with the given revocations.
+func (r *Revoker) ReplaceAll(revocations map[string]time.Time) {
+	if r == nil {
+		return
+	}
+	now := time.Now()
+	fresh := make(map[string]time.Time, len(revocations))
+	for jti, expiresAt := range revocations {
+		if now.Before(expiresAt) {
+			fresh[jti] = expiresAt
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.revoked = fresh
 }
 
 func (r *Revoker) evictExpiredLocked(now time.Time) {

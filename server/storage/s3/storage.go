@@ -59,6 +59,14 @@ func New(ctx context.Context, cfg Config) (*Storage, error) {
 		o.UsePathStyle = cfg.ForcePathStyle
 	})
 
+	// Fail fast when the configured bucket does not exist instead of
+	// surfacing raw S3 errors on the first upload at runtime.
+	if _, err := client.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(cfg.Bucket),
+	}); err != nil {
+		return nil, fmt.Errorf("s3 bucket %q is not accessible (create it before starting): %w", cfg.Bucket, err)
+	}
+
 	presignClient := s3.NewPresignClient(client)
 
 	return &Storage{

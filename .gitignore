@@ -7,10 +7,12 @@ tmp/
 
 # Build output
 client/dist/
+client/public/assets/katex/
 server/server
 
 # Environment
 server/.env
+.env
 
 # Data cache
 /data/

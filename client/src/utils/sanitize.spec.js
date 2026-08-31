@@ -120,4 +120,52 @@ describe("sanitizeReportHTML", () => {
     expect(sanitized).not.toContain("content=");
     expect(sanitized).toContain('id="keep-id"');
   });
+
+  it("rejects CDN-hosted ECharts loader scripts even on allowlisted CDNs", () => {
+    const html = `<!DOCTYPE html><html><head>
+      <script id="oda-echarts-loader" src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+      <script id="oda-echarts-loader" src="https://cdn.jsdelivr.net/gh/attacker/evil@1/echarts.min.js"></script>
+    </head><body><p>x</p></body></html>`;
+
+    const sanitized = sanitizeReportHTML(html);
+    expect(sanitized).not.toContain("cdn.jsdelivr.net");
+    expect(sanitized).not.toContain("attacker");
+  });
+
+  it("accepts same-origin KaTeX loader scripts with exact paths only", () => {
+    const html = `<!DOCTYPE html><html><head>
+      <script id="oda-math-loader" src="/assets/katex/katex.min.js"></script>
+      <script id="oda-math-auto-render" src="/assets/katex/contrib/auto-render.min.js"></script>
+      <script id="oda-math-loader" src="/assets/katex/../../evil.js"></script>
+      <script id="oda-math-loader" src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    </head><body><p>x</p></body></html>`;
+
+    const sanitized = sanitizeReportHTML(html);
+    expect(sanitized).toContain('id="oda-math-loader"');
+    expect(sanitized).toContain("/assets/katex/katex.min.js");
+    expect(sanitized).toContain("/assets/katex/contrib/auto-render.min.js");
+    expect(sanitized).not.toContain("evil.js");
+    expect(sanitized).not.toContain("cdn.jsdelivr.net");
+  });
+
+  it("rejects backslash URL bypasses like /\\evil.com", () => {
+    const html = `<!DOCTYPE html><html><body>
+      <a href="/\\evil.com/page">link</a>
+      <img src="/\\evil.com/img.png">
+    </body></html>`;
+
+    const sanitized = sanitizeReportHTML(html);
+    expect(sanitized).not.toContain("evil.com");
+    expect(sanitized).toContain(">link</a>");
+  });
+
+  it("strips url() from inline style attribute values", () => {
+    const html = `<!DOCTYPE html><html><body>
+      <div style="background: url(https://evil.example/i.png); height: 200px">chart</div>
+    </body></html>`;
+
+    const sanitized = sanitizeReportHTML(html);
+    expect(sanitized).not.toContain("url(");
+    expect(sanitized).not.toContain("evil.example");
+  });
 });

@@ -47,8 +47,12 @@ type Session struct {
 	ActiveRun     *RunState
 	CreatedAt     time.Time
 	LastSeenAt    time.Time
-	mu            sync.Mutex
-	uploadMu      sync.RWMutex
+	// detached marks a session removed from the manager map (TTL cleanup or
+	// explicit delete). Late StartRun calls on stale pointers must fail
+	// instead of writing into deleted resources.
+	detached   bool
+	mu         sync.Mutex
+	uploadMu   sync.RWMutex
 }
 
 func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileService, sourceService *service.SourceService) (*Session, error) {
@@ -138,6 +142,7 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 				WorkspaceID:    workspaceID,
 				SQL:            req.SQL,
 				TimeoutSeconds: req.TimeoutSeconds,
+				MaxRows:        req.MaxRows,
 			})
 			if err != nil {
 				return nil, err
@@ -296,6 +301,9 @@ func (s *Session) StartRun(parent context.Context) (string, context.Context, err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.detached {
+		return "", nil, fmt.Errorf("session is being deleted, cannot start a new task")
+	}
 	if s.ActiveRun != nil {
 		return "", nil, fmt.Errorf("a task is still running or not yet cleaned up, please wait and try again after stopping")
 	}

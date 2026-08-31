@@ -19,8 +19,8 @@ import base64
 import io
 import logging
 import os
-import queue
 import re
+import threading
 import time
 import traceback
 import contextlib
@@ -152,6 +152,13 @@ class ExecuteRequest(BaseModel):
     workspace_id: str
     inputs: list[InputFile] = Field(default_factory=list)
 
+    @field_validator("inputs")
+    @classmethod
+    def validate_inputs_count(cls, v: list[InputFile]) -> list[InputFile]:
+        if len(v) > 20:
+            raise ValueError("at most 20 input files per execution")
+        return v
+
     @field_validator("timeout")
     @classmethod
     def validate_timeout(cls, v: int) -> int:
@@ -191,6 +198,9 @@ class ExecuteResponse(BaseModel):
     files: list[str] = Field(default_factory=list)
     duration_ms: int = 0
     truncated: bool = False
+    # Resource boundaries are facts, not hidden routing: expose the limits the
+    # execution actually ran under so the model can reason about truncation.
+    execution_limits: dict[str, int] = Field(default_factory=dict)
 
 
 def _verify_proxy_token(request: Request) -> None:
@@ -491,6 +501,22 @@ def _execute_sync(req: ExecuteRequest, trace_id: str) -> ExecuteResponse:
     q: multiprocessing.Queue = multiprocessing.Queue()
     p = multiprocessing.Process(target=run_in_process, args=(req.code, str(req_dir), q))
     p.start()
+
+    # Drain the result queue concurrently with p.join: the child's result
+    # (including large stdout buffers) can exceed the 64KB pipe capacity, and
+    # a child blocked mid-flush would otherwise turn a successful run into a
+    # spurious timeout.
+    result_holder: dict[str, Any] = {}
+
+    def _drain_result() -> None:
+        try:
+            result_holder["result"] = q.get(timeout=req.timeout + 10)
+        except Exception:
+            pass
+
+    drain_thread = threading.Thread(target=_drain_result, daemon=True)
+    drain_thread.start()
+
     p.join(req.timeout)
 
     if p.is_alive():
@@ -512,12 +538,31 @@ def _execute_sync(req: ExecuteRequest, trace_id: str) -> ExecuteResponse:
             duration_ms=int((time.time() - start) * 1000),
         )
 
-    try:
-        result = q.get(timeout=1)
-    except queue.Empty:
+    drain_thread.join(timeout=10)
+    result = result_holder.get("result")
+    if result is None:
         result = CRASH_RESULT
+    try:
+        q.close()
+        q.join_thread()
+    except Exception:
+        pass
 
-    new_files = _collect_output_files(req_dir, {item.filename for item in req.inputs})
+    try:
+        new_files = _collect_output_files(req_dir, {item.filename for item in req.inputs})
+    except RuntimeError as exc:
+        cleanup_error = _remove_request_dir(req_dir)
+        detail = f"Output collection rejected the execution result: {exc}"
+        if cleanup_error:
+            detail += f" Cleanup failed: {cleanup_error}"
+        return ExecuteResponse(
+            success=False,
+            stdout="",
+            stderr="",
+            error=detail,
+            files=[],
+            duration_ms=int((time.time() - start) * 1000),
+        )
     duration_ms = int((time.time() - start) * 1000)
     raw_stdout = result["stdout"]
     raw_stderr = result["stderr"]
@@ -542,6 +587,13 @@ def _execute_sync(req: ExecuteRequest, trace_id: str) -> ExecuteResponse:
         files=new_files,
         duration_ms=duration_ms,
         truncated=truncated,
+        execution_limits={
+            "timeout_seconds": req.timeout,
+            "memory_limit_mb": MEMORY_LIMIT_MB,
+            "stdout_char_limit": STDOUT_LIMIT,
+            "stderr_char_limit": STDERR_LIMIT,
+            "file_size_limit_mb": FILE_SIZE_LIMIT_MB,
+        },
     )
 
 

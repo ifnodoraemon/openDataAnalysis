@@ -18,7 +18,10 @@ import (
 )
 
 const runPreviewLimit = 3
-const reportHTMLCSP = "default-src 'self'; script-src 'self' " + tools.ReportKaTeXCDNBaseURL + " style-src 'self' 'unsafe-inline' " + tools.ReportKaTeXCDNBaseURL + " https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com " + tools.ReportKaTeXCDNBaseURL + "fonts/; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'self';"
+
+// The report preview is served same-origin and loads every script and style
+// from same-origin assets (ECharts, KaTeX) — no CDN origins in script-src.
+const reportHTMLCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'self';"
 
 func ListRunsHandler(w http.ResponseWriter, r *http.Request) {
 	identity, _ := auth.FromContext(r.Context())

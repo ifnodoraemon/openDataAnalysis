@@ -35,7 +35,7 @@ func main() {
 	}))
 
 	if config.Cfg.MetricsExpose {
-		r.Handle("/metrics", metrics.Handler())
+		r.Handle("/metrics", metrics.ProtectedHandler(config.Cfg.MetricsAuthToken))
 	}
 
 	r.Group(func(authGroup chi.Router) {

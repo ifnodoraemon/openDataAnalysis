@@ -2,8 +2,11 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 )
@@ -66,6 +69,18 @@ func (r *WorkspaceRepository) IsMember(ctx context.Context, workspaceID, userID 
 		return false, fmt.Errorf("failed to check workspace member: %w", err)
 	}
 	return count > 0, nil
+}
+
+func (r *WorkspaceRepository) GetMemberRole(ctx context.Context, workspaceID, userID string) (domain.WorkspaceRole, bool, error) {
+	row := r.db.QueryRow(ctx, `SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2`, workspaceID, userID)
+	var role string
+	if err := row.Scan(&role); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("failed to read workspace member role: %w", err)
+	}
+	return domain.WorkspaceRole(role), true, nil
 }
 
 func (r *WorkspaceRepository) CreateWorkspace(ctx context.Context, workspace *domain.Workspace) error {

@@ -49,7 +49,8 @@ function serverOrigin(baseUrl) {
   let raw = String(baseUrl || "").trim();
   if (!/^https?:\/\//i.test(raw)) raw = `http://${raw}`;
   const parsed = new URL(raw);
-  if (!parsed.port) parsed.port = "8080";
+  // Only default the port for plain HTTP; https origins keep 443.
+  if (!parsed.port && parsed.protocol === "http:") parsed.port = "8080";
   parsed.pathname = "";
   parsed.search = "";
   parsed.hash = "";

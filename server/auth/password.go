@@ -2,6 +2,7 @@ package auth
 
 import (
 	"errors"
+	"sync"
 	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
@@ -19,6 +20,24 @@ func HashPassword(password string) (string, error) {
 
 func VerifyPassword(password, encoded string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(encoded), []byte(password)) == nil
+}
+
+var (
+	dummyHashOnce sync.Once
+	dummyHash     string
+)
+
+// DummyPasswordHash returns a bcrypt hash of an opaque constant so that login
+// attempts against unknown emails still pay the full bcrypt cost. This removes
+// the timing oracle that allowed email enumeration.
+func DummyPasswordHash() string {
+	dummyHashOnce.Do(func() {
+		hash, err := HashPassword("oda-login-timing-equalizer-7c1f4d")
+		if err == nil {
+			dummyHash = hash
+		}
+	})
+	return dummyHash
 }
 
 // ValidatePasswordStrength checks that password is at least 8 characters long

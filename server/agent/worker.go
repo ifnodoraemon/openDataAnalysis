@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -456,7 +455,11 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 				cleanupCancel()
 				childEmit(RuntimeEvent{Type: EventRunCancelled, RunID: childRunID, Data: ErrorData{Message: "任务已取消"}})
 			}
-			return "", errors.Join(append([]error{childCtx.Err()}, cleanupErrors...)...)
+			failureErrs := make([]string, 0, len(cleanupErrors))
+			for _, cleanupErr := range cleanupErrors {
+				failureErrs = append(failureErrs, cleanupErr.Error())
+			}
+			return delegateToolFailure(childRunID, payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "delegate_cancelled", fmt.Sprintf("delegated task was cancelled: %v", childCtx.Err()), delegateStatusFacts(domain.RunStatusCancelled, failureErrs))
 		}
 
 		resp, err := llmClient.ChatWithTools(childCtx, bundle, toolSpecs)
@@ -615,11 +618,16 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 }
 
 func persistDelegateFailure(persistence DelegateRunPersistence, ctx context.Context, childRunID string, status domain.RunStatus, message *string, promptTokens, completionTokens int) []string {
+	// Terminal child-run state must outlive the parent context: an LLM call
+	// failing *because* the run was cancelled must still persist the failure,
+	// or the child run row stays "running" forever.
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
 	var failures []string
-	if err := persistence.UpdateChildRunStatus(ctx, childRunID, string(status), message); err != nil {
+	if err := persistence.UpdateChildRunStatus(persistCtx, childRunID, string(status), message); err != nil {
 		failures = append(failures, "update child status: "+err.Error())
 	}
-	if err := persistence.UpdateChildRunTokens(ctx, childRunID, promptTokens, completionTokens); err != nil {
+	if err := persistence.UpdateChildRunTokens(persistCtx, childRunID, promptTokens, completionTokens); err != nil {
 		failures = append(failures, "update child tokens: "+err.Error())
 	}
 	return failures

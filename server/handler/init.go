@@ -43,6 +43,7 @@ var (
 	semanticConfirmationRepo   repository.SemanticConfirmationRepository
 	semanticAssetRepo          repository.SemanticAssetRepository
 	auditEventRepo             repository.AuditEventRepository
+	revokedTokenRepo           repository.RevokedTokenRepository
 	ShutdownEventPersistWorker func()
 )
 
@@ -70,6 +71,11 @@ func Initialize() {
 		fileRepo = initSQLiteBackend()
 	default:
 		panic("unsupported metadata store: " + config.Cfg.MetadataStore)
+	}
+
+	tokenManager.SetRevocationStore(newRevocationStoreAdapter(revokedTokenRepo))
+	if err := tokenManager.LoadRevocations(context.Background()); err != nil {
+		panic("failed to load token revocations: " + err.Error())
 	}
 
 	if config.Cfg.BootstrapDefaultIdentity {
@@ -101,7 +107,14 @@ func Initialize() {
 	sourceConnectors.Register(service.NewMySQLConnector(sourceService))
 	sourceConnectors.Register(service.NewFileUploadConnector(sourceService, fileService))
 
-	sourceService.SetCredentialSecret(config.Cfg.AuthSecret)
+	// Datasource credentials use a dedicated secret when configured; otherwise
+	// a domain-separated derivation of AUTH_SECRET keeps credential encryption
+	// independent from token signing.
+	credentialSecret := config.Cfg.DatasourceCredentialSecret
+	if credentialSecret == "" {
+		credentialSecret = config.Cfg.AuthSecret
+	}
+	sourceService.SetCredentialSecret(credentialSecret)
 	sourceService.SetLiveConnectorResolver(func(sourceType domain.SourceType) (service.LiveQueryConnector, error) {
 		connector, err := sourceConnectors.Get(sourceType)
 		if err != nil {
@@ -159,6 +172,7 @@ func initSQLiteBackend() repository.FileRepository {
 	semanticConfirmationRepo = sqliterepo.NewSemanticConfirmationRepository(store.DB)
 	semanticAssetRepo = sqliterepo.NewSemanticAssetRepository(store.DB)
 	auditEventRepo = sqliterepo.NewAuditEventRepository(store.DB)
+	revokedTokenRepo = sqliterepo.NewRevokedTokenRepository(store.DB)
 	return fileRepo
 }
 
@@ -190,6 +204,7 @@ func initPostgresBackend() repository.FileRepository {
 	semanticConfirmationRepo = pgrepo.NewSemanticConfirmationRepository(pool)
 	semanticAssetRepo = pgrepo.NewSemanticAssetRepository(pool)
 	auditEventRepo = pgrepo.NewAuditEventRepository(pool)
+	revokedTokenRepo = pgrepo.NewRevokedTokenRepository(pool)
 
 	return fileRepo
 }

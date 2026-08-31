@@ -12,10 +12,12 @@ func TestTrustedReportScriptURL(t *testing.T) {
 		want bool
 	}{
 		{"http://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js", false},
-		{"https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js", true},
-		{"https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js", true},
+		{"https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js", false},
+		{"https://cdn.jsdelivr.net/gh/attacker/evil@1/echarts.min.js", false},
+		{"https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js", false},
 		{"https://evil.com/echarts.min.js", false},
 		{"/assets/echarts.min.js", true},
+		{"/assets/katex/katex.min.js", true},
 		{" /assets/echarts.min.js", false},
 		{"", false},
 		{"//cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js", false},

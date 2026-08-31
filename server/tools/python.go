@@ -96,13 +96,14 @@ type pyExecInput struct {
 }
 
 type pyExecResponse struct {
-	Success    bool     `json:"success"`
-	Stdout     string   `json:"stdout"`
-	Stderr     string   `json:"stderr"`
-	Error      *string  `json:"error"`
-	Files      []string `json:"files"`
-	DurationMs int      `json:"duration_ms"`
-	Truncated  bool     `json:"truncated"`
+	Success         bool           `json:"success"`
+	Stdout          string         `json:"stdout"`
+	Stderr          string         `json:"stderr"`
+	Error           *string        `json:"error"`
+	Files           []string       `json:"files"`
+	DurationMs      int            `json:"duration_ms"`
+	Truncated       bool           `json:"truncated"`
+	ExecutionLimits map[string]int `json:"execution_limits"`
 }
 
 func (t *RunPythonTool) endpointURL(path string) (string, error) {
@@ -326,15 +327,22 @@ func (t *RunPythonTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	artifacts := make([]ArtifactRecord, 0, len(result.Files))
-	for _, filePath := range result.Files {
-		artifact, artifactErr := t.persistExecutorArtifact(ctx, client, proxyToken, filePath, meta)
-		if artifactErr != nil {
-			return toolFailure("code_run_python", "artifact_persistence_failed", "Python output could not be persisted", map[string]interface{}{"detail": artifactErr.Error()}), nil
-		}
-		artifacts = append(artifacts, artifact)
-		if t.ReportState != nil {
-			if err := t.ReportState.RecordArtifact(artifact); err != nil {
-				return "", fmt.Errorf("failed to record Python artifact: %w", err)
+	if len(result.Files) > 0 {
+		// Artifact persistence gets its own timeout budget: code that ran
+		// close to its declared timeout must not lose outputs because the
+		// execution budget was already spent.
+		artifactCtx, artifactCancel := context.WithTimeout(context.WithoutCancel(execCtx), 60*time.Second)
+		defer artifactCancel()
+		for _, filePath := range result.Files {
+			artifact, artifactErr := t.persistExecutorArtifact(artifactCtx, client, proxyToken, filePath, meta)
+			if artifactErr != nil {
+				return toolFailure("code_run_python", "artifact_persistence_failed", "Python output could not be persisted", map[string]interface{}{"detail": artifactErr.Error()}), nil
+			}
+			artifacts = append(artifacts, artifact)
+			if t.ReportState != nil {
+				if err := t.ReportState.RecordArtifact(artifact); err != nil {
+					return "", fmt.Errorf("failed to record Python artifact: %w", err)
+				}
 			}
 		}
 	}
@@ -470,8 +478,12 @@ func formatPythonResult(result pyExecResponse, artifactLists ...[]ArtifactRecord
 		"duration_ms": result.DurationMs,
 		"stdout":      result.Stdout,
 		"stderr":      result.Stderr,
+		"truncated":   result.Truncated,
 		"files":       files,
 		"artifacts":   artifacts,
+	}
+	if len(result.ExecutionLimits) > 0 {
+		payload["execution_limits"] = result.ExecutionLimits
 	}
 	if result.Success {
 		payload["ui_summary"] = fmt.Sprintf("Python 执行成功，用时 %d 毫秒。", result.DurationMs)

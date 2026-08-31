@@ -46,7 +46,9 @@ type Config struct {
 	ProxyToken               string
 	PublicAPIBaseURL         string
 	AuthSecret               string
+	AuthCookieSecure         bool
 	TrustedProxyCIDRs        []*net.IPNet
+	DatasourceCredentialSecret string
 	DefaultUserID            string
 	DefaultUserEmail         string
 	DefaultUserName          string
@@ -61,6 +63,7 @@ type Config struct {
 	TempCleanupOnStart bool   // 启动时清理 TempDir
 	ReportEchartsUrl   string // ECharts 资源路径，默认为前端自托管静态资源
 	MetricsExpose      bool   // 是否公开 /metrics 端点，默认关闭（404）
+	MetricsAuthToken   string // /metrics 抓取所需的 Bearer token；为空时端点不鉴权（生产模式会校验失败）
 
 	// 数据源导入
 
@@ -128,7 +131,9 @@ func Load() {
 		ProxyToken:               getEnv("PROXY_TOKEN", ""),
 		PublicAPIBaseURL:         getEnv("PUBLIC_API_BASE_URL", ""),
 		AuthSecret:               getEnv("AUTH_SECRET", ""),
+		AuthCookieSecure:         getEnvBool("AUTH_COOKIE_SECURE", true),
 		TrustedProxyCIDRs:        parseTrustedProxyCIDRs(getEnvList("TRUSTED_PROXY_CIDRS", nil)),
+		DatasourceCredentialSecret: getEnv("DATASOURCE_CREDENTIAL_SECRET", ""),
 		DefaultUserID:            getEnv("DEFAULT_USER_ID", ""),
 		DefaultUserEmail:         getEnv("DEFAULT_USER_EMAIL", ""),
 		DefaultUserName:          getEnv("DEFAULT_USER_NAME", ""),
@@ -142,6 +147,7 @@ func Load() {
 		TempCleanupOnStart: getEnvBool("TEMP_CLEANUP_ON_START", false),
 		ReportEchartsUrl:   getEnv("REPORT_ECHARTS_URL", "/assets/echarts.min.js"),
 		MetricsExpose:      getEnvBool("METRICS_EXPOSE", false),
+		MetricsAuthToken:   getEnv("METRICS_AUTH_TOKEN", ""),
 
 		PostgresDSN:      getEnv("POSTGRES_DSN", ""),
 		S3Endpoint:       getEnv("S3_ENDPOINT", ""),
@@ -276,6 +282,12 @@ func (c *Config) ValidateProductionReadiness() error {
 			issues = append(issues, "S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY, and S3_SECRET_KEY must be configured when STORAGE_PROVIDER=s3")
 		}
 	}
+	if c.MetricsExpose && strings.TrimSpace(c.MetricsAuthToken) == "" {
+		issues = append(issues, "METRICS_AUTH_TOKEN must be configured when METRICS_EXPOSE=true; unauthenticated metrics endpoints leak operational data")
+	}
+	if !c.AuthCookieSecure {
+		issues = append(issues, "AUTH_COOKIE_SECURE must be true in production; the auth cookie must only be sent over HTTPS")
+	}
 	if len(issues) > 0 {
 		return fmt.Errorf("production deployment is not ready:\n- %s", strings.Join(issues, "\n- "))
 	}
@@ -340,23 +352,13 @@ func trustedReportScriptURL(raw string) bool {
 	if trimmed == "" || trimmed != raw {
 		return false
 	}
+	// Report chart/math runtimes load from same-origin static assets only.
+	// Third-party CDN URLs are rejected so report rendering never depends on
+	// (or trusts) external script origins.
 	if strings.HasPrefix(trimmed, "/") && !strings.HasPrefix(trimmed, "//") {
 		return true
 	}
-	parsed, err := url.Parse(trimmed)
-	if err != nil {
-		return false
-	}
-	if parsed.Scheme != "https" {
-		return false
-	}
-	host := strings.ToLower(parsed.Hostname())
-	switch host {
-	case "cdn.jsdelivr.net", "cdnjs.cloudflare.com":
-		return strings.HasSuffix(strings.ToLower(parsed.Path), "echarts.min.js")
-	default:
-		return false
-	}
+	return false
 }
 
 func parseTrustedProxyCIDRs(values []string) []*net.IPNet {

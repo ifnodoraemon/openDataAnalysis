@@ -187,6 +187,7 @@ func (s *SourceService) GetSessionSources(ctx context.Context, sessionID string)
 			RowsImported:           snapshot.RowsImported,
 			RowsSkipped:            snapshot.RowsSkipped,
 			ImportRowLimit:         snapshot.ImportRowLimit,
+			ImportUnbounded:        snapshot.Mode != domain.SnapshotModeLive && snapshot.ImportRowLimit == 0,
 			ImportTruncated:        snapshot.ImportTruncated,
 			ImportDurationMs:       snapshot.ImportDurationMs,
 			ProfileDurationMs:      snapshot.ProfileDurationMs,
@@ -600,7 +601,10 @@ type SessionSourceSummary struct {
 	LastImportedAt         time.Time `json:"last_imported_at"`
 	RowsImported           int       `json:"rows_imported"`
 	RowsSkipped            int       `json:"rows_skipped"`
+	// ImportRowLimit is 0 when the import ran without a row cap; the explicit
+	// ImportUnbounded flag disambiguates "no limit" from "not set".
 	ImportRowLimit         int       `json:"import_row_limit,omitempty"`
+	ImportUnbounded        bool      `json:"import_unbounded"`
 	ImportTruncated        bool      `json:"import_truncated,omitempty"`
 	ImportDurationMs       int       `json:"import_duration_ms"`
 	ProfileDurationMs      int       `json:"profile_duration_ms"`

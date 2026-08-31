@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -658,12 +659,17 @@ func ImportDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	} else {
 		bindMode = string(domain.SnapshotModeLive)
+		// Serialize live binds per session: concurrent binds of the same
+		// object could interleave snapshot creation, binding upsert, and
+		// superseded-snapshot cleanup into a corrupted binding.
+		sess.LockUpload()
 		result, err = sourceService.BindLiveSourceObject(r.Context(), service.LiveBindRequest{
 			SourceID:    sourceID,
 			WorkspaceID: identity.WorkspaceID,
 			SessionID:   req.SessionID,
 			Object:      service.SourceObjectRef{Schema: req.SchemaName, Name: req.ObjectName},
 		})
+		sess.UnlockUpload()
 	}
 	if err != nil {
 		if bindMode == string(domain.SnapshotModeLive) {
@@ -724,7 +730,8 @@ func ImportDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		PayloadJSON:  auditPayload,
 		CreatedAt:    time.Now(),
 	}); auditErr != nil {
-		resp["audit_errors"] = []string{auditErr.Error()}
+		log.Printf("record bind audit event failed session_id=%s source_id=%s err=%v", req.SessionID, sourceID, auditErr)
+		resp["audit_errors"] = []string{"审计事件记录失败"}
 	}
 
 	writeJSON(w, http.StatusOK, resp)

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,7 +20,13 @@ import (
 const liveQueryRowLimit = 200
 const liveQueryProbeRows = liveQueryRowLimit + 1
 
-func scanLiveQueryRows(ctx context.Context, rows *sql.Rows, dialect string) (*LiveQueryRows, error) {
+// scanLiveQueryRows streams up to maxRows rows; maxRows is the probe bound
+// (enforced row limit + 1) so the caller-declared limit is the limit actually
+// enforced, not a global constant.
+func scanLiveQueryRows(ctx context.Context, rows *sql.Rows, dialect string, maxRows int) (*LiveQueryRows, error) {
+	if maxRows < 1 {
+		return nil, fmt.Errorf("max_rows must be positive")
+	}
 	columns, err := rows.Columns()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read live query columns: %w", err)
@@ -50,8 +57,8 @@ func scanLiveQueryRows(ctx context.Context, rows *sql.Rows, dialect string) (*Li
 			}
 		}
 		result = append(result, row)
-		if len(result) >= liveQueryProbeRows {
-			return nil, fmt.Errorf("query exceeds the %d row limit", liveQueryRowLimit)
+		if len(result) >= maxRows {
+			return nil, fmt.Errorf("query exceeds the %d row limit", maxRows-1)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -98,6 +105,9 @@ type LiveQueryCall struct {
 	WorkspaceID    string
 	SQL            string
 	TimeoutSeconds int
+	// MaxRows is the probe bound (enforced row limit + 1). Zero falls back to
+	// the default live query probe bound.
+	MaxRows int
 }
 
 type LiveDescribeCall struct {
@@ -305,16 +315,21 @@ type LiveObjectQualifier interface {
 }
 
 func (s *SourceService) requireLiveBinding(ctx context.Context, sessionID, workspaceID, sourceID string) (*domain.DataSource, error) {
+	source, _, err := s.requireLiveBindings(ctx, sessionID, workspaceID, sourceID)
+	return source, err
+}
+
+func (s *SourceService) requireLiveBindings(ctx context.Context, sessionID, workspaceID, sourceID string) (*domain.DataSource, []domain.SessionSourceBinding, error) {
 	source, err := s.DataSourceRepo.GetByID(ctx, sourceID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if source.WorkspaceID != workspaceID {
-		return nil, repository.ErrNotFound
+		return nil, nil, repository.ErrNotFound
 	}
 	bindings, err := s.SessionSourceBindingRepo.GetBySession(ctx, sessionID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	bound := false
 	for _, binding := range bindings {
@@ -324,9 +339,9 @@ func (s *SourceService) requireLiveBinding(ctx context.Context, sessionID, works
 		}
 	}
 	if !bound {
-		return nil, fmt.Errorf("source %s is not bound to session %s", sourceID, sessionID)
+		return nil, nil, fmt.Errorf("source %s is not bound to session %s", sourceID, sessionID)
 	}
-	return source, nil
+	return source, bindings, nil
 }
 
 func (s *SourceService) ExecuteSessionLiveQuery(ctx context.Context, call LiveQueryCall) (*LiveQueryRows, error) {
@@ -336,19 +351,70 @@ func (s *SourceService) ExecuteSessionLiveQuery(ctx context.Context, call LiveQu
 	if call.TimeoutSeconds < 1 || call.TimeoutSeconds > int(data.QueryTimeoutLarge/time.Second) {
 		return nil, fmt.Errorf("timeout_seconds must be between 1 and %d", int(data.QueryTimeoutLarge/time.Second))
 	}
+	maxRows := call.MaxRows
+	if maxRows == 0 {
+		maxRows = liveQueryProbeRows
+	}
+	if maxRows < 2 || maxRows > liveQueryProbeRows {
+		return nil, fmt.Errorf("max_rows must be between 2 and %d", liveQueryProbeRows)
+	}
 	normalizedSQL, err := data.NormalizeReadOnlyQuery(call.SQL)
 	if err != nil {
 		return nil, err
 	}
-	source, err := s.requireLiveBinding(ctx, call.SessionID, call.WorkspaceID, call.SourceID)
+	source, bindings, err := s.requireLiveBindings(ctx, call.SessionID, call.WorkspaceID, call.SourceID)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.enforceLiveQueryObjectBoundary(ctx, call.SessionID, call.SourceID, bindings, normalizedSQL); err != nil {
 		return nil, err
 	}
 	connector, err := s.resolveLiveConnector(source.SourceType)
 	if err != nil {
 		return nil, err
 	}
-	return connector.ExecuteLiveQuery(ctx, call.SourceID, s.credentialSecret, normalizedSQL, call.TimeoutSeconds, liveQueryProbeRows)
+	return connector.ExecuteLiveQuery(ctx, call.SourceID, s.credentialSecret, normalizedSQL, call.TimeoutSeconds, maxRows)
+}
+
+// enforceLiveQueryObjectBoundary is a guardrail, not workflow logic: it blocks
+// live SQL that references objects outside the session's live-bound objects.
+// Bound objects come from the user-configured datasource allowlist at bind
+// time; CTE names defined in the query itself are allowed.
+func (s *SourceService) enforceLiveQueryObjectBoundary(ctx context.Context, sessionID, sourceID string, bindings []domain.SessionSourceBinding, normalizedSQL string) error {
+	allowed := make(map[string]struct{})
+	for _, binding := range bindings {
+		if binding.SourceID != sourceID {
+			continue
+		}
+		snapshot, err := s.SnapshotRepo.GetByID(ctx, binding.ActiveSnapshotID)
+		if err != nil {
+			return err
+		}
+		if snapshot.Mode != domain.SnapshotModeLive {
+			continue
+		}
+		allowed[strings.ToLower(snapshot.UpstreamSchema+"."+snapshot.UpstreamObject)] = struct{}{}
+		allowed[strings.ToLower(snapshot.UpstreamObject)] = struct{}{}
+	}
+	if len(allowed) == 0 {
+		return fmt.Errorf("session %s has no live-bound objects for source %s; bind an object first", sessionID, sourceID)
+	}
+
+	for _, ref := range data.ExtractQueryTableRefs(normalizedSQL) {
+		normalized := strings.ToLower(strings.TrimSpace(ref))
+		if _, ok := allowed[normalized]; ok {
+			continue
+		}
+		names := make([]string, 0, len(allowed))
+		for key := range allowed {
+			if strings.Contains(key, ".") {
+				names = append(names, key)
+			}
+		}
+		sort.Strings(names)
+		return fmt.Errorf("live query references %q which is outside the session's bound objects; bound objects for this source: %s (schema-qualified names are required for cross-schema references)", ref, strings.Join(names, ", "))
+	}
+	return nil
 }
 
 func (s *SourceService) ListSessionLiveTables(ctx context.Context, sessionID, workspaceID, sourceID string) ([]LiveTableFact, error) {

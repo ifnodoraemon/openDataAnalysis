@@ -17,6 +17,9 @@ let eventSourceSessionId = "";
 let connectPromise = null;
 let reconnectTimer = null;
 let reconnectDelay = RECONNECT_BASE_DELAY_MS;
+// Last SSE event id received for the current session; carried into manual
+// reconnects as last_event_id so the server replays anything missed.
+let lastEventId = "";
 let watchedSessionStore = null;
 
 export function useAgentTransport() {
@@ -93,13 +96,20 @@ export function useAgentTransport() {
     ) {
       return Promise.resolve(eventSourceInstance);
     }
+    // Dedupe in-flight connects for the same session before tearing anything
+    // down; closing the source first would leave the pending promise dangling.
+    if (connectPromise && eventSourceSessionId === store.sessionId) {
+      return connectPromise;
+    }
     if (eventSourceInstance) closeEventSource();
-    if (connectPromise) return connectPromise;
 
     store.setConnectionState("connecting");
     connected.value = false;
 
-    const url = `/api/sse?session_id=${encodeURIComponent(store.sessionId)}`;
+    let url = `/api/sse?session_id=${encodeURIComponent(store.sessionId)}`;
+    if (lastEventId) {
+      url += `&last_event_id=${encodeURIComponent(lastEventId)}`;
+    }
     const pending = new Promise((resolve, reject) => {
       const es = new EventSource(url);
       eventSourceInstance = es;
@@ -111,10 +121,19 @@ export function useAgentTransport() {
         reconnectDelay = RECONNECT_BASE_DELAY_MS;
         connected.value = true;
         store.setConnectionState("connected");
+        if (lastEventId) {
+          // This open is a reconnect: replayed events already restore most
+          // state, but run status persisted server-side is the source of
+          // truth for isRunning.
+          resyncSessionState().catch((err) => {
+            console.error("重连后状态同步失败", err);
+          });
+        }
         resolve(es);
       };
 
       es.onmessage = (e) => {
+        if (e.lastEventId) lastEventId = e.lastEventId;
         try {
           const data = JSON.parse(e.data);
           if (
@@ -152,12 +171,27 @@ export function useAgentTransport() {
     return pending;
   }
 
+  async function resyncSessionState() {
+    if (!store.sessionId) return;
+    const res = await request(`/api/sessions/${store.sessionId}`, {
+      headers: authHeaders(),
+    });
+    const data = await res.json();
+    store.setRuns(data.runs || []);
+    applyRuntimeState(data.runtimeState, store);
+    const activeRun = store.getRun(store.activeRunId);
+    if (activeRun && ["completed", "failed", "cancelled"].includes(activeRun.status)) {
+      store.finishRun();
+    }
+  }
+
   function disconnect() {
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
     reconnectDelay = RECONNECT_BASE_DELAY_MS;
+    lastEventId = "";
     closeEventSource();
     connected.value = false;
     store.setConnectionState("disconnected");
@@ -167,9 +201,13 @@ export function useAgentTransport() {
     if (watchedSessionStore === currentStore) return;
     watchedSessionStore = currentStore;
     watch(
-      () => currentStore.sessionId,
-      (nextSessionId) => {
-        if (!currentStore.token) return;
+      () => [currentStore.token, currentStore.sessionId],
+      ([nextToken, nextSessionId]) => {
+        if (!nextToken) {
+          // Token cleared (logout): the event stream must not stay open.
+          disconnect();
+          return;
+        }
         if (!nextSessionId) {
           disconnect();
           return;
@@ -365,7 +403,14 @@ export function useAgentTransport() {
     });
     const data = await res.json();
     if (data.session?.id !== sessionId) throw new Error("会话响应与请求不一致");
+    const switchingSessions = store.sessionId !== sessionId;
     store.setSession(data.session.id);
+    if (switchingSessions) {
+      // Switching sessions must not keep the previous session's chat on
+      // screen; run messages load explicitly via openRun.
+      store.setMessages([]);
+      store.finishRun();
+    }
     store.setRuns(data.runs || []);
     applyRuntimeState(data.runtimeState, store);
     await dataSourceStore.fetchSessionSources(sessionId);
@@ -381,6 +426,21 @@ export function useAgentTransport() {
     store.setMessages(deserializeRunMessages(data.messages));
     applyRuntimeState(data.runtimeState, store);
     return data.run;
+  }
+
+  async function logout() {
+    // Revoke the bearer token and session cookie server-side before clearing
+    // local state; a purely client-side logout would leave tokens valid.
+    try {
+      await request("/api/auth/logout", {
+        method: "POST",
+        headers: authHeaders(),
+      });
+    } catch (err) {
+      console.error("服务端登出失败", err);
+    }
+    disconnect();
+    store.logout();
   }
 
   async function renameSession(sessionId, title) {
@@ -424,6 +484,7 @@ export function useAgentTransport() {
     openSession,
     openRun,
     disconnect,
+    logout,
     sendMessage,
     stop,
     createNewSession,

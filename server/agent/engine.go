@@ -195,7 +195,10 @@ func adjustCompactionBoundary(history []ConversationItem, boundary int) int {
 	}
 	msg := history[boundary]
 	if msg.Role == LLMRoleTool {
-		for i := boundary - 1; i >= 0 && i >= boundary-10; i-- {
+		// Walk back until the owning assistant message is found; a fixed cap
+		// would cut mid-batch for large parallel tool-call batches and orphan
+		// tool results without their tool_calls message.
+		for i := boundary - 1; i >= 0; i-- {
 			if history[i].Role == LLMRoleAssistant && len(history[i].ToolCalls) > 0 {
 				toolCallCount := len(history[i].ToolCalls)
 				resultCount := 0
@@ -834,7 +837,6 @@ func buildAskUserToolResult(userResponse, receiptID string) (string, error) {
 		"ui_summary":    "已收到用户输入。",
 	}
 	if receiptID != "" {
-		payload["authorization_receipt_id"] = receiptID
 		payload["confirmation_receipt_id"] = receiptID
 	}
 	var parsed interface{}

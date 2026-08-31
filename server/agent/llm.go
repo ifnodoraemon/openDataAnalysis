@@ -755,7 +755,13 @@ func validateChatCompletionsResponse(resp *chatCompletionsResponse) error {
 				return fmt.Errorf("choice[%d] finish_reason tool_calls requires tool calls", i)
 			}
 		default:
-			return fmt.Errorf("choice[%d] has unsupported finish_reason %q", i, choice.FinishReason)
+			// Other finish reasons (length, content_filter, provider-specific
+			// values, or empty) must not discard an otherwise usable partial
+			// response; only reject when nothing actionable was returned.
+			hasContent := strings.TrimSpace(choice.Message.Content) != "" || strings.TrimSpace(choice.Message.ReasoningContent) != ""
+			if len(choice.Message.ToolCalls) == 0 && !hasContent {
+				return fmt.Errorf("choice[%d] has unsupported finish_reason %q and no usable content", i, choice.FinishReason)
+			}
 		}
 		for j, toolCall := range choice.Message.ToolCalls {
 			if toolCall.Type != LLMToolTypeFunction {

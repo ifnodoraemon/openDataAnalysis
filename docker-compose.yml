@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_DB: oda
       POSTGRES_USER: oda
-      POSTGRES_PASSWORD: oda_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-oda_password}
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
@@ -20,13 +20,13 @@ services:
       retries: 5
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     container_name: data-analysis-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     ports:
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:9001:9001"
@@ -49,15 +49,26 @@ services:
       LLM_DEBUG: "true"
       LLM_DEBUG_DIR: /app/data/llm-debug
       METADATA_STORE: postgres
-      POSTGRES_DSN: postgres://oda:oda_password@postgres:5432/oda?sslmode=disable
+      POSTGRES_DSN: postgres://oda:${POSTGRES_PASSWORD:-oda_password}@postgres:5432/oda?sslmode=disable
       STORAGE_PROVIDER: s3
       S3_ENDPOINT: http://minio:9000
       S3_REGION: us-east-1
       S3_BUCKET: oda-storage
-      S3_ACCESS_KEY: minioadmin
-      S3_SECRET_KEY: minioadmin
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
       S3_FORCE_PATH_STYLE: "true"
       METRICS_EXPOSE: "true"
+      METRICS_AUTH_TOKEN: ${METRICS_AUTH_TOKEN:-}
+      # This stack serves plain HTTP on port 80; the auth cookie must be
+      # allowed over HTTP or browsers drop it (breaking SSE). Set to "true"
+      # when deploying behind HTTPS.
+      AUTH_COOKIE_SECURE: "false"
+      # PROXY_TOKEN must match the python-executor; set it once in the root .env
+      # so both services share the same value.
+      PROXY_TOKEN: ${PROXY_TOKEN:?set PROXY_TOKEN in .env at the repo root (see .env.example)}
+      # The nginx proxy lives inside the compose bridge network below; trusting
+      # that subnet makes per-client rate limiting work behind the proxy.
+      TRUSTED_PROXY_CIDRS: 172.28.0.0/16
     expose:
       - "8080"
     volumes:
@@ -65,6 +76,7 @@ services:
       - python-workspace:/app/python-workspace
     networks:
       - app-network
+      - executor-network
     depends_on:
       python-executor:
         condition: service_healthy
@@ -88,12 +100,18 @@ services:
     build: ./python-executor
     container_name: data-analysis-python
     restart: unless-stopped
-    env_file: ./server/.env
+    environment:
+      PROXY_TOKEN: ${PROXY_TOKEN:?set PROXY_TOKEN in .env at the repo root (see .env.example)}
+      PYTHON_MAX_TIMEOUT_SECONDS: ${EXECUTOR_MAX_TIMEOUT_SECONDS:-120}
+      MEMORY_LIMIT_MB: ${EXECUTOR_MEMORY_LIMIT_MB:-512}
     volumes:
-      - ./data:/app/data:ro
       - python-workspace:/app/workspace
+    # The executor only needs to be reachable by the backend. Keeping it off
+    # app-network means a sandbox escape cannot reach postgres, minio, nginx,
+    # or the internet-facing services, and the container holds no
+    # control-plane secrets.
     networks:
-      - app-network
+      - executor-network
     mem_limit: 1g
     memswap_limit: 1g
     pids_limit: 128
@@ -114,7 +132,6 @@ services:
     restart: unless-stopped
     ports:
       - "80:8080"
-      - "443:8443"
     networks:
       - app-network
     depends_on:
@@ -135,6 +152,14 @@ services:
 networks:
   app-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+  executor-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
 
 volumes:
   python-workspace:

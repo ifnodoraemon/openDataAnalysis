@@ -87,7 +87,7 @@ defineEmits([
   "open-workspace-settings",
 ]);
 
-const { disconnect } = useAgentTransport();
+const { logout } = useAgentTransport();
 const store = useAgentStore();
 const dataSourceStore = useDataSourceStore();
 
@@ -103,10 +103,6 @@ const userInitial = computed(() => {
   return userName.value.charAt(0).toUpperCase();
 });
 
-function logout() {
-  disconnect();
-  store.logout();
-}
 </script>
 
 <style scoped>

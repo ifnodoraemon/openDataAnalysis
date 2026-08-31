@@ -202,6 +202,10 @@
                 </button>
               </div>
 
+              <div v-if="createError" class="error-banner">
+                {{ createError }}
+              </div>
+
               <div class="form-actions">
                 <button
                   class="btn-primary"
@@ -354,6 +358,7 @@ const importingSource = ref(null);
 const importCatalog = ref([]);
 const isImporting = ref(false);
 const importError = ref("");
+const createError = ref("");
 const isUploading = ref(false);
 
 const configurableSQLSourceTypes = computed(() =>
@@ -424,6 +429,7 @@ function resetSourceTypeFields() {
 
 async function handleCreateSource() {
   creating.value = true;
+  createError.value = "";
   try {
     await store.createSQLSource(
       newSource.value.name,
@@ -436,6 +442,11 @@ async function handleCreateSource() {
     );
     showCreateForm.value = false;
     newSource.value = defaultSQLSourceForm();
+  } catch (err) {
+    // Keep the form open with the entered values so the failure is visible
+    // and fixable instead of silently discarding the input.
+    createError.value =
+      "创建连接失败：" + (err?.message || "请检查连接配置后重试");
   } finally {
     creating.value = false;
   }
@@ -503,6 +514,14 @@ async function handleFileUpload(e) {
   const files = Array.from(e.target.files || []);
   if (files.length === 0) return;
   const uploadableFiles = files.filter((file) => file.size <= MAX_FILE_SIZE);
+  const rejectedFiles = files.filter((file) => file.size > MAX_FILE_SIZE);
+  if (rejectedFiles.length > 0) {
+    const names = rejectedFiles.map((file) => file.name).join("、");
+    alert(
+      `以下文件超过 ${MAX_FILE_SIZE / 1024 / 1024} MB 上限，已被跳过：${names}`,
+    );
+  }
+  if (uploadableFiles.length === 0) return;
 
   isUploading.value = true;
   try {

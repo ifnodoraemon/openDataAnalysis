@@ -10,8 +10,9 @@ import (
 )
 
 type mockWorkspaceRepo struct {
-	isMember bool
-	err      error
+	isMember   bool
+	memberRole domain.WorkspaceRole
+	err        error
 }
 
 func (m *mockWorkspaceRepo) GetByID(ctx context.Context, id string) (*domain.Workspace, error) {
@@ -22,6 +23,16 @@ func (m *mockWorkspaceRepo) ListByUser(ctx context.Context, userID string) ([]do
 }
 func (m *mockWorkspaceRepo) IsMember(ctx context.Context, workspaceID, userID string) (bool, error) {
 	return m.isMember, m.err
+}
+func (m *mockWorkspaceRepo) GetMemberRole(ctx context.Context, workspaceID, userID string) (domain.WorkspaceRole, bool, error) {
+	if !m.isMember {
+		return "", false, m.err
+	}
+	role := m.memberRole
+	if role == "" {
+		role = domain.WorkspaceRoleMember
+	}
+	return role, true, m.err
 }
 func (m *mockWorkspaceRepo) CreateWorkspace(ctx context.Context, ws *domain.Workspace) error {
 	return nil
@@ -65,5 +76,18 @@ func TestRequireWorkspaceRoleMiddleware(t *testing.T) {
 	handler.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 for member, got %d", rr.Code)
+	}
+
+	// Test role below requirement is rejected
+	repo = &mockWorkspaceRepo{isMember: true, memberRole: domain.WorkspaceRoleMember}
+	mw = RequireWorkspaceRole(repo, domain.WorkspaceRoleAdmin)
+	handler = mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req = httptest.NewRequest("GET", "/", nil).WithContext(WithIdentity(context.Background(), identity))
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for member against admin requirement, got %d", rr.Code)
 	}
 }

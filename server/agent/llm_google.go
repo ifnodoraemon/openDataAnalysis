@@ -88,6 +88,15 @@ func (l *LLMClient) chatGoogle(ctx context.Context, bundle *PromptBundle, toolSp
 	}
 
 	toolNames := make(map[string]string)
+	// Runtime context precedes history and uses the same transport wrapper as
+	// the OpenAI/Anthropic providers, so continuation turns cannot produce
+	// consecutive user-role contents.
+	for _, c := range bundle.RuntimeContext {
+		req.Contents = append(req.Contents, geminiContent{Role: "user", Parts: []geminiPart{{Text: fmt.Sprintf("[runtime_context role=%s name=%s]\n%s", runtimeContextTransportRole(c), c.Name, c.Content)}}})
+	}
+	if bundle.Task != "" {
+		req.Contents = append(req.Contents, geminiContent{Role: "user", Parts: []geminiPart{{Text: bundle.Task}}})
+	}
 	for _, h := range bundle.History {
 		if h.Role == LLMRoleUser {
 			req.Contents = append(req.Contents, geminiContent{
@@ -135,13 +144,6 @@ func (l *LLMClient) chatGoogle(ctx context.Context, bundle *PromptBundle, toolSp
 		}
 	}
 
-	for _, c := range bundle.RuntimeContext {
-		req.Contents = append(req.Contents, geminiContent{Role: "user", Parts: []geminiPart{{Text: fmt.Sprintf("[%s]: %s", c.Name, c.Content)}}})
-	}
-	if bundle.Task != "" {
-		req.Contents = append(req.Contents, geminiContent{Role: "user", Parts: []geminiPart{{Text: bundle.Task}}})
-	}
-
 	if len(toolSpecs) > 0 {
 		tool := geminiTool{
 			FunctionDeclarations: []geminiFunctionDeclaration{},
@@ -176,6 +178,9 @@ func (l *LLMClient) chatGoogle(ctx context.Context, bundle *PromptBundle, toolSp
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if apiKey := config.Cfg.LLMAPIKey; apiKey != "" {
+		httpReq.Header.Set("x-goog-api-key", apiKey)
+	}
 
 	resp, err := l.httpClient.Do(httpReq)
 	if err != nil {
@@ -204,8 +209,13 @@ func (l *LLMClient) chatGoogle(ctx context.Context, bundle *PromptBundle, toolSp
 	}
 
 	candidate := gResp.Candidates[0]
+	// A non-STOP finish reason (e.g. MAX_TOKENS) with usable content should
+	// not discard an otherwise valid partial response.
 	if candidate.FinishReason != "STOP" {
-		return nil, fmt.Errorf("Google API did not complete normally: finish_reason=%s", candidate.FinishReason)
+		log.Printf("Gemini finish_reason=%s parts=%d", candidate.FinishReason, len(candidate.Content.Parts))
+		if len(candidate.Content.Parts) == 0 {
+			return nil, fmt.Errorf("Google API did not complete normally: finish_reason=%s", candidate.FinishReason)
+		}
 	}
 	llmResp := &LLMResponse{
 		Choices: []LLMChoice{{Index: 0}},
@@ -252,16 +262,15 @@ func googleGenerateContentEndpoint(model string) (string, error) {
 	if base == "" {
 		return "", fmt.Errorf("LLM_API_ENDPOINT not configured")
 	}
-	apiKey := config.Cfg.LLMAPIKey
+	// The API key travels in the x-goog-api-key header, never in the URL:
+	// transport errors echo the full URL, which would leak the secret into logs.
 	base = strings.ReplaceAll(base, "{model}", url.PathEscape(model))
 	parsed, err := url.Parse(base)
 	if err != nil {
 		return "", fmt.Errorf("invalid Google API endpoint: %w", err)
 	}
-	if apiKey != "" && parsed.Query().Get("key") == "" {
-		query := parsed.Query()
-		query.Set("key", apiKey)
-		parsed.RawQuery = query.Encode()
+	if parsed.Query().Get("key") != "" {
+		return "", fmt.Errorf("LLM_API_ENDPOINT must not carry the API key in a query parameter; use the LLM_API_KEY config instead")
 	}
 	return parsed.String(), nil
 }

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -31,10 +32,42 @@ type Claims struct {
 type TokenManager struct {
 	secret  []byte
 	revoker *Revoker
+	store   RevocationStore
+}
+
+// RevocationStore persists token revocations so the jti denylist survives
+// process restarts. Implementations must be safe for concurrent use.
+type RevocationStore interface {
+	SaveRevocation(ctx context.Context, jti string, expiresAt time.Time) error
+	LoadRevocations(ctx context.Context) (map[string]time.Time, error)
+	PruneRevocations(ctx context.Context, now time.Time) error
 }
 
 func NewTokenManager(secret string) *TokenManager {
 	return &TokenManager{secret: []byte(secret), revoker: NewRevoker()}
+}
+
+// SetRevocationStore attaches a persistence backend for revocations.
+func (m *TokenManager) SetRevocationStore(store RevocationStore) {
+	m.store = store
+}
+
+// LoadRevocations prunes expired persisted rows and restores the active
+// denylist from the store. It must be called before the server starts
+// accepting traffic.
+func (m *TokenManager) LoadRevocations(ctx context.Context) error {
+	if m.store == nil {
+		return nil
+	}
+	if err := m.store.PruneRevocations(ctx, time.Now()); err != nil {
+		return fmt.Errorf("prune revoked tokens: %w", err)
+	}
+	revocations, err := m.store.LoadRevocations(ctx)
+	if err != nil {
+		return fmt.Errorf("load revoked tokens: %w", err)
+	}
+	m.revoker.ReplaceAll(revocations)
+	return nil
 }
 
 func (m *TokenManager) Sign(identity Identity, ttl time.Duration) (string, error) {
@@ -104,7 +137,15 @@ func (m *TokenManager) Revoke(token string) error {
 	if claims.JWTID == "" {
 		return errors.New("token has no jti")
 	}
-	m.revoker.Revoke(claims.JWTID, time.Unix(claims.ExpiresAt, 0))
+	expiresAt := time.Unix(claims.ExpiresAt, 0)
+	m.revoker.Revoke(claims.JWTID, expiresAt)
+	if m.store != nil {
+		if err := m.store.SaveRevocation(context.Background(), claims.JWTID, expiresAt); err != nil {
+			// The in-memory denylist still enforces the revocation for this
+			// process; surface the persistence failure to the caller.
+			return fmt.Errorf("persist token revocation: %w", err)
+		}
+	}
 	return nil
 }
 

@@ -7,7 +7,10 @@ import (
 	"time"
 )
 
-func TestMiddlewareAcceptsQueryTokenOnlyForEventStream(t *testing.T) {
+// Query-parameter tokens must be rejected everywhere, including the event
+// stream: tokens in URLs leak through access logs, proxies, and referrers.
+// The event stream authenticates via cookie or the Authorization header.
+func TestMiddlewareRejectsQueryTokenEverywhere(t *testing.T) {
 	t.Parallel()
 
 	manager := NewTokenManager("test-secret")
@@ -33,7 +36,15 @@ func TestMiddlewareAcceptsQueryTokenOnlyForEventStream(t *testing.T) {
 	eventRequest := httptest.NewRequest(http.MethodGet, "/api/sse?token="+token, nil)
 	eventRecorder := httptest.NewRecorder()
 	handler.ServeHTTP(eventRecorder, eventRequest)
-	if eventRecorder.Code != http.StatusNoContent {
-		t.Fatalf("expected event stream query token acceptance, got %d", eventRecorder.Code)
+	if eventRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected event stream query token rejection, got %d", eventRecorder.Code)
+	}
+
+	headerRequest := httptest.NewRequest(http.MethodGet, "/api/sse", nil)
+	headerRequest.Header.Set("Authorization", "Bearer "+token)
+	headerRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(headerRecorder, headerRequest)
+	if headerRecorder.Code != http.StatusNoContent {
+		t.Fatalf("expected Authorization header acceptance on event stream, got %d", headerRecorder.Code)
 	}
 }

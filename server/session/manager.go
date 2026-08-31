@@ -242,6 +242,9 @@ func (m *Manager) Delete(sessionID, workspaceID, userID string) error {
 			m.mu.Unlock()
 			return fmt.Errorf("not authorized to access this session")
 		}
+		sess.mu.Lock()
+		sess.detached = true
+		sess.mu.Unlock()
 		delete(m.sessions, sessionID)
 	}
 	m.mu.Unlock()

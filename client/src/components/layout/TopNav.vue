@@ -36,7 +36,7 @@ import { computed } from "vue";
 import { useAgentTransport } from "../../composables/useAgentTransport.js";
 import { useAgentStore } from "../../stores/agent.js";
 
-const { connected, createNewSession, disconnect, switchWorkspace } =
+const { connected, createNewSession, logout, switchWorkspace } =
   useAgentTransport();
 const store = useAgentStore();
 const workspaceOptions = computed(() => store.workspaces || []);
@@ -74,10 +74,6 @@ async function handleWorkspaceChange(event) {
   }
 }
 
-function logout() {
-  disconnect();
-  store.logout();
-}
 </script>
 
 <style scoped>

@@ -25,7 +25,7 @@ def _executor_available():
 
 
 requires_executor = pytest.mark.skipif(
-    not _executor_available(),
+    not _executor_available() and not os.environ.get("REQUIRE_EXECUTOR"),
     reason="python executor is not running",
 )
 

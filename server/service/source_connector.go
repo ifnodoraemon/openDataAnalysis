@@ -224,6 +224,7 @@ func (s *SourceService) BeginSnapshotImport(ctx context.Context, sessionID, sour
 		Status:            domain.SnapshotStatusCreating,
 		ImportedAt:        time.Now(),
 		ProfileMode:       domain.ProfileModePending,
+		Mode:              domain.SnapshotModeImported,
 	}
 	if err := s.SnapshotRepo.Create(ctx, snapshot); err != nil {
 		return nil, fmt.Errorf("failed to create source snapshot: %w", err)

@@ -86,6 +86,17 @@ func (r *WorkspaceRepository) IsMember(ctx context.Context, workspaceID, userID 
 	return ok, nil
 }
 
+func (r *WorkspaceRepository) GetMemberRole(ctx context.Context, workspaceID, userID string) (domain.WorkspaceRole, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	roles, ok := r.members[workspaceID]
+	if !ok {
+		return "", false, nil
+	}
+	role, ok := roles[userID]
+	return role, ok, nil
+}
+
 func (r *WorkspaceRepository) ListByUser(ctx context.Context, userID string) ([]domain.Workspace, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

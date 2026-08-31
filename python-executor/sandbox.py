@@ -6,7 +6,12 @@ Defense-in-depth layers:
 2. Import whitelist — only allow pre-declared safe modules.
 3. Builtins filtering — remove eval/exec/compile/__import__/type/getattr etc.
 4. Restricted open — file access confined to the request working directory.
-5. Error sanitization — strip internal paths from tracebacks shown to users.
+5. Deserialization guard — block pickle-based loaders and allow_pickle kwargs.
+6. Error sanitization — strip internal paths from tracebacks shown to users.
+
+This filtering is one layer, not the boundary: the executor container also
+runs without capabilities, read-only, with rlimits, on an isolated network,
+and without control-plane secrets.
 """
 
 import ast
@@ -56,9 +61,19 @@ BLOCKED_ATTR_NAMES = frozenset({
     "open", "input", "help", "memoryview", "bytearray",
     "exec", "__import__", "globals", "locals", "vars",
     "getattr", "setattr", "delattr", "breakpoint",
+    # Pickle-based (de)serialization loaders execute arbitrary code with a
+    # crafted payload; block them in allowed libraries (pandas etc.) too.
+    "read_pickle", "to_pickle", "read_msgpack", "read_sas", "read_spss",
+    "read_stata", "load_module", "find_module", "spec_from_file_location",
+    "exec_module", "source_from_cache", "dill", "cloudpickle", "joblib",
 })
 
 BLOCKED_ATTRIBUTE_NAMES = BLOCKED_DUNDER_ATTRS | BLOCKED_ATTR_NAMES
+
+# Keyword arguments that enable code-executing deserialization paths.
+BLOCKED_KEYWORD_ARGUMENTS = frozenset({
+    "allow_pickle",
+})
 
 
 class SecurityViolation(Exception):
@@ -117,6 +132,11 @@ def check_code(code: str) -> None:
                 raise SecurityViolation(
                     f"call to '{func.id}' is not allowed"
                 )
+            for keyword in node.keywords:
+                if keyword.arg is not None and keyword.arg in BLOCKED_KEYWORD_ARGUMENTS:
+                    raise SecurityViolation(
+                        f"keyword argument '{keyword.arg}' is not allowed"
+                    )
 
         elif isinstance(node, ast.Name):
             if (

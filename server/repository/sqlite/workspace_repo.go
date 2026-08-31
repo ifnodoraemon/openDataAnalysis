@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 )
@@ -53,6 +54,18 @@ func (r *WorkspaceRepository) IsMember(ctx context.Context, workspaceID, userID 
 		return false, err
 	}
 	return count > 0, nil
+}
+
+func (r *WorkspaceRepository) GetMemberRole(ctx context.Context, workspaceID, userID string) (domain.WorkspaceRole, bool, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?`, workspaceID, userID)
+	var role string
+	if err := row.Scan(&role); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return domain.WorkspaceRole(role), true, nil
 }
 
 func (r *WorkspaceRepository) CreateWorkspace(ctx context.Context, workspace *domain.Workspace) error {

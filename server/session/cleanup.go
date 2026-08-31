@@ -52,12 +52,16 @@ func (m *Manager) CleanupExpiredSessions(ttlHours int) (int, error) {
 			sess.mu.Lock()
 			isStillIdle := sess.ActiveRun == nil || sess.ActiveRun.Status != "running"
 			stillExpired := sess.LastSeenAt.Before(cutoff)
-			sess.mu.Unlock()
 			if !isStillIdle || !stillExpired {
 				// 状态已改变，跳过该会话
+				sess.mu.Unlock()
 				m.mu.Unlock()
 				continue
 			}
+			// 先打 detached 标记再移除：持有旧指针的 handler 后续 StartRun 会直接失败，
+			// 不会把新 run 写进正在删除的资源。
+			sess.detached = true
+			sess.mu.Unlock()
 			delete(m.sessions, id)
 		}
 		m.mu.Unlock()
@@ -66,17 +70,25 @@ func (m *Manager) CleanupExpiredSessions(ttlHours int) (int, error) {
 			continue
 		}
 
-		// 已摘除但尚未关闭的会话：在锁外取消其残留 run，避免删除期间继续写入
+		// 已摘除但尚未关闭的会话：在锁外取消其残留 run，并等待其退出，
+		// 避免删除期间继续写入。
 		if sess != nil {
 			sess.CancelRun("")
+			if !sess.WaitUntilIdle(sessionStopTimeout) {
+				log.Printf("cleanup: session %s still busy after cancel; proceeding with deletion", id)
+			}
 		}
 
 		cleanErr := deleteSession(context.Background(), id)
 		if cleanErr != nil {
 			resultErr = errors.Join(resultErr, fmt.Errorf("delete expired session %s: %w", id, cleanErr))
-			// 删除失败时回填内存对象，保持内存与 DB 一致（若期间已被重建则跳过）
+			// 删除失败时回填内存对象，保持内存与 DB 一致（若期间已被重建则跳过）；
+			// 回填前清除 detached，允许后续重试正常使用。
 			m.mu.Lock()
 			if _, exists := m.sessions[id]; !exists {
+				sess.mu.Lock()
+				sess.detached = false
+				sess.mu.Unlock()
 				m.sessions[id] = sess
 			}
 			m.mu.Unlock()

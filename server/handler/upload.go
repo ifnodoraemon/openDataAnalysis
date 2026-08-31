@@ -84,7 +84,11 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := r.ParseMultipartForm(100 << 20); err != nil {
+	// maxMemory is the in-RAM threshold for multipart parsing; anything above
+	// spills to temp files. The 100MB total body cap is enforced separately by
+	// MaxBodySizeMiddleware, so a small threshold avoids OOM under concurrent
+	// uploads without reducing the allowed upload size.
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
 		http.Error(w, "解析上传请求失败", http.StatusBadRequest)
 		return
 	}

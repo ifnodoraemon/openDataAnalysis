@@ -169,6 +169,9 @@ func (s *SourceService) FetchMySQLLiveObjectMetadata(ctx context.Context, source
 		if errors.Is(estimateErr, sql.ErrNoRows) {
 			return nil, fmt.Errorf("upstream object %s.%s does not exist", object.Schema, object.Name)
 		}
+		// A failed estimate must surface as an error, not silently become the
+		// structural fact row_count_estimate=0.
+		return nil, fmt.Errorf("failed to estimate row count for %s.%s: %w", object.Schema, object.Name, estimateErr)
 	}
 	if !estimate.Valid || estimate.Int64 < 0 {
 		estimate.Int64 = 0
@@ -217,7 +220,7 @@ func (s *SourceService) ExecuteMySQLLiveQuery(ctx context.Context, sourceConfig 
 		return nil, fmt.Errorf("live query execution failed: %w", err)
 	}
 	defer rows.Close()
-	return scanLiveQueryRows(queryCtx, rows, "mysql")
+	return scanLiveQueryRows(queryCtx, rows, "mysql", maxRows)
 }
 
 func quoteMySQLIdentifier(name string) (string, error) {

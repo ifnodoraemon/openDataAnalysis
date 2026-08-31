@@ -64,18 +64,22 @@ func (t *ListTablesTool) Execute(args json.RawMessage) (string, error) {
 	return t.executeLocal()
 }
 
-func (t *ListTablesTool) toolContext() context.Context {
+func (t *ListTablesTool) toolContext() (context.Context, error) {
 	if t.childCtx != nil {
-		return t.childCtx
+		return t.childCtx, nil
 	}
-	return context.Background()
+	return nil, fmt.Errorf("execution context is not initialized for this tool call")
 }
 
 func (t *ListTablesTool) executeLive(sourceID string) (string, error) {
 	if t.LiveTables == nil {
 		return toolFailure("data_list_tables", "live_unavailable", "live table listing is not configured for this session", map[string]interface{}{"source_id": sourceID}), nil
 	}
-	facts, err := t.LiveTables(t.toolContext(), sourceID)
+	ctx, ctxErr := t.toolContext()
+	if ctxErr != nil {
+		return toolFailure("data_list_tables", "execution_context_missing", ctxErr.Error(), map[string]interface{}{"source_id": sourceID}), nil
+	}
+	facts, err := t.LiveTables(ctx, sourceID)
 	if err != nil {
 		return toolFailure("data_list_tables", "live_table_list_failed", "failed to list live source tables", map[string]interface{}{
 			"source_id": sourceID,
@@ -207,11 +211,11 @@ func (t *DescribeDataTool) Execute(args json.RawMessage) (string, error) {
 	return t.executeLocal(params.TableName, *params.SampleRows)
 }
 
-func (t *DescribeDataTool) toolContext() context.Context {
+func (t *DescribeDataTool) toolContext() (context.Context, error) {
 	if t.childCtx != nil {
-		return t.childCtx
+		return t.childCtx, nil
 	}
-	return context.Background()
+	return nil, fmt.Errorf("execution context is not initialized for this tool call")
 }
 
 func (t *DescribeDataTool) executeLive(params struct {
@@ -228,7 +232,13 @@ func (t *DescribeDataTool) executeLive(params struct {
 			"source_id": params.SourceID,
 		}), nil
 	}
-	description, err := t.LiveDescribe(t.toolContext(), params.SourceID, params.SchemaName, params.TableName, *params.SampleRows)
+	description, err := func() (*LiveTableDescription, error) {
+		ctx, ctxErr := t.toolContext()
+		if ctxErr != nil {
+			return nil, ctxErr
+		}
+		return t.LiveDescribe(ctx, params.SourceID, params.SchemaName, params.TableName, *params.SampleRows)
+	}()
 	if err != nil {
 		return toolFailure("data_describe_table", "schema_lookup_failed", "failed to read live table structure", map[string]interface{}{
 			"source_id":   params.SourceID,

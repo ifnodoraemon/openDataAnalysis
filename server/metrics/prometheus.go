@@ -1,13 +1,14 @@
 package metrics
 
 import (
-	"bufio"
-	"fmt"
-	"net"
+	"crypto/subtle"
+	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -65,9 +66,35 @@ func init() {
 	prometheus.MustRegister(SemanticConfirmationsTotal)
 }
 
-// Handler returns an http.Handler for the Prometheus /metrics endpoint.
+// Handler returns the unauthenticated Prometheus handler. Prefer
+// ProtectedHandler, which gates scraping behind a bearer token.
 func Handler() http.Handler {
 	return promhttp.Handler()
+}
+
+// ProtectedHandler returns the Prometheus handler, gated by a constant-time
+// bearer-token check. An empty token keeps the endpoint unauthenticated and
+// logs a warning; production readiness validation rejects that combination.
+func ProtectedHandler(token string) http.Handler {
+	scrape := promhttp.Handler()
+	trimmed := strings.TrimSpace(token)
+	if trimmed == "" {
+		log.Printf("metrics: METRICS_EXPOSE is enabled without METRICS_AUTH_TOKEN; the endpoint is unauthenticated")
+		return scrape
+	}
+	expected := []byte("Bearer " + trimmed)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		provided := []byte(strings.TrimSpace(r.Header.Get("Authorization")))
+		if subtle.ConstantTimeCompare(provided, expected) != 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			if _, err := w.Write([]byte(`{"error":"metrics 访问未授权"}`)); err != nil {
+				log.Printf("metrics: write unauthorized response: %v", err)
+			}
+			return
+		}
+		scrape.ServeHTTP(w, r)
+	})
 }
 
 type statusRecorder struct {
@@ -80,17 +107,23 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
-func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	if hj, ok := r.ResponseWriter.(http.Hijacker); ok {
-		return hj.Hijack()
-	}
-	return nil, nil, fmt.Errorf("http.ResponseWriter does not implement http.Hijacker")
-}
-
 func (r *statusRecorder) Flush() {
 	if f, ok := r.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// routeLabel returns a bounded-cardinality path label. Registered route
+// patterns (e.g. "/api/sessions/{sessionID}") collapse URL parameters;
+// unmatched requests collapse to a single "unmatched" label so arbitrary
+// request paths cannot grow the label set.
+func routeLabel(r *http.Request) string {
+	if routeCtx := chi.RouteContext(r.Context()); routeCtx != nil {
+		if pattern := routeCtx.RoutePattern(); pattern != "" {
+			return pattern
+		}
+	}
+	return "unmatched"
 }
 
 // Middleware records Prometheus HTTP request counts and durations.
@@ -102,7 +135,7 @@ func Middleware(next http.Handler) http.Handler {
 		next.ServeHTTP(rec, r)
 
 		duration := time.Since(start).Seconds()
-		path := r.URL.Path
+		path := routeLabel(r)
 
 		HTTPRequestsTotal.WithLabelValues(strconv.Itoa(rec.statusCode), r.Method, path).Inc()
 		HTTPRequestDuration.WithLabelValues(r.Method, path).Observe(duration)
