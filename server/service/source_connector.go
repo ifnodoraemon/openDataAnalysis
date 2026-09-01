@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -168,6 +169,19 @@ type SourceImportRequest struct {
 	Ingester       *data.Ingester
 	AuthSecret     string
 	ImportRowLimit int
+	// Worksheet selects a single sheet from multi-sheet Excel workbooks.
+	// Empty means the workbook must contain exactly one sheet.
+	Worksheet string
+}
+
+// WorksheetSelectionError reports that an Excel workbook contains multiple
+// worksheets and the caller must choose one before importing.
+type WorksheetSelectionError struct {
+	Sheets []string
+}
+
+func (e *WorksheetSelectionError) Error() string {
+	return fmt.Sprintf("Excel workbook has %d worksheets; one must be selected", len(e.Sheets))
 }
 
 type SnapshotImportCompletion struct {
@@ -518,6 +532,15 @@ func (c *FileUploadConnector) Import(ctx context.Context, req SourceImportReques
 	}
 	defer os.Remove(tempPath)
 
+	// Multi-sheet workbooks need an explicit choice; surface the sheet list
+	// before any snapshot/import state is created.
+	if strings.TrimSpace(req.Worksheet) == "" && strings.EqualFold(filepath.Ext(tempPath), ".xlsx") {
+		sheets, sheetErr := data.ExcelSheetNames(tempPath)
+		if sheetErr == nil && len(sheets) > 1 {
+			return nil, &WorksheetSelectionError{Sheets: sheets}
+		}
+	}
+
 	preSnapshot, err := c.Sources.BeginSnapshotImport(
 		ctx, req.SessionID, ds.ID,
 		string(domain.SourceTypeFileUpload), "", "",
@@ -527,7 +550,7 @@ func (c *FileUploadConnector) Import(ctx context.Context, req SourceImportReques
 	}
 
 	importStart := time.Now()
-	tableName, rowCount, colCount, err := req.Ingester.ImportFileRawAs(tempPath, preSnapshot.AnalysisTableName)
+	tableName, rowCount, colCount, err := req.Ingester.ImportFileRawAs(tempPath, preSnapshot.AnalysisTableName, req.Worksheet)
 	importDuration := time.Since(importStart)
 	if err != nil {
 		errMsg := err.Error()

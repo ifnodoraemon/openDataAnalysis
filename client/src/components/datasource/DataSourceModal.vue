@@ -40,6 +40,33 @@
         </aside>
 
         <main class="modal-content-area">
+          <!-- Worksheet picker for multi-sheet Excel uploads -->
+          <div
+            v-if="pendingWorksheet && currentTab === 'active'"
+            class="worksheet-picker"
+          >
+            <div class="worksheet-picker-header">
+              <strong>{{ pendingWorksheet.filename }}</strong>
+              <span
+                >包含 {{ pendingWorksheet.sheets.length }} 个工作表，请选择要导入的一个：</span
+              >
+              <button class="btn-text" @click="cancelWorksheetSelection">
+                取消
+              </button>
+            </div>
+            <div class="worksheet-list">
+              <button
+                v-for="sheet in pendingWorksheet.sheets"
+                :key="sheet"
+                class="worksheet-btn"
+                :disabled="isImportingSheet"
+                @click="handleSelectWorksheet(sheet)"
+              >
+                {{ isImportingSheet ? "导入中..." : sheet }}
+              </button>
+            </div>
+          </div>
+
           <!-- Tab: Active Session Sources -->
           <div v-if="currentTab === 'active'" class="tab-pane">
             <div class="section-header">
@@ -359,6 +386,8 @@ const importCatalog = ref([]);
 const isImporting = ref(false);
 const importError = ref("");
 const createError = ref("");
+const pendingWorksheet = ref(null);
+const isImportingSheet = ref(false);
 const isUploading = ref(false);
 
 const configurableSQLSourceTypes = computed(() =>
@@ -542,9 +571,25 @@ async function handleFileUpload(e) {
       if (!response.ok) {
         throw new Error((await response.text()) || `HTTP ${response.status}`);
       }
+      const data = await response.json().catch(() => null);
+      if (data?.ingest_status === "worksheet_selection_required") {
+        pendingWorksheet.value = {
+          sourceId: data.source_id,
+          sessionId,
+          filename: file.name,
+          sheets: data.worksheets || [],
+        };
+        currentTab.value = "active";
+        continue;
+      }
+      if (data?.ingest_status === "failed") {
+        throw new Error(data.message || "文件已上传，但导入失败");
+      }
     }
-    await store.fetchSessionSources(sessionId);
-    currentTab.value = "active";
+    if (!pendingWorksheet.value) {
+      await store.fetchSessionSources(sessionId);
+      currentTab.value = "active";
+    }
   } catch (err) {
     alert("上传失败：" + err.message);
   } finally {
@@ -552,9 +597,77 @@ async function handleFileUpload(e) {
     e.target.value = "";
   }
 }
+
+async function handleSelectWorksheet(sheet) {
+  const pending = pendingWorksheet.value;
+  if (!pending || !sheet) return;
+  isImportingSheet.value = true;
+  try {
+    const result = await store.importFromSource(
+      pending.sourceId,
+      pending.sessionId,
+      "",
+      "",
+      sheet,
+    );
+    if (result?.ok === false) {
+      throw new Error(result.error || "导入失败");
+    }
+    pendingWorksheet.value = null;
+    await store.fetchSessionSources(pending.sessionId);
+  } catch (err) {
+    alert("导入工作表失败：" + err.message);
+  } finally {
+    isImportingSheet.value = false;
+  }
+}
+
+function cancelWorksheetSelection() {
+  pendingWorksheet.value = null;
+}
 </script>
 
 <style scoped>
+.worksheet-picker {
+  margin: 0 0 16px;
+  padding: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--bg-card);
+}
+
+.worksheet-picker-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.worksheet-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.worksheet-btn {
+  padding: 6px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-app);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.worksheet-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.worksheet-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
 .modal-overlay {
   position: fixed;
   top: 0;

@@ -174,15 +174,29 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 	if !importerOK {
 		ingestErr = fmt.Errorf("source type %s does not support importing", source.SourceType)
 	} else {
+		worksheet := strings.TrimSpace(r.FormValue("worksheet"))
+		if worksheet != "" && worksheet != r.FormValue("worksheet") {
+			http.Error(w, "worksheet 必须保持原值", http.StatusBadRequest)
+			return
+		}
 		ingestResult, ingestErr = importer.Import(r.Context(), service.SourceImportRequest{
 			SourceID:    source.ID,
 			WorkspaceID: sess.WorkspaceID,
 			SessionID:   sess.ID,
 			Ingester:    runtimeSession.Ingester,
+			Worksheet:   worksheet,
 		})
 	}
 	runtimeSession.UnlockUpload()
 	if ingestErr != nil {
+		var wsErr *service.WorksheetSelectionError
+		if errors.As(ingestErr, &wsErr) {
+			resp["ingest_status"] = "worksheet_selection_required"
+			resp["worksheets"] = wsErr.Sheets
+			resp["message"] = "文件包含多个工作表，请选择要导入的工作表"
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
 		log.Printf("upload: materialize failed file_id=%s err=%v", uploaded.ID, ingestErr)
 		resp["ingest_status"] = "failed"
 		resp["message"] = "文件已上传，但导入失败"

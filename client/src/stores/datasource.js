@@ -146,7 +146,13 @@ export const useDataSourceStore = defineStore("dataSource", () => {
     });
   }
 
-  async function importFromSource(sourceId, sessionId, schemaName, objectName) {
+  async function importFromSource(
+    sourceId,
+    sessionId,
+    schemaName,
+    objectName,
+    worksheet = "",
+  ) {
     const result = await requestJSON(`/api/data-sources/${sourceId}/import`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -154,6 +160,7 @@ export const useDataSourceStore = defineStore("dataSource", () => {
         session_id: sessionId,
         schema_name: schemaName,
         object_name: objectName,
+        worksheet,
       }),
       defaultMessage: "导入数据失败",
     });

@@ -129,10 +129,12 @@ func removeSQLiteSidecars(dbPath string) error {
 func (ing *Ingester) ImportFileRaw(filePath string) (tableName string, rowCount int, colCount int, err error) {
 	ext := strings.ToLower(filepath.Ext(filePath))
 	baseName := strings.TrimSuffix(filepath.Base(filePath), ext)
-	return ing.ImportFileRawAs(filePath, baseName)
+	return ing.ImportFileRawAs(filePath, baseName, "")
 }
 
-func (ing *Ingester) ImportFileRawAs(filePath, requestedTableName string) (tableName string, rowCount int, colCount int, err error) {
+// ImportFileRawAs imports a file under an exact table name. An empty worksheet
+// selection requires the workbook to contain exactly one sheet.
+func (ing *Ingester) ImportFileRawAs(filePath, requestedTableName, worksheet string) (tableName string, rowCount int, colCount int, err error) {
 	ext := strings.ToLower(filepath.Ext(filePath))
 	if err := ValidateSQLIdent(requestedTableName); err != nil {
 		return "", 0, 0, fmt.Errorf("invalid exact table name: %w", err)
@@ -142,11 +144,22 @@ func (ing *Ingester) ImportFileRawAs(filePath, requestedTableName string) (table
 	case ".csv":
 		rowCount, colCount, err = ing.importCSV(filePath, tableName)
 	case ".xlsx":
-		rowCount, colCount, err = ing.importExcel(filePath, tableName)
+		rowCount, colCount, err = ing.importExcel(filePath, tableName, worksheet)
 	default:
 		err = fmt.Errorf("unsupported file format: %s", ext)
 	}
 	return
+}
+
+// ExcelSheetNames lists the worksheet names of an Excel workbook without
+// importing anything.
+func ExcelSheetNames(filePath string) ([]string, error) {
+	f, err := excelize.OpenFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open Excel file: %w", err)
+	}
+	defer f.Close()
+	return f.GetSheetList(), nil
 }
 
 func (ing *Ingester) DropTable(tableName string) error {
@@ -236,7 +249,7 @@ func (ing *Ingester) importCSV(filePath, tableName string) (_ int, _ int, result
 }
 
 // importExcel 导入 Excel 文件（流式处理）
-func (ing *Ingester) importExcel(filePath, tableName string) (_ int, _ int, resultErr error) {
+func (ing *Ingester) importExcel(filePath, tableName, worksheet string) (_ int, _ int, resultErr error) {
 	f, err := excelize.OpenFile(filePath)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to open Excel file: %w", err)
@@ -244,10 +257,23 @@ func (ing *Ingester) importExcel(filePath, tableName string) (_ int, _ int, resu
 	defer f.Close()
 
 	sheetNames := f.GetSheetList()
-	if len(sheetNames) != 1 {
-		return 0, 0, fmt.Errorf("Excel workbook has %d worksheets; explicit worksheet selection is required but not supported by this upload endpoint", len(sheetNames))
+	sheetName := ""
+	worksheet = strings.TrimSpace(worksheet)
+	if worksheet != "" {
+		for _, candidate := range sheetNames {
+			if candidate == worksheet {
+				sheetName = candidate
+				break
+			}
+		}
+		if sheetName == "" {
+			return 0, 0, fmt.Errorf("worksheet %q not found; available worksheets: %s", worksheet, strings.Join(sheetNames, ", "))
+		}
+	} else if len(sheetNames) == 1 {
+		sheetName = sheetNames[0]
+	} else {
+		return 0, 0, fmt.Errorf("Excel workbook has %d worksheets; worksheet selection is required (available: %s)", len(sheetNames), strings.Join(sheetNames, ", "))
 	}
-	sheetName := sheetNames[0]
 	rows, err := f.Rows(sheetName)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read Excel data: %w", err)

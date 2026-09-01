@@ -593,6 +593,7 @@ type ImportRequest struct {
 	SessionID  string `json:"session_id"`
 	SchemaName string `json:"schema_name"`
 	ObjectName string `json:"object_name"`
+	Worksheet  string `json:"worksheet"`
 }
 
 func ImportDataSourceHandler(w http.ResponseWriter, r *http.Request) {
@@ -629,6 +630,10 @@ func ImportDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "缺少 object_name", http.StatusBadRequest)
 		return
 	}
+	if strings.TrimSpace(req.Worksheet) != req.Worksheet {
+		http.Error(w, "worksheet 必须保持原值", http.StatusBadRequest)
+		return
+	}
 
 	sess, _, sessErr := sessionManager.GetOrCreate(r.Context(), req.SessionID, identity.WorkspaceID, identity.UserID)
 	if sessErr != nil {
@@ -656,6 +661,7 @@ func ImportDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 			SessionID:   req.SessionID,
 			Object:      service.SourceObjectRef{Schema: req.SchemaName, Name: req.ObjectName},
 			AuthSecret:  config.Cfg.AuthSecret,
+			Worksheet:   req.Worksheet,
 		})
 	} else {
 		bindMode = string(domain.SnapshotModeLive)
