@@ -1,5 +1,33 @@
 <template>
   <div class="input-bar">
+    <!-- Worksheet picker for multi-sheet Excel uploads -->
+    <div v-if="pendingWorksheet" class="worksheet-bar">
+      <span class="worksheet-label">
+        📊 {{ pendingWorksheet.filename }} 包含
+        {{ pendingWorksheet.sheets.length }} 个工作表，请选择要导入的表：
+      </span>
+      <div class="worksheet-options">
+        <button
+          v-for="sheet in pendingWorksheet.sheets"
+          :key="sheet"
+          type="button"
+          class="worksheet-chip"
+          :disabled="isImportingSheet"
+          @click="pickWorksheet(sheet)"
+        >
+          {{ sheet }}
+        </button>
+        <button
+          type="button"
+          class="worksheet-chip cancel"
+          :disabled="isImportingSheet"
+          @click="pendingWorksheet = null"
+        >
+          取消
+        </button>
+      </div>
+    </div>
+
     <!-- Active Data Sources Tag Bar -->
     <div class="upload-area" v-if="dataSourceStore.sessionSources.length > 0">
       <span
@@ -208,6 +236,40 @@ function toggleOption(id) {
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
+const pendingWorksheet = ref(null);
+const isImportingSheet = ref(false);
+
+async function pickWorksheet(sheet) {
+  const pending = pendingWorksheet.value;
+  if (!pending || !sheet) return;
+  isImportingSheet.value = true;
+  try {
+    const result = await dataSourceStore.importFromSource(
+      pending.sourceId,
+      pending.sessionId,
+      "",
+      "",
+      sheet,
+    );
+    if (result?.ok === false) {
+      throw new Error(result.error || "导入失败");
+    }
+    store.addMessage({
+      type: "user",
+      content: `📎 已导入工作表「${sheet}」（${pending.filename}）`,
+    });
+    pendingWorksheet.value = null;
+    await dataSourceStore.fetchSessionSources(pending.sessionId);
+  } catch (err) {
+    store.addMessage({
+      type: "error",
+      content: `导入工作表失败（${sheet}）: ${err.message}`,
+    });
+  } finally {
+    isImportingSheet.value = false;
+  }
+}
+
 async function handleFile(e) {
   const files = Array.from(e.target.files || []);
   if (files.length === 0) return;
@@ -249,7 +311,23 @@ async function handleFile(e) {
         if (!res.ok) {
           throw new Error(await res.text());
         }
-        await res.json();
+        const data = await res.json();
+        if (data?.ingest_status === "worksheet_selection_required") {
+          pendingWorksheet.value = {
+            sourceId: data.source_id,
+            sessionId,
+            filename: file.name,
+            sheets: data.worksheets || [],
+          };
+          store.addMessage({
+            type: "user",
+            content: `📎 ${file.name} 已上传（包含多个工作表，请选择要导入的表）`,
+          });
+          continue;
+        }
+        if (data?.ingest_status === "failed") {
+          throw new Error(data.message || "文件已上传，但导入失败");
+        }
         store.addMessage({
           type: "user",
           content: `📎 已添加数据源: ${file.name} (${formatSize(file.size)})`,
@@ -384,6 +462,51 @@ function formatSize(bytes) {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.worksheet-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 0.8rem;
+}
+
+.worksheet-label {
+  color: var(--text-main);
+}
+
+.worksheet-options {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.worksheet-chip {
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-app);
+  color: var(--text-main);
+  border-radius: 20px;
+  padding: 3px 12px;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.worksheet-chip:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.worksheet-chip:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.worksheet-chip.cancel {
+  color: var(--text-sub);
 }
 
 .source-tag {
