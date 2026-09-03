@@ -83,18 +83,39 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 	var buildRuntimeRegistry tools.RegistryFactory
 	var availableRuntimeTools map[string]struct{}
 	ctx := tools.ToolContext{
-		Ingester:    s.Ingester,
-		ReportState: s.ReportState,
-		EditState:   s.EditState,
-		Memory:      memory,
-		Subgoals:    subgoals,
-		SessionID:   id,
-		WorkspaceID: workspaceID,
-		FileService: fileService,
-		QueryLocker: s,
-		Now:         time.Now,
+		Ingester:     s.Ingester,
+		ReportState:  s.ReportState,
+		EditState:    s.EditState,
+		Memory:       memory,
+		Subgoals:     subgoals,
+		SessionID:    id,
+		WorkspaceID:  workspaceID,
+		FileService:  fileService,
+		QueryLocker:  s,
+		UploadLocker: s,
+		Now:          time.Now,
 	}
 	if sourceService != nil {
+		ctx.SourceService = sourceService
+		ctx.PendingFileSourcesProvider = func(ctx context.Context) ([]service.PendingFileSource, error) {
+			return sourceService.ListPendingFileSources(ctx, workspaceID, id)
+		}
+		ctx.SourceFileLookup = func(ctx context.Context, workspaceID, sourceID string) (string, string, error) {
+			ds, err := sourceService.DataSourceRepo.GetByID(ctx, sourceID)
+			if err != nil {
+				return "", "", fmt.Errorf("data source %s not found", sourceID)
+			}
+			if ds.WorkspaceID != workspaceID {
+				return "", "", fmt.Errorf("data source %s does not belong to this workspace", sourceID)
+			}
+			if ds.SourceType != domain.SourceTypeFileUpload {
+				return "", "", fmt.Errorf("data source %s is not a file upload", sourceID)
+			}
+			if ds.FileID == nil || *ds.FileID == "" {
+				return "", "", fmt.Errorf("data source %s has no backing file", sourceID)
+			}
+			return *ds.FileID, ds.Name, nil
+		}
 		ctx.SessionSourcesProvider = func(ctx context.Context) ([]service.SessionSourceSummary, error) {
 			return sourceService.GetSessionSources(ctx, id)
 		}

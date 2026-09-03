@@ -134,6 +134,7 @@ type ToolContext struct {
 	SessionID                 string
 	WorkspaceID               string
 	SessionSourcesProvider    SessionSourcesProvider
+	PendingFileSourcesProvider PendingFileSourcesProvider
 	ProfileDetailProvider     ProfileDetailProvider
 	GovernanceProvider        GovernanceProvider
 	QueryLocker               QueryLocker
@@ -141,8 +142,22 @@ type ToolContext struct {
 	LiveQueryProvider         LiveQueryProvider
 	LiveTablesProvider        LiveTablesProvider
 	LiveTableDescribeProvider LiveTableDescribeProvider
+	SourceService             *service.SourceService
+	SourceFileLookup          SourceFileLookup
+	UploadLocker              UploadLocker
 	Now                       func() time.Time
 	FileService               *service.FileService
+}
+
+// SourceFileLookup resolves a file-upload source in the given workspace to its
+// backing file id and human filename. It enforces workspace ownership.
+type SourceFileLookup func(ctx context.Context, workspaceID, sourceID string) (fileID, filename string, err error)
+
+// UploadLocker is the write side of the session import lock. Tools that write
+// into the session analysis database must hold it for the whole mutation.
+type UploadLocker interface {
+	LockUpload()
+	UnlockUpload()
 }
 
 // ToolBuilder 是负责动态创建有状态工具的函数

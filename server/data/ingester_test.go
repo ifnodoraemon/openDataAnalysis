@@ -2,9 +2,13 @@ package data
 
 import (
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/xuri/excelize/v2"
 )
 
 func TestCSVImportPreservesTextValuesWithoutSemanticInference(t *testing.T) {
@@ -142,4 +146,71 @@ func openTestSQLiteDB2(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+func TestCSVImportRaggedRowReturnsStructureError(t *testing.T) {
+	t.Parallel()
+
+	cacheDir := t.TempDir()
+	ing := NewIngester(cacheDir)
+	if err := ing.InitDB("sess_struct_csv"); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(func() { _ = ing.Destroy() })
+
+	csvPath := filepath.Join(cacheDir, "ragged.csv")
+	if err := os.WriteFile(csvPath, []byte("a,b\n1,2,3\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, _, _, err := ing.ImportFileRaw(csvPath)
+	if err == nil {
+		t.Fatal("expected ragged CSV to be rejected")
+	}
+	var structErr *StructureError
+	if !errors.As(err, &structErr) {
+		t.Fatalf("expected StructureError, got %T: %v", err, err)
+	}
+	if !strings.Contains(structErr.Detail, "failed to read CSV row 2") {
+		t.Fatalf("unexpected detail: %s", structErr.Detail)
+	}
+}
+
+func TestExcelImportTitleRowReturnsStructureError(t *testing.T) {
+	t.Parallel()
+
+	cacheDir := t.TempDir()
+	ing := NewIngester(cacheDir)
+	if err := ing.InitDB("sess_struct_xlsx"); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(func() { _ = ing.Destroy() })
+
+	f := excelize.NewFile()
+	sheet := f.GetSheetName(0)
+	if err := f.SetSheetRow(sheet, "A1", &[]interface{}{"报表标题", "型号A"}); err != nil {
+		t.Fatalf("SetSheetRow: %v", err)
+	}
+	if err := f.SetSheetRow(sheet, "A2", &[]interface{}{"时间", "调用次数", "Token量"}); err != nil {
+		t.Fatalf("SetSheetRow: %v", err)
+	}
+	if err := f.SetSheetRow(sheet, "A3", &[]interface{}{"2026-09-01", "5", "1200"}); err != nil {
+		t.Fatalf("SetSheetRow: %v", err)
+	}
+	xlsxPath := filepath.Join(cacheDir, "titled.xlsx")
+	if err := f.SaveAs(xlsxPath); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+
+	_, _, _, err := ing.ImportFileRaw(xlsxPath)
+	if err == nil {
+		t.Fatal("expected title-row workbook to be rejected by the deterministic importer")
+	}
+	var structErr *StructureError
+	if !errors.As(err, &structErr) {
+		t.Fatalf("expected StructureError, got %T: %v", err, err)
+	}
+	if !strings.Contains(structErr.Detail, "row 2 has 3 cells; header has 2") {
+		t.Fatalf("unexpected detail: %s", structErr.Detail)
+	}
 }

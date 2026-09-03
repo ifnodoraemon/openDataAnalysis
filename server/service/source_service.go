@@ -124,8 +124,46 @@ func (s *SourceService) EnsureFileSource(ctx context.Context, workspaceID, fileI
 	return ds, nil
 }
 
-func (s *SourceService) GetSessionSources(ctx context.Context, sessionID string) ([]SessionSourceSummary, error) {
+// PendingFileSource describes an uploaded file source in the workspace that
+// has no active binding in the session yet — e.g. a multi-sheet workbook
+// awaiting worksheet selection, or a file the strict importer rejected. The
+// agent can read the original bytes (code_run_python source_file input) and
+// import cleaned data (data_import_artifact).
+type PendingFileSource struct {
+	SourceID    string `json:"source_id"`
+	DisplayName string `json:"display_name"`
+}
+
+// ListPendingFileSources returns workspace file-upload sources that are not
+// bound to the session. It gives the agent pull-based discovery of uploaded
+// files that never reached the deterministic import path.
+func (s *SourceService) ListPendingFileSources(ctx context.Context, workspaceID, sessionID string) ([]PendingFileSource, error) {
 	bindings, err := s.SessionSourceBindingRepo.GetBySession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	bound := make(map[string]struct{}, len(bindings))
+	for _, b := range bindings {
+		bound[b.SourceID] = struct{}{}
+	}
+	sources, err := s.DataSourceRepo.ListByWorkspace(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	pending := make([]PendingFileSource, 0)
+	for _, ds := range sources {
+		if ds.SourceType != domain.SourceTypeFileUpload {
+			continue
+		}
+		if _, ok := bound[ds.ID]; ok {
+			continue
+		}
+		pending = append(pending, PendingFileSource{SourceID: ds.ID, DisplayName: ds.Name})
+	}
+	return pending, nil
+}
+
+func (s *SourceService) GetSessionSources(ctx context.Context, sessionID string) ([]SessionSourceSummary, error) {	bindings, err := s.SessionSourceBindingRepo.GetBySession(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}

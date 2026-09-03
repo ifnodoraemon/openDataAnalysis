@@ -23,6 +23,8 @@ export const useAgentStore = defineStore("agent", () => {
   const memoryEntries = ref({});
   const reportQuote = ref(null);
   const reportEditState = ref(null);
+  // 交给智能体处理的数据源请求（source_id + 文件名），由 InputBar 消费后清空
+  const agentHandoff = ref(null);
 
   function findRunById(items, runId) {
     for (const item of items || []) {
@@ -372,6 +374,7 @@ export const useAgentStore = defineStore("agent", () => {
     memoryEntries,
     reportQuote,
     reportEditState,
+    agentHandoff,
     addMessage,
     updateReport,
     setReportQuote,

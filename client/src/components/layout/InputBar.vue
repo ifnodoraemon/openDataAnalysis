@@ -19,11 +19,44 @@
         </button>
         <button
           type="button"
+          class="worksheet-chip"
+          :disabled="isImportingSheet"
+          @click="handoffToAgent(pendingWorksheet)"
+        >
+          🤖 交给智能体处理
+        </button>
+        <button
+          type="button"
           class="worksheet-chip cancel"
           :disabled="isImportingSheet"
           @click="pendingWorksheet = null"
         >
           取消
+        </button>
+      </div>
+    </div>
+
+    <!-- Handoff bar for uploads whose structure the strict importer rejects -->
+    <div v-if="pendingAgent" class="worksheet-bar">
+      <span class="worksheet-label">
+        📎 {{ pendingAgent.filename }} 已上传，但结构不符合直接导入要求（{{
+          pendingAgent.reason
+        }}）
+      </span>
+      <div class="worksheet-options">
+        <button
+          type="button"
+          class="worksheet-chip"
+          @click="handoffToAgent(pendingAgent)"
+        >
+          🤖 让智能体读懂并导入
+        </button>
+        <button
+          type="button"
+          class="worksheet-chip cancel"
+          @click="pendingAgent = null"
+        >
+          暂不处理
         </button>
       </div>
     </div>
@@ -155,7 +188,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import { useAgentTransport } from "../../composables/useAgentTransport.js";
 import { useAgentStore } from "../../stores/agent.js";
 import { useDataSourceStore } from "../../stores/datasource.js";
@@ -166,6 +199,16 @@ const store = useAgentStore();
 const dataSourceStore = useDataSourceStore();
 
 const input = ref("");
+
+// 智能体接管请求（本组件或数据源弹窗发起）：预填一条引导消息，由用户确认发送
+watch(
+  () => store.agentHandoff,
+  (req) => {
+    if (!req) return;
+    input.value = `请读取数据源 ${req.sourceId}（文件：${req.filename}）的原始文件，先向我说明你识别到的表结构（各工作表的表头与示例数据），我确认后你再清洗数据并导入为可查询的数据表。`;
+    store.agentHandoff = null;
+  },
+);
 const isFocused = ref(false);
 const isUploading = ref(false);
 const showSourcesDrawer = ref(false);
@@ -237,7 +280,18 @@ function toggleOption(id) {
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
 const pendingWorksheet = ref(null);
+const pendingAgent = ref(null);
 const isImportingSheet = ref(false);
+
+function handoffToAgent(pending) {
+  if (!pending?.sourceId) return;
+  store.agentHandoff = {
+    sourceId: pending.sourceId,
+    filename: pending.filename,
+  };
+  pendingWorksheet.value = null;
+  pendingAgent.value = null;
+}
 
 async function pickWorksheet(sheet) {
   const pending = pendingWorksheet.value;
@@ -253,6 +307,15 @@ async function pickWorksheet(sheet) {
     );
     if (result?.ok === false) {
       throw new Error(result.error || "导入失败");
+    }
+    if (result?.ingest_status === "needs_agent") {
+      pendingAgent.value = {
+        sourceId: pending.sourceId,
+        filename: pending.filename,
+        reason: result.import_error || "结构较复杂",
+      };
+      pendingWorksheet.value = null;
+      return;
     }
     store.addMessage({
       type: "user",
@@ -322,6 +385,18 @@ async function handleFile(e) {
           store.addMessage({
             type: "user",
             content: `📎 ${file.name} 已上传（包含多个工作表，请选择要导入的表）`,
+          });
+          continue;
+        }
+        if (data?.ingest_status === "needs_agent") {
+          pendingAgent.value = {
+            sourceId: data.source_id,
+            filename: file.name,
+            reason: data.import_error || "结构较复杂",
+          };
+          store.addMessage({
+            type: "user",
+            content: `📎 ${file.name} 已上传（结构较复杂，无法直接导入）`,
           });
           continue;
         }

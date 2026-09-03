@@ -41,7 +41,14 @@ func (t *CreateChartTool) Capability() ToolCapability {
 	return ToolCapability{Mode: "action", RuntimeEnabled: true, EmitsReportPreview: true}
 }
 
-func (t *CreateChartTool) Strict() bool { return true }
+func (t *CreateChartTool) Strict() bool { return false }
+
+// Note: never claim OpenAI strict function calling here. Strict mode requires
+// every schema property to be listed in "required", but chart_id/option are
+// the only required fields (title/width/height/sources are optional). Sending
+// "strict": true with a non-compliant schema makes vLLM/GPUStack constrained
+// decoding emit an empty option object — verified against deepseek-v4-flash
+// and glm-5.3. Parameter strictness is enforced server-side by decodeToolArgs.
 
 func (t *CreateChartTool) Description() string {
 	return "Create or update an ECharts chart from an explicit native option object. Accepts source citations and optional container dimensions; returns chart_id, chart_ref, and delivery_state facts. Modifies report chart state but does not infer a chart type, series mapping, title, or content block. To embed it inline, use `{{chart:chart_id}}` in a markdown/html block. When a partial edit scope is active, only the authorized chart_id can be modified."

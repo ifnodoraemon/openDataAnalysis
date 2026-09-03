@@ -9,6 +9,7 @@ import (
 )
 
 type SessionSourcesProvider func(context.Context) ([]service.SessionSourceSummary, error)
+type PendingFileSourcesProvider func(context.Context) ([]service.PendingFileSource, error)
 type ProfileDetailProvider func(context.Context, string) (profileJSON string, confirmationsJSON string, reusablePatchesJSON string, err error)
 type ProfileConfirmer func(context.Context, string, string, string, string) ([]string, error)
 type GovernanceProvider func(context.Context) (service.GovernanceInspection, error)
@@ -18,7 +19,7 @@ func init() {
 		if ctx.SessionSourcesProvider == nil {
 			return nil
 		}
-		return &InspectSessionSourcesTool{Provider: ctx.SessionSourcesProvider}
+		return &InspectSessionSourcesTool{Provider: ctx.SessionSourcesProvider, PendingProvider: ctx.PendingFileSourcesProvider}
 	})
 	RegisterGlobalTool(func(ctx ToolContext) Tool {
 		if ctx.ProfileDetailProvider == nil {
@@ -45,8 +46,9 @@ func init() {
 }
 
 type InspectSessionSourcesTool struct {
-	Provider  SessionSourcesProvider
-	parentCtx context.Context
+	Provider         SessionSourcesProvider
+	PendingProvider  PendingFileSourcesProvider
+	parentCtx        context.Context
 }
 
 func (t *InspectSessionSourcesTool) SetExecutionContext(ctx context.Context) { t.parentCtx = ctx }
@@ -56,7 +58,7 @@ func (t *InspectSessionSourcesTool) Capability() ToolCapability {
 	return ToolCapability{Mode: "observe", RuntimeEnabled: true, Delegable: true}
 }
 func (t *InspectSessionSourcesTool) Description() string {
-	return "Read current session data-source and snapshot facts, including source type, analysis table, observed size, import mode, profile status, and user patch count. It does not modify state."
+	return "Read current session data-source and snapshot facts, including source type, analysis table, observed size, import mode, profile status, and user patch count. Also lists pending_file_uploads: uploaded workspace files not yet imported into this session (multi-sheet workbooks awaiting selection, or files whose structure the strict importer rejected). To use a pending file, read its original bytes with code_run_python (source_file input) and import cleaned data via data_import_artifact. It does not modify state."
 }
 func (t *InspectSessionSourcesTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{}}`)
@@ -76,10 +78,25 @@ func (t *InspectSessionSourcesTool) Execute(args json.RawMessage) (string, error
 	if err != nil {
 		return "", err
 	}
+	var pending []map[string]string
+	if t.PendingProvider != nil {
+		if pendingFiles, pendErr := t.PendingProvider(t.parentCtx); pendErr == nil {
+			for _, file := range pendingFiles {
+				pending = append(pending, map[string]string{
+					"source_id":    file.SourceID,
+					"display_name": file.DisplayName,
+				})
+			}
+		}
+	}
 	payload := map[string]interface{}{
 		"source_count": len(sources),
 		"sources":      sources,
 		"ui_summary":   fmt.Sprintf("当前会话包含 %d 个数据源。", len(sources)),
+	}
+	if len(pending) > 0 {
+		payload["pending_file_uploads"] = pending
+		payload["ui_summary"] = fmt.Sprintf("当前会话包含 %d 个数据源，另有 %d 个待导入的上传文件。", len(sources), len(pending))
 	}
 	return toolSuccess("state_session_sources_inspect", payload), nil
 }

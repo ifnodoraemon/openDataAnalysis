@@ -46,8 +46,6 @@ services:
     restart: unless-stopped
     env_file: ./server/.env
     environment:
-      LLM_DEBUG: "true"
-      LLM_DEBUG_DIR: /app/data/llm-debug
       METADATA_STORE: postgres
       POSTGRES_DSN: postgres://oda:${POSTGRES_PASSWORD:-oda_password}@postgres:5432/oda?sslmode=disable
       STORAGE_PROVIDER: s3

@@ -273,6 +273,7 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 	}
 	var continuationFacts []RuntimeContextBlock
 	var injectedDeliveryVersion uint64
+	finalMarkupRejects := 0
 
 	for i := 1; ; i++ {
 		select {
@@ -345,7 +346,23 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 					}}
 					continue
 				}
-				// 有文本 + 无工具调用 → 最终回复
+				// 有文本 + 无工具调用 → 候选最终回复
+				if reject, rejectsAfter := finalMarkupGuardDecision(choice.Message.Content, finalMarkupRejects); reject {
+					// Thin guardrail: a final answer leaking raw tool-call
+					// markup (the model intended a tool call) is invalid
+					// output. The leaked content is NOT recorded in history,
+					// and the model gets a corrective feedback turn to either
+					// call the tool properly or restate the final answer.
+					finalMarkupRejects = rejectsAfter
+					log.Printf("engine: rejected final output containing raw tool-call markup (attempt %d/%d)", finalMarkupRejects, maxFinalMarkupRejects)
+					e.mu.Lock()
+					e.history = append(e.history, ConversationItem{
+						Role:    LLMRoleUser,
+						Content: finalMarkupCorrectionMessage,
+					})
+					e.mu.Unlock()
+					continue
+				}
 				e.mu.Lock()
 				e.history = append(e.history, ConversationItem{
 					Role:             LLMRoleAssistant,
@@ -422,10 +439,42 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 						emitEngineError(emit, "invalid_suspension_contract", "工具挂起协议无效", nil)
 						return
 					}
+					suspendStart := time.Now()
 					event, suspendErr := provider.SuspensionEvent(json.RawMessage(toolCall.Function.Arguments))
 					if suspendErr != nil {
-						emitEngineError(emit, "invalid_suspension_event", "工具挂起事件无效", suspendErr)
-						return
+						// Invalid suspension arguments are a recoverable tool
+						// failure, not an engine failure: feed the contract
+						// error back to the model as a tool result so it can
+						// correct the arguments and retry.
+						log.Printf("Tool %s error: %v", toolCall.Function.Name, suspendErr)
+						metrics.ToolCallsTotal.WithLabelValues(toolCall.Function.Name, "failure").Inc()
+						failureBytes, marshalErr := json.Marshal(map[string]interface{}{
+							"ok":      false,
+							"tool":    toolCall.Function.Name,
+							"message": "invalid suspension tool arguments: " + suspendErr.Error(),
+						})
+						if marshalErr != nil {
+							emitEngineError(emit, "invalid_suspension_event", "工具挂起事件无效", suspendErr)
+							return
+						}
+						emit(RuntimeEvent{
+							Type: EventToolResult,
+							Data: ToolResultData{
+								ID:       toolCall.ID,
+								Name:     toolCall.Function.Name,
+								Result:   string(failureBytes),
+								Duration: time.Since(suspendStart).Milliseconds(),
+								Success:  false,
+							},
+						})
+						e.mu.Lock()
+						e.history = append(e.history, ConversationItem{
+							Role:       LLMRoleTool,
+							Content:    string(failureBytes),
+							ToolCallID: toolCall.ID,
+						})
+						e.mu.Unlock()
+						continue
 					}
 					emit(event)
 					return

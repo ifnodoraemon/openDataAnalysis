@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/ifnodoraemon/openDataAnalysis/auth"
 	"github.com/ifnodoraemon/openDataAnalysis/config"
+	"github.com/ifnodoraemon/openDataAnalysis/data"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 	"github.com/ifnodoraemon/openDataAnalysis/service"
 	"github.com/ifnodoraemon/openDataAnalysis/session"
@@ -678,6 +680,28 @@ func ImportDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		sess.UnlockUpload()
 	}
 	if err != nil {
+		var wsErr *service.WorksheetSelectionError
+		if errors.As(err, &wsErr) && bindMode != string(domain.SnapshotModeLive) {
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"source_id":     sourceID,
+				"ingest_status": "worksheet_selection_required",
+				"worksheets":    wsErr.Sheets,
+				"agent_capable": true,
+				"message":       "文件包含多个工作表，请选择要导入的工作表，或交给智能体处理",
+			})
+			return
+		}
+		var structErr *data.StructureError
+		if errors.As(err, &structErr) && bindMode != string(domain.SnapshotModeLive) {
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"source_id":     sourceID,
+				"ingest_status": "needs_agent",
+				"import_error":  structErr.Detail,
+				"agent_capable": true,
+				"message":       "结构不符合直接导入要求（需单张矩形表：首行表头、每行等宽）。可在对话中让智能体读取原始文件、清洗后导入",
+			})
+			return
+		}
 		if bindMode == string(domain.SnapshotModeLive) {
 			writeHandlerError(w, http.StatusInternalServerError, "绑定数据源失败", err)
 		} else {

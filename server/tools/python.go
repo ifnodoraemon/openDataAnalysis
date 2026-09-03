@@ -24,10 +24,11 @@ import (
 
 // RunPythonTool 通过 MCP 服务执行 Python 代码
 type RunPythonTool struct {
-	MCPEndpoint string // Python MCP 服务地址，如 http://python-executor:8081
-	FileService *service.FileService
-	ReportState *ReportState
-	childCtx    context.Context
+	MCPEndpoint      string // Python MCP 服务地址，如 http://python-executor:8081
+	FileService      *service.FileService
+	ReportState      *ReportState
+	SourceFileLookup SourceFileLookup
+	childCtx         context.Context
 }
 
 var pythonHealthCache = struct {
@@ -50,7 +51,7 @@ func init() {
 		if config.Cfg != nil {
 			endpoint = config.Cfg.PythonMCPURL
 		}
-		return &RunPythonTool{MCPEndpoint: endpoint, FileService: ctx.FileService, ReportState: ctx.ReportState}
+		return &RunPythonTool{MCPEndpoint: endpoint, FileService: ctx.FileService, ReportState: ctx.ReportState, SourceFileLookup: ctx.SourceFileLookup}
 	})
 }
 
@@ -59,7 +60,7 @@ func (t *RunPythonTool) Capability() ToolCapability {
 	return ToolCapability{Mode: "action", RuntimeEnabled: true, Delegable: true}
 }
 func (t *RunPythonTool) Description() string {
-	return "Execute Python code in an isolated sandbox. Optional inputs mount exact analysis_result or artifact payloads as named files. Generated files are copied into durable object storage and returned as artifact IDs and authenticated API URLs. Returns stdout, stderr, artifacts, duration, and truncation facts."
+	return "Execute Python code in an isolated sandbox. Optional inputs mount exact payloads as named files: analysis_result or artifact payloads, or the original file bytes of an uploaded file-upload source (kind source_file). Use source_file to read raw uploads whose structure the deterministic importer rejects (title rows above headers, side-by-side tables, multi-row headers, stacked tables) — parse them in code, write cleaned CSV outputs, and import those via data_import_artifact. Generated files are copied into durable object storage and returned as artifact IDs and authenticated API URLs. Returns stdout, stderr, artifacts, duration, and truncation facts."
 }
 
 func (t *RunPythonTool) Parameters() json.RawMessage {
@@ -69,7 +70,7 @@ func (t *RunPythonTool) Parameters() json.RawMessage {
 		"properties": {
 			"code": {"type": "string", "description": "Python code to execute."},
 			"timeout": {"type": "integer", "minimum": 5, "maximum": %d, "description": "Explicit timeout in seconds."},
-			"inputs": {"type":"array","description":"Result or artifact payloads to mount in the sandbox.","items":{"type":"object","additionalProperties":false,"properties":{"kind":{"type":"string","enum":["analysis_result","artifact"]},"id":{"type":"string"},"filename":{"type":"string"}},"required":["kind","id"]}}
+			"inputs": {"type":"array","description":"Payloads to mount in the sandbox. kind source_file mounts the original bytes of an uploaded data source (id = source_id, as shown by state_session_sources_inspect or upload messages).","items":{"type":"object","additionalProperties":false,"properties":{"kind":{"type":"string","enum":["analysis_result","artifact","source_file"]},"id":{"type":"string"},"filename":{"type":"string"}},"required":["kind","id"]}}
 		},
 		"required": ["code", "timeout"]
 	}`, pythonMaxTimeout()))
@@ -399,6 +400,32 @@ func (t *RunPythonTool) resolveInputs(ctx context.Context, meta ExecutionMetadat
 			}
 			if name == "" {
 				name = file.DisplayName
+			}
+		case "source_file":
+			if t.SourceFileLookup == nil {
+				return nil, fmt.Errorf("source file lookup is unavailable")
+			}
+			fileID, sourceFilename, err := t.SourceFileLookup(ctx, meta.WorkspaceID, item.ID)
+			if err != nil {
+				return nil, err
+			}
+			if t.FileService == nil {
+				return nil, fmt.Errorf("file service is unavailable")
+			}
+			reader, _, err := t.FileService.OpenForDownload(ctx, meta.UserID, meta.WorkspaceID, fileID)
+			if err != nil {
+				return nil, err
+			}
+			content, err = io.ReadAll(io.LimitReader(reader, 50*1024*1024+1))
+			closeErr := reader.Close()
+			if err != nil || closeErr != nil {
+				return nil, fmt.Errorf("failed to read source file input: %w", errors.Join(err, closeErr))
+			}
+			if len(content) > 50*1024*1024 {
+				return nil, fmt.Errorf("source file input exceeds the 50 MiB limit")
+			}
+			if name == "" {
+				name = sourceFilename
 			}
 		default:
 			return nil, fmt.Errorf("unsupported input kind %q", item.Kind)

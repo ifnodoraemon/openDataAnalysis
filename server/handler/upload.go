@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ifnodoraemon/openDataAnalysis/auth"
+	"github.com/ifnodoraemon/openDataAnalysis/data"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 	"github.com/ifnodoraemon/openDataAnalysis/service"
 )
@@ -193,7 +194,18 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 		if errors.As(ingestErr, &wsErr) {
 			resp["ingest_status"] = "worksheet_selection_required"
 			resp["worksheets"] = wsErr.Sheets
-			resp["message"] = "文件包含多个工作表，请选择要导入的工作表"
+			resp["agent_capable"] = true
+			resp["message"] = "文件包含多个工作表，请选择要导入的工作表，或交给智能体处理"
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+		var structErr *data.StructureError
+		if errors.As(ingestErr, &structErr) {
+			log.Printf("upload: structural import rejected file_id=%s detail=%s", uploaded.ID, structErr.Detail)
+			resp["ingest_status"] = "needs_agent"
+			resp["import_error"] = structErr.Detail
+			resp["agent_capable"] = true
+			resp["message"] = "文件已上传，但结构不符合直接导入要求（需单张矩形表：首行表头、每行等宽）。可在对话中让智能体读取原始文件、清洗后导入"
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}

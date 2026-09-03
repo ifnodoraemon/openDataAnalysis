@@ -275,7 +275,7 @@ func (t *AskUserTool) Parameters() json.RawMessage {
 				"required":["action","resource_ref","payload_json"]
 			}
 		},
-		"required": ["question"]
+		"required": ["question", "selection_mode", "allow_custom", "required"]
 	}`)
 }
 

@@ -39,7 +39,32 @@
           </button>
         </aside>
 
-        <main class="modal-content-area">
+         <main class="modal-content-area">
+          <!-- Handoff panel for uploads the strict importer rejects -->
+          <div
+            v-if="pendingAgent && currentTab === 'active'"
+            class="worksheet-picker"
+          >
+            <div class="worksheet-picker-header">
+              <strong>{{ pendingAgent.filename }}</strong>
+              <span
+                >已上传，但结构不符合直接导入要求（{{ pendingAgent.reason
+                }}）。可让智能体读取原始文件、理解结构后清洗导入。</span
+              >
+            </div>
+            <div class="worksheet-list">
+              <button
+                class="worksheet-btn"
+                @click="handoffToAgent(pendingAgent)"
+              >
+                🤖 让智能体处理
+              </button>
+              <button class="worksheet-btn" @click="pendingAgent = null">
+                暂不处理
+              </button>
+            </div>
+          </div>
+
           <!-- Worksheet picker for multi-sheet Excel uploads -->
           <div
             v-if="pendingWorksheet && currentTab === 'active'"
@@ -64,8 +89,16 @@
               >
                 {{ isImportingSheet ? "导入中..." : sheet }}
               </button>
+              <button
+                class="worksheet-btn"
+                :disabled="isImportingSheet"
+                @click="handoffToAgent(pendingWorksheet)"
+              >
+                🤖 交给智能体处理
+              </button>
             </div>
           </div>
+
 
           <!-- Tab: Active Session Sources -->
           <div v-if="currentTab === 'active'" class="tab-pane">
@@ -387,6 +420,18 @@ const isImporting = ref(false);
 const importError = ref("");
 const createError = ref("");
 const pendingWorksheet = ref(null);
+const pendingAgent = ref(null);
+
+function handoffToAgent(pending) {
+  if (!pending?.sourceId) return;
+  agentStore.agentHandoff = {
+    sourceId: pending.sourceId,
+    filename: pending.filename,
+  };
+  pendingWorksheet.value = null;
+  pendingAgent.value = null;
+  emit("close");
+}
 const isImportingSheet = ref(false);
 const isUploading = ref(false);
 
@@ -582,11 +627,20 @@ async function handleFileUpload(e) {
         currentTab.value = "active";
         continue;
       }
+      if (data?.ingest_status === "needs_agent") {
+        pendingAgent.value = {
+          sourceId: data.source_id,
+          filename: file.name,
+          reason: data.import_error || "结构较复杂",
+        };
+        currentTab.value = "active";
+        continue;
+      }
       if (data?.ingest_status === "failed") {
         throw new Error(data.message || "文件已上传，但导入失败");
       }
     }
-    if (!pendingWorksheet.value) {
+    if (!pendingWorksheet.value && !pendingAgent.value) {
       await store.fetchSessionSources(sessionId);
       currentTab.value = "active";
     }
@@ -612,6 +666,15 @@ async function handleSelectWorksheet(sheet) {
     );
     if (result?.ok === false) {
       throw new Error(result.error || "导入失败");
+    }
+    if (result?.ingest_status === "needs_agent") {
+      pendingAgent.value = {
+        sourceId: pending.sourceId,
+        filename: pending.filename,
+        reason: result.import_error || "结构较复杂",
+      };
+      pendingWorksheet.value = null;
+      return;
     }
     pendingWorksheet.value = null;
     await store.fetchSessionSources(pending.sessionId);

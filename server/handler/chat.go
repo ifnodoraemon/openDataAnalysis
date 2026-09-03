@@ -77,6 +77,16 @@ func ChatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The first user message names the session so history lists stay readable;
+	// best-effort only — a title failure must not block the chat itself.
+	if stored, lookupErr := sessionRepo.GetByID(r.Context(), sessionID); lookupErr == nil && strings.TrimSpace(stored.Title) == "" {
+		if title := buildSessionTitle(req.Content); title != "" {
+			if titleErr := sessionRepo.UpdateTitle(r.Context(), sessionID, title); titleErr != nil {
+				log.Printf("chat: auto title failed session_id=%s err=%v", sessionID, titleErr)
+			}
+		}
+	}
+
 	preparedUserMsg, extraRuntime, prepErr := resolvePreparedUserMessage(r.Context(), sess, userMsg)
 	if prepErr != nil {
 		writeHandlerError(w, http.StatusBadRequest, "准备用户请求失败", prepErr)
@@ -358,4 +368,18 @@ func resumeWaitingRun(requestCtx context.Context, sess *session.Session, identit
 		}
 	}()
 	return nil
+}
+
+// buildSessionTitle derives a short history-list title from the first user
+// message: collapses whitespace and clips to 30 runes.
+func buildSessionTitle(content string) string {
+	trimmed := strings.Join(strings.Fields(content), " ")
+	if trimmed == "" {
+		return ""
+	}
+	runes := []rune(trimmed)
+	if len(runes) > 30 {
+		runes = runes[:30]
+	}
+	return string(runes)
 }

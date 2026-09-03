@@ -249,6 +249,11 @@ export function useAgentTransport() {
         dataSourceStore.fetchSessionSources(data.session.id),
         dataSourceStore.fetchWorkspaceDataSources(),
       ]);
+      // Restore the latest conversation so a page reload shows history.
+      if (data.runs?.length) {
+        store.setRuns(data.runs || []);
+        await restoreLatestRunMessages(data.runs);
+      }
     }
   }
 
@@ -407,13 +412,34 @@ export function useAgentTransport() {
     store.setSession(data.session.id);
     if (switchingSessions) {
       // Switching sessions must not keep the previous session's chat on
-      // screen; run messages load explicitly via openRun.
+      // screen; the latest run's messages load right below.
       store.setMessages([]);
       store.finishRun();
     }
     store.setRuns(data.runs || []);
     applyRuntimeState(data.runtimeState, store);
     await dataSourceStore.fetchSessionSources(sessionId);
+    await restoreLatestRunMessages(data.runs || []);
+  }
+
+  function latestRunOf(runs) {
+    if (!runs.length) return null;
+    return [...runs].sort(
+      (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0),
+    )[0];
+  }
+
+  // Opening a session or reloading the page should show the most recent
+  // conversation instead of an empty chat; earlier runs stay reachable via
+  // the run tree.
+  async function restoreLatestRunMessages(runs) {
+    const latest = latestRunOf(runs);
+    if (!latest) return;
+    try {
+      await openRun(latest.id);
+    } catch (err) {
+      console.error("加载最近对话失败：", err);
+    }
   }
 
   async function openRun(runId) {

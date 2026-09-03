@@ -28,6 +28,16 @@ func NewIngester(cacheDir string) *Ingester {
 	return &Ingester{CacheDir: cacheDir}
 }
 
+// StructureError marks deterministic importer failures caused by the file's
+// structure (title rows above headers, ragged rows, empty data, unsupported
+// worksheet layout) rather than infrastructure. Files failing with this error
+// stay uploaded; structural interpretation moves to the agent, which reads the
+// original bytes in the python sandbox, cleans them in code, and imports the
+// result via data_import_artifact.
+type StructureError struct{ Detail string }
+
+func (e *StructureError) Error() string { return e.Detail }
+
 // GetDB 获取当前数据库连接
 func (ing *Ingester) GetDB() *sql.DB {
 	return ing.db
@@ -133,7 +143,12 @@ func (ing *Ingester) ImportFileRaw(filePath string) (tableName string, rowCount 
 }
 
 // ImportFileRawAs imports a file under an exact table name. An empty worksheet
-// selection requires the workbook to contain exactly one sheet.
+// selection requires the workbook to contain exactly one sheet. The importer
+// is strictly deterministic: no header guessing or row skipping — files whose
+// structure is not a clean rectangular table fail with an actionable error.
+// Structural interpretation is the agent's job: it reads the original file in
+// the python sandbox (source_file input) and imports cleaned data via
+// data_import_artifact.
 func (ing *Ingester) ImportFileRawAs(filePath, requestedTableName, worksheet string) (tableName string, rowCount int, colCount int, err error) {
 	ext := strings.ToLower(filepath.Ext(filePath))
 	if err := ValidateSQLIdent(requestedTableName); err != nil {
@@ -191,7 +206,7 @@ func (ing *Ingester) importCSV(filePath, tableName string) (_ int, _ int, result
 
 	colCount := len(headers)
 	if colCount == 0 {
-		return 0, 0, fmt.Errorf("CSV file has no headers")
+		return 0, 0, &StructureError{Detail: "CSV file has no headers"}
 	}
 	columnNames := append([]string(nil), headers...)
 
@@ -220,10 +235,10 @@ func (ing *Ingester) importCSV(filePath, tableName string) (_ int, _ int, result
 			break
 		}
 		if err != nil {
-			return rowCount, colCount, fmt.Errorf("failed to read CSV row %d: %w", rowCount+len(batch)+2, err)
+			return rowCount, colCount, &StructureError{Detail: fmt.Sprintf("failed to read CSV row %d: %v", rowCount+len(batch)+2, err)}
 		}
 		if len(record) != colCount {
-			return rowCount, colCount, fmt.Errorf("CSV row %d has %d fields; header has %d", rowCount+len(batch)+2, len(record), colCount)
+			return rowCount, colCount, &StructureError{Detail: fmt.Sprintf("CSV row %d has %d fields; header has %d", rowCount+len(batch)+2, len(record), colCount)}
 		}
 
 		batch = append(batch, record)
@@ -267,12 +282,12 @@ func (ing *Ingester) importExcel(filePath, tableName, worksheet string) (_ int, 
 			}
 		}
 		if sheetName == "" {
-			return 0, 0, fmt.Errorf("worksheet %q not found; available worksheets: %s", worksheet, strings.Join(sheetNames, ", "))
+			return 0, 0, &StructureError{Detail: fmt.Sprintf("worksheet %q not found; available worksheets: %s", worksheet, strings.Join(sheetNames, ", "))}
 		}
 	} else if len(sheetNames) == 1 {
 		sheetName = sheetNames[0]
 	} else {
-		return 0, 0, fmt.Errorf("Excel workbook has %d worksheets; worksheet selection is required (available: %s)", len(sheetNames), strings.Join(sheetNames, ", "))
+		return 0, 0, &StructureError{Detail: fmt.Sprintf("Excel workbook has %d worksheets; worksheet selection is required (available: %s)", len(sheetNames), strings.Join(sheetNames, ", "))}
 	}
 	rows, err := f.Rows(sheetName)
 	if err != nil {
@@ -281,7 +296,7 @@ func (ing *Ingester) importExcel(filePath, tableName, worksheet string) (_ int, 
 	defer rows.Close()
 
 	if !rows.Next() {
-		return 0, 0, fmt.Errorf("Excel file is empty")
+		return 0, 0, &StructureError{Detail: "Excel file is empty"}
 	}
 
 	// 表头
@@ -291,7 +306,7 @@ func (ing *Ingester) importExcel(filePath, tableName, worksheet string) (_ int, 
 	}
 	colCount := len(headers)
 	if colCount == 0 {
-		return 0, 0, fmt.Errorf("Excel file has no headers")
+		return 0, 0, &StructureError{Detail: "Excel file has no headers"}
 	}
 
 	columnNames := append([]string(nil), headers...)
@@ -322,7 +337,7 @@ func (ing *Ingester) importExcel(filePath, tableName, worksheet string) (_ int, 
 			return rowCount, colCount, fmt.Errorf("failed to read Excel row %d: %w", rowCount+len(batch)+2, err)
 		}
 		if len(row) > colCount {
-			return rowCount, colCount, fmt.Errorf("Excel row %d has %d cells; header has %d", rowCount+len(batch)+2, len(row), colCount)
+			return rowCount, colCount, &StructureError{Detail: fmt.Sprintf("Excel row %d has %d cells; header has %d", rowCount+len(batch)+2, len(row), colCount)}
 		}
 		batch = append(batch, row)
 
@@ -343,7 +358,7 @@ func (ing *Ingester) importExcel(filePath, tableName, worksheet string) (_ int, 
 		rowCount += len(batch)
 	}
 	if rowCount == 0 {
-		return 0, 0, fmt.Errorf("Excel data area is empty")
+		return 0, 0, &StructureError{Detail: "Excel data area is empty"}
 	}
 
 	success = true

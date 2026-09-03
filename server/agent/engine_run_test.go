@@ -247,3 +247,51 @@ func TestRunAcceptsTextAfterDraftDeliveryStateInformedOnce(t *testing.T) {
 		t.Fatalf("unexpected final history item: %#v", engine.history[4])
 	}
 }
+
+func TestRunRejectsFinalOutputWithRawToolMarkup(t *testing.T) {
+	dsmlLeak := "The report is finalized. Let me verify.\n<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"state_report_inspect\">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
+	cleanFinal := "分析完成：报告已生成并交付。"
+	server, snapshot := scriptedLLMServer(t, []string{
+		responsesAPITextBody(t, dsmlLeak),
+		responsesAPITextBody(t, cleanFinal),
+	})
+	installTestLLMConfig(t, server)
+
+	registry := tools.NewRegistry()
+	engine := &Engine{
+		llm:      NewLLMClient(),
+		registry: registry,
+		policy:   "system",
+	}
+
+	var events []RuntimeEvent
+	engine.Run(context.Background(), "分析数据", nil, func(ev RuntimeEvent) { events = append(events, ev) })
+
+	if got := len(snapshot()); got != 2 {
+		t.Fatalf("expected two llm calls, got %d", got)
+	}
+	var completed *RuntimeEvent
+	for i := range events {
+		if events[i].Type == EventRunCompleted {
+			completed = &events[i]
+		}
+	}
+	if completed == nil {
+		t.Fatalf("expected run completion, got events: %#v", events)
+	}
+	summary, _ := completed.Data.(CompleteData)
+	if summary.Summary != cleanFinal {
+		t.Fatalf("expected clean final summary, got %q", summary.Summary)
+	}
+	if strings.Contains(summary.Summary, "｜") {
+		t.Fatalf("final summary must not contain raw markup")
+	}
+	// The corrective feedback must have reached the second request.
+	secondReq := string(snapshot()[1])
+	if !strings.Contains(secondReq, "system_feedback") {
+		t.Fatalf("expected corrective feedback in second request")
+	}
+	if strings.Contains(secondReq, "DSML") {
+		t.Fatalf("leaked markup content must not be re-serialized into history")
+	}
+}
