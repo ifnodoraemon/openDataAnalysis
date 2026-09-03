@@ -346,6 +346,13 @@ export function useAgentTransport() {
           headers: { "Content-Type": "application/json", ...authHeaders() },
           body: JSON.stringify({ response: wireValue }),
         });
+        // The resumed run does not re-emit run_started, so patch the local
+        // status here — otherwise the waiting-input option chips stay
+        // rendered for the whole resumed execution.
+        store.patchRun(waitingRunId, {
+          status: "running",
+          updatedAt: new Date().toISOString(),
+        });
       } else {
         const res = await request(`/api/sessions/${sessionId}/chat`, {
           method: "POST",

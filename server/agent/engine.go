@@ -226,6 +226,30 @@ func adjustCompactionBoundary(history []ConversationItem, boundary int) int {
 	return boundary
 }
 
+// filterUnavailableToolSpecs drops tools whose availability check currently
+// fails. Availability is re-evaluated per run (backed by each tool's health
+// cache), so a tool disabled by a transient backend failure recovers on the
+// next run instead of staying disabled for the whole session lifetime.
+func (e *Engine) filterUnavailableToolSpecs(ctx context.Context, specs []tools.ToolSpec) []tools.ToolSpec {
+	if len(specs) == 0 {
+		return specs
+	}
+	filtered := make([]tools.ToolSpec, 0, len(specs))
+	for _, spec := range specs {
+		tool, err := e.registry.Get(spec.Function.Name)
+		if err == nil {
+			if checker, ok := tool.(tools.AvailabilityTool); ok {
+				if checkErr := checker.CheckAvailability(ctx); checkErr != nil {
+					log.Printf("engine: tool %s unavailable for this run: %v", spec.Function.Name, checkErr)
+					continue
+				}
+			}
+		}
+		filtered = append(filtered, spec)
+	}
+	return filtered
+}
+
 func (e *Engine) prepareRuntimeTools(ctx context.Context, emit func(RuntimeEvent)) {
 	for _, tool := range e.registry.ListTools() {
 		if next, ok := tool.(eventEmitterAware); ok {
@@ -258,7 +282,7 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 	e.prepareRuntimeTools(ctx, emit)
 
 	e.mu.Lock()
-	toolSpecs := e.registry.GetToolSpecs()
+	toolSpecs := e.filterUnavailableToolSpecs(ctx, e.registry.GetToolSpecs())
 	e.mu.Unlock()
 
 	userTask := userInput
@@ -630,27 +654,57 @@ func (e *Engine) finalResponseAfterFinalize(ctx context.Context, getRuntimeVars 
 			Name: "history_window", Role: "user", Content: fmt.Sprintf(`{"omitted_message_count":%d}`, e.omittedHistoryMessages),
 		})
 	}
-	bundle.History = append([]ConversationItem(nil), e.history...)
+	baseHistory := append([]ConversationItem(nil), e.history...)
+	bundle.History = baseHistory
 	e.mu.Unlock()
 
-	resp, err := e.llm.ChatWithTools(ctx, bundle, nil)
-	if err != nil {
-		return "", err
+	// The continuation runs without tools, so models that "want one more
+	// verification call" sometimes leak their native tool-call markup into
+	// the summary text. Apply the same final-output guardrail as the main
+	// loop: bounded rejection with a corrective retry, then accept as-is.
+	var summary string
+	var reasoningContent string
+	var usage LLMUsage
+	for attempt := 0; ; attempt++ {
+		resp, err := e.llm.ChatWithTools(ctx, bundle, nil)
+		if err != nil {
+			return "", err
+		}
+		if len(resp.Choices) == 0 {
+			return "", fmt.Errorf("LLM returned empty response")
+		}
+		summary = resp.Choices[0].Message.Content
+		reasoningContent = resp.Choices[0].Message.ReasoningContent
+		usage = resp.Usage
+		if strings.TrimSpace(summary) == "" {
+			return "", fmt.Errorf("LLM returned empty final response")
+		}
+		if !containsRawToolMarkup(summary) {
+			break
+		}
+		if attempt >= maxFinalMarkupRejects {
+			log.Printf("engine: post-finalize response still contains raw tool-call markup after %d rejections; accepting as-is", attempt)
+			break
+		}
+		log.Printf("engine: rejected post-finalize response containing raw tool-call markup (attempt %d/%d)", attempt+1, maxFinalMarkupRejects)
+		correctedHistory := append(append([]ConversationItem(nil), baseHistory...), ConversationItem{
+			Role:    LLMRoleUser,
+			Content: finalMarkupCorrectionMessage,
+		})
+		bundle = &PromptBundle{
+			Policy:         bundle.Policy,
+			RuntimeContext: bundle.RuntimeContext,
+			History:        correctedHistory,
+		}
 	}
-	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("LLM returned empty response")
-	}
-	summary := resp.Choices[0].Message.Content
-	if strings.TrimSpace(summary) == "" {
-		return "", fmt.Errorf("LLM returned empty final response")
-	}
+
 	e.mu.Lock()
 	e.history = append(e.history, ConversationItem{
 		Role:             LLMRoleAssistant,
 		Content:          summary,
-		ReasoningContent: resp.Choices[0].Message.ReasoningContent,
+		ReasoningContent: reasoningContent,
 	})
-	e.compactMessagesLocked(resp.Usage.PromptTokens)
+	e.compactMessagesLocked(usage.PromptTokens)
 	e.mu.Unlock()
 	return summary, nil
 }

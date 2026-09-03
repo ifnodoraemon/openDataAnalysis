@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"sync"
@@ -81,7 +80,6 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 	}
 
 	var buildRuntimeRegistry tools.RegistryFactory
-	var availableRuntimeTools map[string]struct{}
 	ctx := tools.ToolContext{
 		Ingester:     s.Ingester,
 		ReportState:  s.ReportState,
@@ -247,11 +245,20 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 		}
 		filtered := make([]string, 0, len(allowed))
 		for _, name := range allowed {
-			_, isDelegable := delegable[name]
-			_, isAvailable := availableRuntimeTools[name]
-			if isDelegable && isAvailable {
-				filtered = append(filtered, name)
+			if _, isDelegable := delegable[name]; !isDelegable {
+				continue
 			}
+			// Live availability: a transient failure at session-creation time
+			// must not permanently block delegating to a tool that is healthy
+			// now. Health caches keep this cheap.
+			if tool, getErr := reg.Get(name); getErr == nil {
+				if checker, ok := tool.(tools.AvailabilityTool); ok {
+					if checkErr := checker.CheckAvailability(context.Background()); checkErr != nil {
+						continue
+					}
+				}
+			}
+			filtered = append(filtered, name)
 		}
 		return reg.CloneFiltered(filtered)
 	}
@@ -260,20 +267,10 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 	masterReg := tools.NewRegistry()
 	masterReg.LoadGlobalTools(ctx)
 
-	// Runtime visibility comes from each tool's capability contract.
+	// Tool availability is re-evaluated per run (engine) and per delegate
+	// dispatch, backed by each tool's health cache — a transient failure at
+	// session creation must not permanently disable a tool for the session.
 	runtimeAllowed := masterReg.RuntimeToolNames(false)
-	for _, candidate := range masterReg.ListTools() {
-		if checker, ok := candidate.(tools.AvailabilityTool); ok {
-			if err := checker.CheckAvailability(context.Background()); err != nil {
-				log.Printf("tool %s disabled for session %s: %v", candidate.Name(), id, err)
-				runtimeAllowed = withoutToolName(runtimeAllowed, candidate.Name())
-			}
-		}
-	}
-	availableRuntimeTools = make(map[string]struct{}, len(runtimeAllowed))
-	for _, name := range runtimeAllowed {
-		availableRuntimeTools[name] = struct{}{}
-	}
 	runtimeRegistry := masterReg.CloneFiltered(runtimeAllowed)
 
 	s.Registry = runtimeRegistry
@@ -300,16 +297,6 @@ func semanticConfirmationAuthorizationPayload(scope, overridesJSON string) (stri
 		return "", err
 	}
 	return string(payload), nil
-}
-
-func withoutToolName(names []string, excluded string) []string {
-	filtered := make([]string, 0, len(names))
-	for _, name := range names {
-		if name != excluded {
-			filtered = append(filtered, name)
-		}
-	}
-	return filtered
 }
 
 func (s *Session) Touch() {

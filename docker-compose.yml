@@ -102,6 +102,12 @@ services:
       PROXY_TOKEN: ${PROXY_TOKEN:?set PROXY_TOKEN in .env at the repo root (see .env.example)}
       PYTHON_MAX_TIMEOUT_SECONDS: ${EXECUTOR_MAX_TIMEOUT_SECONDS:-120}
       MEMORY_LIMIT_MB: ${EXECUTOR_MEMORY_LIMIT_MB:-512}
+      # The root filesystem is read-only; without writable cache dirs
+      # fontconfig/matplotlib rebuild the font cache on every cold start
+      # (~1.6s), which once tripped the health-check timeout and disabled
+      # code_run_python for a whole session.
+      FONTCONFIG_CACHE_DIR: /tmp/fontconfig
+      MPLCONFIGDIR: /tmp/mplconfigdir
     volumes:
       - python-workspace:/app/workspace
     # The executor only needs to be reachable by the backend. Keeping it off

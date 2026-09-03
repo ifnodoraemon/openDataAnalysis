@@ -165,9 +165,11 @@ func (t *RunPythonTool) HealthCheck(ctx context.Context) error {
 	}
 	pythonHealthCache.Unlock()
 
-	healthCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	// The executor's first call after a cold start can take ~2s (matplotlib
+	// font cache build); a 1.5s client timeout misclassifies healthy pods.
+	healthCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
-	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	client := &http.Client{Timeout: 5000 * time.Millisecond}
 
 	err = t.runHealthCheck(healthCtx, client, proxyToken)
 	pythonHealthCache.Lock()
