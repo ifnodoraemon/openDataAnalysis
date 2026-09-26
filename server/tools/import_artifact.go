@@ -24,15 +24,16 @@ type ImportArtifactTool struct {
 	SourceService *service.SourceService
 	FileService   *service.FileService
 	Ingester      *data.Ingester
-	ReportState   *ReportState
 	UploadLocker  UploadLocker
-	SessionID     string
-	WorkspaceID   string
 	parentCtx     context.Context
 }
 
 func init() {
 	RegisterGlobalTool(func(ctx ToolContext) Tool {
+		// ctx.SessionID is the session-level gate: the tool only registers
+		// inside a session runtime. Execute derives the actual import
+		// identity exclusively from ExecutionMetadata, so no duplicate
+		// identity fields are captured here.
 		if ctx.SourceService == nil || ctx.FileService == nil || ctx.Ingester == nil || ctx.SessionID == "" {
 			return nil
 		}
@@ -40,10 +41,7 @@ func init() {
 			SourceService: ctx.SourceService,
 			FileService:   ctx.FileService,
 			Ingester:      ctx.Ingester,
-			ReportState:   ctx.ReportState,
 			UploadLocker:  ctx.UploadLocker,
-			SessionID:     ctx.SessionID,
-			WorkspaceID:   ctx.WorkspaceID,
 		}
 	})
 }

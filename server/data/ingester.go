@@ -166,15 +166,30 @@ func (ing *Ingester) ImportFileRawAs(filePath, requestedTableName, worksheet str
 	return
 }
 
-// ExcelSheetNames lists the worksheet names of an Excel workbook without
-// importing anything.
+// ExcelSheetNames lists the visible worksheet names of an Excel workbook
+// without importing anything. Hidden and very-hidden sheets are excluded:
+// offering them for selection would show names the user cannot see in Excel.
 func ExcelSheetNames(filePath string) ([]string, error) {
 	f, err := excelize.OpenFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open Excel file: %w", err)
 	}
 	defer f.Close()
-	return f.GetSheetList(), nil
+	return visibleSheetNames(f), nil
+}
+
+// visibleSheetNames returns the workbook's non-hidden sheet names in order.
+func visibleSheetNames(f *excelize.File) []string {
+	all := f.GetSheetList()
+	visible := make([]string, 0, len(all))
+	for _, name := range all {
+		// GetSheetVisible reports false for hidden and very-hidden sheets.
+		if shown, visErr := f.GetSheetVisible(name); visErr == nil && !shown {
+			continue
+		}
+		visible = append(visible, name)
+	}
+	return visible
 }
 
 func (ing *Ingester) DropTable(tableName string) error {
@@ -271,9 +286,11 @@ func (ing *Ingester) importExcel(filePath, tableName, worksheet string) (_ int, 
 	}
 	defer f.Close()
 
-	sheetNames := f.GetSheetList()
+	sheetNames := visibleSheetNames(f)
 	sheetName := ""
-	worksheet = strings.TrimSpace(worksheet)
+	// worksheet is matched verbatim: sheet names may legitimately begin or
+	// end with a space (valid per the XLSX spec), and trimming here would
+	// make such names permanently unimportable.
 	if worksheet != "" {
 		for _, candidate := range sheetNames {
 			if candidate == worksheet {

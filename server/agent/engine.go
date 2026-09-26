@@ -282,8 +282,12 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 	e.prepareRuntimeTools(ctx, emit)
 
 	e.mu.Lock()
-	toolSpecs := e.filterUnavailableToolSpecs(ctx, e.registry.GetToolSpecs())
+	toolSpecs := e.registry.GetToolSpecs()
 	e.mu.Unlock()
+	// Availability probes do live HTTP checks on cache expiry (RunPythonTool:
+	// up to ~5-6s while the executor is unhealthy), so they must not run
+	// inside e.mu; otherwise one bad backend stalls every Run start.
+	toolSpecs = e.filterUnavailableToolSpecs(ctx, toolSpecs)
 
 	userTask := userInput
 	var startMutationVersion uint64

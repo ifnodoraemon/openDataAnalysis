@@ -163,7 +163,8 @@ func (s *SourceService) ListPendingFileSources(ctx context.Context, workspaceID,
 	return pending, nil
 }
 
-func (s *SourceService) GetSessionSources(ctx context.Context, sessionID string) ([]SessionSourceSummary, error) {	bindings, err := s.SessionSourceBindingRepo.GetBySession(ctx, sessionID)
+func (s *SourceService) GetSessionSources(ctx context.Context, sessionID string) ([]SessionSourceSummary, error) {
+	bindings, err := s.SessionSourceBindingRepo.GetBySession(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -641,16 +642,16 @@ type SessionSourceSummary struct {
 	RowsSkipped            int       `json:"rows_skipped"`
 	// ImportRowLimit is 0 when the import ran without a row cap; the explicit
 	// ImportUnbounded flag disambiguates "no limit" from "not set".
-	ImportRowLimit         int       `json:"import_row_limit,omitempty"`
-	ImportUnbounded        bool      `json:"import_unbounded"`
-	ImportTruncated        bool      `json:"import_truncated,omitempty"`
-	ImportDurationMs       int       `json:"import_duration_ms"`
-	ProfileDurationMs      int       `json:"profile_duration_ms"`
-	SnapshotSizeBytes      int64     `json:"snapshot_size_bytes"`
-	ProfileMode            string    `json:"profile_mode"`
-	Mode                   string    `json:"mode"`
-	RowCountEstimated      bool      `json:"row_count_estimated"`
-	ErrorMessage           string    `json:"error_message,omitempty"`
+	ImportRowLimit    int    `json:"import_row_limit,omitempty"`
+	ImportUnbounded   bool   `json:"import_unbounded"`
+	ImportTruncated   bool   `json:"import_truncated,omitempty"`
+	ImportDurationMs  int    `json:"import_duration_ms"`
+	ProfileDurationMs int    `json:"profile_duration_ms"`
+	SnapshotSizeBytes int64  `json:"snapshot_size_bytes"`
+	ProfileMode       string `json:"profile_mode"`
+	Mode              string `json:"mode"`
+	RowCountEstimated bool   `json:"row_count_estimated"`
+	ErrorMessage      string `json:"error_message,omitempty"`
 }
 
 type SemanticProfileSummary struct {

@@ -632,10 +632,9 @@ func ImportDataSourceHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "缺少 object_name", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.Worksheet) != req.Worksheet {
-		http.Error(w, "worksheet 必须保持原值", http.StatusBadRequest)
-		return
-	}
+	// req.Worksheet passes through verbatim: sheet names may legitimately
+	// begin or end with a space, and the ingester matches the raw value
+	// against the real sheet list.
 
 	sess, _, sessErr := sessionManager.GetOrCreate(r.Context(), req.SessionID, identity.WorkspaceID, identity.UserID)
 	if sessErr != nil {

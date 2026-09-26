@@ -70,7 +70,10 @@ type QueryLocker interface {
 }
 
 // ToolContext 提供给工具初始化时的上下文依赖
-type RegistryFactory func(allowed []string) *Registry
+// RegistryFactory builds a delegate registry restricted to the allowed tool
+// names. The ctx is the dispatching run's context: availability probes must
+// be cancellable when the user cancels the run.
+type RegistryFactory func(ctx context.Context, allowed []string) *Registry
 
 type LiveQueryRequest struct {
 	SourceID       string
@@ -124,29 +127,29 @@ type LiveTablesProvider func(ctx context.Context, sourceID string) ([]LiveSource
 type LiveTableDescribeProvider func(ctx context.Context, sourceID, schema, name string, sampleRows int) (*LiveTableDescription, error)
 
 type ToolContext struct {
-	Ingester                  *data.Ingester
-	ReportState               *ReportState
-	EditState                 *ReportEditState
-	Memory                    any            // Type: *agent.WorkingMemory
-	Subgoals                  SubgoalChecker // Instead of any, we use an interface to avoid circular imports
-	DelegateRegistryFactory   RegistryFactory
-	EmitFunc                  func(any) // Type: func(agent.RuntimeEvent)
-	SessionID                 string
-	WorkspaceID               string
-	SessionSourcesProvider    SessionSourcesProvider
+	Ingester                   *data.Ingester
+	ReportState                *ReportState
+	EditState                  *ReportEditState
+	Memory                     any            // Type: *agent.WorkingMemory
+	Subgoals                   SubgoalChecker // Instead of any, we use an interface to avoid circular imports
+	DelegateRegistryFactory    RegistryFactory
+	EmitFunc                   func(any) // Type: func(agent.RuntimeEvent)
+	SessionID                  string
+	WorkspaceID                string
+	SessionSourcesProvider     SessionSourcesProvider
 	PendingFileSourcesProvider PendingFileSourcesProvider
-	ProfileDetailProvider     ProfileDetailProvider
-	GovernanceProvider        GovernanceProvider
-	QueryLocker               QueryLocker
-	ProfileConfirmer          ProfileConfirmer
-	LiveQueryProvider         LiveQueryProvider
-	LiveTablesProvider        LiveTablesProvider
-	LiveTableDescribeProvider LiveTableDescribeProvider
-	SourceService             *service.SourceService
-	SourceFileLookup          SourceFileLookup
-	UploadLocker              UploadLocker
-	Now                       func() time.Time
-	FileService               *service.FileService
+	ProfileDetailProvider      ProfileDetailProvider
+	GovernanceProvider         GovernanceProvider
+	QueryLocker                QueryLocker
+	ProfileConfirmer           ProfileConfirmer
+	LiveQueryProvider          LiveQueryProvider
+	LiveTablesProvider         LiveTablesProvider
+	LiveTableDescribeProvider  LiveTableDescribeProvider
+	SourceService              *service.SourceService
+	SourceFileLookup           SourceFileLookup
+	UploadLocker               UploadLocker
+	Now                        func() time.Time
+	FileService                *service.FileService
 }
 
 // SourceFileLookup resolves a file-upload source in the given workspace to its

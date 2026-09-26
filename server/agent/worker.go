@@ -759,7 +759,14 @@ func delegateToolFailure(childRunID, roleName, taskInstruction string, allowedTo
 }
 
 func (t *DelegateTaskTool) buildDelegateRegistry(allowed []string) *tools.Registry {
-	return t.RegistryFactory(allowed)
+	if t.RegistryFactory == nil {
+		return nil
+	}
+	ctx := t.ParentContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return t.RegistryFactory(ctx, allowed)
 }
 
 func prepareRegistryRuntimeTools(reg *tools.Registry, ctx context.Context, emit func(RuntimeEvent)) {

@@ -232,4 +232,51 @@ describe("useAgentTransport", () => {
     await expect(connect()).rejects.toThrow("事件流连接失败");
     expect(store.connectionState).toBe("disconnected");
   });
+
+  it("does not regress a run status that SSE already advanced past waiting", async () => {
+    const store = useAgentStore();
+    store.setToken("test-token");
+    store.setSession("sess-1");
+    store.setMessages([]);
+
+    // A run waiting for user input (option chips visible).
+    store.startRun("run-1");
+    store.upsertRun({
+      id: "run-1",
+      sessionId: "sess-1",
+      status: "waiting_user_input",
+      createdAt: new Date().toISOString(),
+    });
+
+    // Slow POST /runs/run-1/input so the SSE event can land first.
+    let resolveInput;
+    global.fetch = vi.fn((url) => {
+      if (String(url).includes("/api/runs/run-1/input")) {
+        return new Promise((resolve) => {
+          resolveInput = resolve;
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const { sendMessage } = useAgentTransport();
+    const sent = sendMessage("选项 A");
+    // Let the input POST actually go out before the SSE event lands —
+    // the race being guarded is "SSE advances the run after the POST was
+    // sent but before its response is processed".
+    await flush(1);
+
+    // The SSE lifecycle event (separate connection) completes the run
+    // before the fetch continuation runs.
+    store.patchRun("run-1", { status: "completed" });
+    await flush();
+
+    resolveInput({ ok: true, json: async () => ({}), text: async () => "" });
+    await sent;
+    await flush();
+
+    // The local "running" patch must not overwrite the newer terminal
+    // status; otherwise the run is displayed as running forever.
+    expect(store.getRun("run-1")?.status).toBe("completed");
+  });
 });

@@ -168,6 +168,12 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
+	// Keep the worksheet value verbatim: sheet names may legitimately begin
+	// or end with a space (valid per the XLSX spec), and the ingester
+	// matches the raw value against the real sheet list. Validate before
+	// LockUpload: returning between LockUpload and UnlockUpload would leak
+	// uploadMu and wedge the whole session.
+	worksheet := r.FormValue("worksheet")
 	runtimeSession.LockUpload()
 	importer, importerOK := connector.(service.ImportingConnector)
 	var ingestResult *service.SnapshotImportResult
@@ -175,11 +181,6 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 	if !importerOK {
 		ingestErr = fmt.Errorf("source type %s does not support importing", source.SourceType)
 	} else {
-		worksheet := strings.TrimSpace(r.FormValue("worksheet"))
-		if worksheet != "" && worksheet != r.FormValue("worksheet") {
-			http.Error(w, "worksheet 必须保持原值", http.StatusBadRequest)
-			return
-		}
 		ingestResult, ingestErr = importer.Import(r.Context(), service.SourceImportRequest{
 			SourceID:    source.ID,
 			WorkspaceID: sess.WorkspaceID,

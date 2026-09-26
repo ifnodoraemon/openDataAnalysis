@@ -35,7 +35,7 @@ func (t *runtimeAwareTestTool) SetExecutionContext(ctx context.Context) {
 }
 
 func fixedRegistryFactory(registry *tools.Registry) tools.RegistryFactory {
-	return func(allowed []string) *tools.Registry {
+	return func(ctx context.Context, allowed []string) *tools.Registry {
 		return registry.CloneFiltered(allowed)
 	}
 }
@@ -102,7 +102,7 @@ func TestDelegateTaskToolReturnsStructuredFailureForMissingRegistryResult(t *tes
 	t.Parallel()
 
 	tool := &DelegateTaskTool{
-		RegistryFactory: func([]string) *tools.Registry { return nil },
+		RegistryFactory: func(context.Context, []string) *tools.Registry { return nil },
 	}
 	result, err := tool.Execute(json.RawMessage(`{
 		"role_name":"researcher",

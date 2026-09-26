@@ -533,10 +533,16 @@ func (c *FileUploadConnector) Import(ctx context.Context, req SourceImportReques
 	defer os.Remove(tempPath)
 
 	// Multi-sheet workbooks need an explicit choice; surface the sheet list
-	// before any snapshot/import state is created.
+	// before any snapshot/import state is created. A workbook excelize cannot
+	// open is also a structural condition the agent handles (it can read the
+	// original bytes in the sandbox), so route it to the same needs_agent
+	// flow instead of a generic 500.
 	if strings.TrimSpace(req.Worksheet) == "" && strings.EqualFold(filepath.Ext(tempPath), ".xlsx") {
 		sheets, sheetErr := data.ExcelSheetNames(tempPath)
-		if sheetErr == nil && len(sheets) > 1 {
+		if sheetErr != nil {
+			return nil, &data.StructureError{Detail: sheetErr.Error()}
+		}
+		if len(sheets) > 1 {
 			return nil, &WorksheetSelectionError{Sheets: sheets}
 		}
 	}

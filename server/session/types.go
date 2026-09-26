@@ -49,9 +49,9 @@ type Session struct {
 	// detached marks a session removed from the manager map (TTL cleanup or
 	// explicit delete). Late StartRun calls on stale pointers must fail
 	// instead of writing into deleted resources.
-	detached   bool
-	mu         sync.Mutex
-	uploadMu   sync.RWMutex
+	detached bool
+	mu       sync.Mutex
+	uploadMu sync.RWMutex
 }
 
 func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileService, sourceService *service.SourceService) (*Session, error) {
@@ -236,7 +236,7 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 			return result, nil
 		}
 	}
-	buildRuntimeRegistry = func(allowed []string) *tools.Registry {
+	buildRuntimeRegistry = func(runCtx context.Context, allowed []string) *tools.Registry {
 		reg := tools.NewRegistry()
 		reg.LoadGlobalTools(ctx)
 		delegable := make(map[string]struct{})
@@ -250,10 +250,11 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 			}
 			// Live availability: a transient failure at session-creation time
 			// must not permanently block delegating to a tool that is healthy
-			// now. Health caches keep this cheap.
+			// now. Health caches keep this cheap. runCtx is the dispatching
+			// run's context, so the probe is cancelled when the user cancels.
 			if tool, getErr := reg.Get(name); getErr == nil {
 				if checker, ok := tool.(tools.AvailabilityTool); ok {
-					if checkErr := checker.CheckAvailability(context.Background()); checkErr != nil {
+					if checkErr := checker.CheckAvailability(runCtx); checkErr != nil {
 						continue
 					}
 				}

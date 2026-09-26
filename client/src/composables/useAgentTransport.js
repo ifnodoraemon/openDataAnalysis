@@ -348,11 +348,16 @@ export function useAgentTransport() {
         });
         // The resumed run does not re-emit run_started, so patch the local
         // status here — otherwise the waiting-input option chips stay
-        // rendered for the whole resumed execution.
-        store.patchRun(waitingRunId, {
-          status: "running",
-          updatedAt: new Date().toISOString(),
-        });
+        // rendered for the whole resumed execution. SSE lifecycle events
+        // arrive on a separate connection and can already have moved this
+        // run to a terminal state before this fetch continuation runs; only
+        // patch while the run is still locally waiting.
+        if (store.getRun(waitingRunId)?.status === "waiting_user_input") {
+          store.patchRun(waitingRunId, {
+            status: "running",
+            updatedAt: new Date().toISOString(),
+          });
+        }
       } else {
         const res = await request(`/api/sessions/${sessionId}/chat`, {
           method: "POST",
@@ -446,6 +451,12 @@ export function useAgentTransport() {
       await openRun(latest.id);
     } catch (err) {
       console.error("加载最近对话失败：", err);
+      // An unexplained empty chat after a reload or session switch looks
+      // broken; surface the failure so the user knows to retry.
+      store.addMessage({
+        type: "error",
+        content: "加载最近对话失败，请刷新页面或从任务列表重新打开",
+      });
     }
   }
 

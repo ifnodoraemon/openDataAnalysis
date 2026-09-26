@@ -46,9 +46,9 @@ func init() {
 }
 
 type InspectSessionSourcesTool struct {
-	Provider         SessionSourcesProvider
-	PendingProvider  PendingFileSourcesProvider
-	parentCtx        context.Context
+	Provider        SessionSourcesProvider
+	PendingProvider PendingFileSourcesProvider
+	parentCtx       context.Context
 }
 
 func (t *InspectSessionSourcesTool) SetExecutionContext(ctx context.Context) { t.parentCtx = ctx }
@@ -80,13 +80,18 @@ func (t *InspectSessionSourcesTool) Execute(args json.RawMessage) (string, error
 	}
 	var pending []map[string]string
 	if t.PendingProvider != nil {
-		if pendingFiles, pendErr := t.PendingProvider(t.parentCtx); pendErr == nil {
-			for _, file := range pendingFiles {
-				pending = append(pending, map[string]string{
-					"source_id":    file.SourceID,
-					"display_name": file.DisplayName,
-				})
-			}
+		// A failed pending-file lookup must be a hard error: returning
+		// success with no pending_file_uploads is indistinguishable from
+		// "nothing pending" and breaks the needs-agent recovery contract.
+		pendingFiles, pendErr := t.PendingProvider(t.parentCtx)
+		if pendErr != nil {
+			return "", pendErr
+		}
+		for _, file := range pendingFiles {
+			pending = append(pending, map[string]string{
+				"source_id":    file.SourceID,
+				"display_name": file.DisplayName,
+			})
 		}
 	}
 	payload := map[string]interface{}{

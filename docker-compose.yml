@@ -105,8 +105,10 @@ services:
       # The root filesystem is read-only; without writable cache dirs
       # fontconfig/matplotlib rebuild the font cache on every cold start
       # (~1.6s), which once tripped the health-check timeout and disabled
-      # code_run_python for a whole session.
-      FONTCONFIG_CACHE_DIR: /tmp/fontconfig
+      # code_run_python for a whole session. fontconfig has no dedicated
+      # env var: it honors XDG_CACHE_HOME and appends the `fontconfig`
+      # subdir itself.
+      XDG_CACHE_HOME: /tmp/xdg-cache
       MPLCONFIGDIR: /tmp/mplconfigdir
     volumes:
       - python-workspace:/app/workspace

@@ -39,27 +39,33 @@
           </button>
         </aside>
 
-         <main class="modal-content-area">
-          <!-- Handoff panel for uploads the strict importer rejects -->
+        <main class="modal-content-area">
+          <!-- Handoff panel for uploads the strict importer rejects.
+               NOTE: InputBar.vue implements the same pending-worksheet/agent
+               handoff contract; keep them in sync. -->
           <div
             v-if="pendingAgent && currentTab === 'active'"
             class="worksheet-picker"
           >
-            <div class="worksheet-picker-header">
+            <div class="worksheet-picker-header" :title="pendingAgent.reason">
               <strong>{{ pendingAgent.filename }}</strong>
               <span
-                >已上传，但结构不符合直接导入要求（{{ pendingAgent.reason
-                }}）。可让智能体读取原始文件、理解结构后清洗导入。</span
+                >已上传，但结构不符合直接导入要求。可让智能体读取原始文件、理解结构后清洗导入。</span
               >
             </div>
             <div class="worksheet-list">
               <button
                 class="worksheet-btn"
+                :disabled="isImportingSheet"
                 @click="handoffToAgent(pendingAgent)"
               >
                 🤖 让智能体处理
               </button>
-              <button class="worksheet-btn" @click="pendingAgent = null">
+              <button
+                class="worksheet-btn"
+                :disabled="isImportingSheet"
+                @click="dismissPendingAgent"
+              >
                 暂不处理
               </button>
             </div>
@@ -75,7 +81,11 @@
               <span
                 >包含 {{ pendingWorksheet.sheets.length }} 个工作表，请选择要导入的一个：</span
               >
-              <button class="btn-text" @click="cancelWorksheetSelection">
+              <button
+                class="btn-text"
+                :disabled="isImportingSheet"
+                @click="cancelWorksheetSelection"
+              >
                 取消
               </button>
             </div>
@@ -98,7 +108,6 @@
               </button>
             </div>
           </div>
-
 
           <!-- Tab: Active Session Sources -->
           <div v-if="currentTab === 'active'" class="tab-pane">
@@ -419,8 +428,15 @@ const importCatalog = ref([]);
 const isImporting = ref(false);
 const importError = ref("");
 const createError = ref("");
-const pendingWorksheet = ref(null);
-const pendingAgent = ref(null);
+// FIFO queues: batch uploads can yield several multi-sheet/needs-agent
+// files at once, and a single-slot ref would strand every earlier file's
+// picker. The template renders the queue head via the computed aliases.
+// NOTE: InputBar.vue implements the same pending-worksheet/agent handoff
+// contract; keep them in sync.
+const pendingWorksheets = ref([]);
+const pendingAgents = ref([]);
+const pendingWorksheet = computed(() => pendingWorksheets.value[0] || null);
+const pendingAgent = computed(() => pendingAgents.value[0] || null);
 
 function handoffToAgent(pending) {
   if (!pending?.sourceId) return;
@@ -428,9 +444,17 @@ function handoffToAgent(pending) {
     sourceId: pending.sourceId,
     filename: pending.filename,
   };
-  pendingWorksheet.value = null;
-  pendingAgent.value = null;
+  pendingWorksheets.value = pendingWorksheets.value.filter(
+    (p) => p.sourceId !== pending.sourceId,
+  );
+  pendingAgents.value = pendingAgents.value.filter(
+    (p) => p.sourceId !== pending.sourceId,
+  );
   emit("close");
+}
+
+function dismissPendingAgent() {
+  pendingAgents.value.shift();
 }
 const isImportingSheet = ref(false);
 const isUploading = ref(false);
@@ -493,6 +517,14 @@ watch(
   async (open) => {
     if (open && store.sourceTypes.length === 0) {
       await store.fetchSourceTypes();
+    }
+    if (!open) {
+      // The component stays mounted (parents toggle the open prop), so
+      // closing via overlay/× must reset picker state: a stale
+      // pendingWorksheet/pendingAgent would resurrect on reopen.
+      pendingWorksheets.value = [];
+      pendingAgents.value = [];
+      isImportingSheet.value = false;
     }
   },
 );
@@ -600,52 +632,64 @@ async function handleFileUpload(e) {
   isUploading.value = true;
   try {
     const sessionId = await ensureSession();
+    const failures = [];
     for (const file of uploadableFiles) {
-      const formData = new FormData();
-      formData.append("file", file);
-      const response = await fetch(
-        `/api/upload?session_id=${encodeURIComponent(sessionId)}`,
-        {
-          method: "POST",
-          headers: agentStore.token
-            ? { Authorization: `Bearer ${agentStore.token}` }
-            : {},
-          body: formData,
-        },
-      );
-      if (!response.ok) {
-        throw new Error((await response.text()) || `HTTP ${response.status}`);
-      }
-      const data = await response.json().catch(() => null);
-      if (data?.ingest_status === "worksheet_selection_required") {
-        pendingWorksheet.value = {
-          sourceId: data.source_id,
-          sessionId,
-          filename: file.name,
-          sheets: data.worksheets || [],
-        };
-        currentTab.value = "active";
-        continue;
-      }
-      if (data?.ingest_status === "needs_agent") {
-        pendingAgent.value = {
-          sourceId: data.source_id,
-          filename: file.name,
-          reason: data.import_error || "结构较复杂",
-        };
-        currentTab.value = "active";
-        continue;
-      }
-      if (data?.ingest_status === "failed") {
-        throw new Error(data.message || "文件已上传，但导入失败");
+      // Per-file errors must not abort the remaining uploads; report each
+      // file's outcome independently.
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+        const response = await fetch(
+          `/api/upload?session_id=${encodeURIComponent(sessionId)}`,
+          {
+            method: "POST",
+            headers: agentStore.token
+              ? { Authorization: `Bearer ${agentStore.token}` }
+              : {},
+            body: formData,
+          },
+        );
+        if (!response.ok) {
+          throw new Error((await response.text()) || `HTTP ${response.status}`);
+        }
+        const data = await response.json().catch(() => null);
+        if (data?.ingest_status === "worksheet_selection_required") {
+          pendingWorksheets.value.push({
+            sourceId: data.source_id,
+            sessionId,
+            filename: file.name,
+            sheets: data.worksheets || [],
+          });
+          currentTab.value = "active";
+          continue;
+        }
+        if (data?.ingest_status === "needs_agent") {
+          pendingAgents.value.push({
+            sourceId: data.source_id,
+            filename: file.name,
+            reason: data.import_error || "结构较复杂",
+          });
+          currentTab.value = "active";
+          continue;
+        }
+        if (data?.ingest_status === "failed") {
+          // Upload succeeded; only the import failed — do not label this
+          // "上传失败".
+          throw new Error(data.message || "文件已上传，但导入失败");
+        }
+      } catch (err) {
+        failures.push(`${file.name}: ${err.message}`);
       }
     }
-    if (!pendingWorksheet.value && !pendingAgent.value) {
+    if (pendingWorksheet.value === null && pendingAgent.value === null) {
       await store.fetchSessionSources(sessionId);
       currentTab.value = "active";
     }
+    if (failures.length > 0) {
+      alert(`以下文件未能导入：\n${failures.join("\n")}`);
+    }
   } catch (err) {
-    alert("上传失败：" + err.message);
+    alert(`上传失败：${err.message}`);
   } finally {
     isUploading.value = false;
     e.target.value = "";
@@ -668,16 +712,21 @@ async function handleSelectWorksheet(sheet) {
       throw new Error(result.error || "导入失败");
     }
     if (result?.ingest_status === "needs_agent") {
-      pendingAgent.value = {
+      pendingAgents.value.push({
         sourceId: pending.sourceId,
         filename: pending.filename,
         reason: result.import_error || "结构较复杂",
-      };
-      pendingWorksheet.value = null;
+      });
+      pendingWorksheets.value.shift();
       return;
     }
-    pendingWorksheet.value = null;
-    await store.fetchSessionSources(pending.sessionId);
+    if (result?.ingest_status !== "success") {
+      // Only an explicit success status means the sheet was imported.
+      throw new Error(result?.message || "导入失败");
+    }
+    pendingWorksheets.value.shift();
+    // importFromSource refreshes session sources on its success path; no
+    // second identical GET is needed here.
   } catch (err) {
     alert("导入工作表失败：" + err.message);
   } finally {
@@ -686,7 +735,7 @@ async function handleSelectWorksheet(sheet) {
 }
 
 function cancelWorksheetSelection() {
-  pendingWorksheet.value = null;
+  pendingWorksheets.value.shift();
 }
 </script>
 

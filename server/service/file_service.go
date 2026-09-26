@@ -66,10 +66,13 @@ func (s *FileService) Upload(ctx context.Context, in UploadFileInput) (*domain.F
 
 	now := time.Now()
 	file := &domain.File{
-		ID:              fileID,
-		WorkspaceID:     in.WorkspaceID,
-		UploadedBy:      in.UserID,
-		DisplayName:     in.FileName,
+		ID:          fileID,
+		WorkspaceID: in.WorkspaceID,
+		UploadedBy:  in.UserID,
+		// DisplayName flows into agent-visible output (pending file
+		// listings) and data source names; persist the sanitized value so
+		// display_name is never raw user-controlled text.
+		DisplayName:     sanitizeFilename(in.FileName),
 		Purpose:         domain.FilePurposeSource,
 		ContentType:     in.ContentType,
 		SizeBytes:       obj.Size,
@@ -354,16 +357,16 @@ func (s *FileService) OpenStoredObject(ctx context.Context, userID, workspaceID,
 	return s.Storage.Get(ctx, storageKey)
 }
 
-// unsafeFilenameChars covers path separators and shell/URI-significant
-// characters; Unicode letters (e.g. Chinese filenames) are kept as-is.
-var unsafeFilenameChars = regexp.MustCompile(`[\x00-\x1f\x7f/\\:*?"<>|]`)
+// safeFilenamePattern allows Unicode letters and digits (e.g. Chinese
+// filenames) plus `_`, `.`, and `-`. Everything else — path separators,
+// shell/URI metacharacters, whitespace, control characters, and Unicode
+// format characters (zero-width, bidi overrides, BOM) — is rejected, which
+// restores the allowlist semantics the earlier blocklist approach lost.
+var safeFilenamePattern = regexp.MustCompile(`^[\p{L}\p{N}_.-]+$`)
 
 func sanitizeFilename(name string) string {
 	name = strings.TrimSpace(filepath.Base(name))
-	if name == "" || name == "." || name == ".." {
-		return "upload.bin"
-	}
-	if unsafeFilenameChars.MatchString(name) || len(name) > 128 {
+	if name == "" || name == "." || name == ".." || len(name) > 128 || !safeFilenamePattern.MatchString(name) {
 		return "upload.bin"
 	}
 	return name

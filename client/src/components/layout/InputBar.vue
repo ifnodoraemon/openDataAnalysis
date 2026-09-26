@@ -29,7 +29,7 @@
           type="button"
           class="worksheet-chip cancel"
           :disabled="isImportingSheet"
-          @click="pendingWorksheet = null"
+          @click="dismissPendingWorksheet"
         >
           取消
         </button>
@@ -54,7 +54,7 @@
         <button
           type="button"
           class="worksheet-chip cancel"
-          @click="pendingAgent = null"
+          @click="dismissPendingAgent"
         >
           暂不处理
         </button>
@@ -200,12 +200,16 @@ const dataSourceStore = useDataSourceStore();
 
 const input = ref("");
 
-// 智能体接管请求（本组件或数据源弹窗发起）：预填一条引导消息，由用户确认发送
+// 智能体接管请求（本组件或数据源弹窗发起）：预填一条引导消息，由用户确认发送。
+// 追加而非覆盖，避免吞掉用户正在输入的草稿。
 watch(
   () => store.agentHandoff,
   (req) => {
     if (!req) return;
-    input.value = `请读取数据源 ${req.sourceId}（文件：${req.filename}）的原始文件，先向我说明你识别到的表结构（各工作表的表头与示例数据），我确认后你再清洗数据并导入为可查询的数据表。`;
+    const prompt = `请读取数据源 ${req.sourceId}（文件：${req.filename}）的原始文件，先向我说明你识别到的表结构（各工作表的表头与示例数据），我确认后你再清洗数据并导入为可查询的数据表。`;
+    input.value = input.value.trim()
+      ? `${input.value.trim()}\n${prompt}`
+      : prompt;
     store.agentHandoff = null;
   },
 );
@@ -279,8 +283,15 @@ function toggleOption(id) {
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
-const pendingWorksheet = ref(null);
-const pendingAgent = ref(null);
+// FIFO queues: batch uploads can yield several multi-sheet/needs-agent
+// files at once, and a single-slot ref would strand every earlier file's
+// picker. The template renders the queue head via the computed aliases.
+// NOTE: InputBar.vue and DataSourceModal.vue implement the same
+// pending-worksheet/agent handoff contract; keep them in sync.
+const pendingWorksheets = ref([]);
+const pendingAgents = ref([]);
+const pendingWorksheet = computed(() => pendingWorksheets.value[0] || null);
+const pendingAgent = computed(() => pendingAgents.value[0] || null);
 const isImportingSheet = ref(false);
 
 function handoffToAgent(pending) {
@@ -289,8 +300,20 @@ function handoffToAgent(pending) {
     sourceId: pending.sourceId,
     filename: pending.filename,
   };
-  pendingWorksheet.value = null;
-  pendingAgent.value = null;
+  pendingWorksheets.value = pendingWorksheets.value.filter(
+    (p) => p.sourceId !== pending.sourceId,
+  );
+  pendingAgents.value = pendingAgents.value.filter(
+    (p) => p.sourceId !== pending.sourceId,
+  );
+}
+
+function dismissPendingWorksheet() {
+  pendingWorksheets.value.shift();
+}
+
+function dismissPendingAgent() {
+  pendingAgents.value.shift();
 }
 
 async function pickWorksheet(sheet) {
@@ -309,20 +332,26 @@ async function pickWorksheet(sheet) {
       throw new Error(result.error || "导入失败");
     }
     if (result?.ingest_status === "needs_agent") {
-      pendingAgent.value = {
+      pendingAgents.value.push({
         sourceId: pending.sourceId,
         filename: pending.filename,
         reason: result.import_error || "结构较复杂",
-      };
-      pendingWorksheet.value = null;
+      });
+      pendingWorksheets.value.shift();
       return;
+    }
+    if (result?.ingest_status !== "success") {
+      // Only an explicit success status means the sheet was imported; a
+      // drifted contract must not render a false 已导入 message.
+      throw new Error(result?.message || "导入失败");
     }
     store.addMessage({
       type: "user",
       content: `📎 已导入工作表「${sheet}」（${pending.filename}）`,
     });
-    pendingWorksheet.value = null;
-    await dataSourceStore.fetchSessionSources(pending.sessionId);
+    pendingWorksheets.value.shift();
+    // importFromSource refreshes session sources on its success path; no
+    // second identical GET is needed here.
   } catch (err) {
     store.addMessage({
       type: "error",
@@ -376,12 +405,12 @@ async function handleFile(e) {
         }
         const data = await res.json();
         if (data?.ingest_status === "worksheet_selection_required") {
-          pendingWorksheet.value = {
+          pendingWorksheets.value.push({
             sourceId: data.source_id,
             sessionId,
             filename: file.name,
             sheets: data.worksheets || [],
-          };
+          });
           store.addMessage({
             type: "user",
             content: `📎 ${file.name} 已上传（包含多个工作表，请选择要导入的表）`,
@@ -389,11 +418,11 @@ async function handleFile(e) {
           continue;
         }
         if (data?.ingest_status === "needs_agent") {
-          pendingAgent.value = {
+          pendingAgents.value.push({
             sourceId: data.source_id,
             filename: file.name,
             reason: data.import_error || "结构较复杂",
-          };
+          });
           store.addMessage({
             type: "user",
             content: `📎 ${file.name} 已上传（结构较复杂，无法直接导入）`,
