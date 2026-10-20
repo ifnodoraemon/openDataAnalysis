@@ -319,6 +319,24 @@ func runMessageToRuntimeEvent(msg domain.RunMessage) (agent.RuntimeEvent, error)
 			return agent.RuntimeEvent{}, err
 		}
 		evt.Data = data
+	case string(agent.EventHistoryCompacted):
+		var data agent.HistoryCompactedData
+		if err := json.Unmarshal([]byte(msg.Content), &data); err != nil {
+			return agent.RuntimeEvent{}, err
+		}
+		evt.Data = data
+	case string(agent.EventApprovalDenied):
+		var data agent.ApprovalDeniedData
+		if err := json.Unmarshal([]byte(msg.Content), &data); err != nil {
+			return agent.RuntimeEvent{}, err
+		}
+		evt.Data = data
+	case string(agent.EventRunUsage):
+		var data agent.RunUsageData
+		if err := json.Unmarshal([]byte(msg.Content), &data); err != nil {
+			return agent.RuntimeEvent{}, err
+		}
+		evt.Data = data
 	default:
 		evt.Data = json.RawMessage(msg.Content)
 	}
