@@ -21,6 +21,14 @@ import (
 // They compare structure (table and column names), not types: the dialects
 // legitimately differ there (timestamptz vs DATETIME, bigserial vs INTEGER).
 
+// dialectInfrastructureTables are per-dialect bookkeeping rather than product
+// schema: Postgres tracks applied migrations in goose's own table, SQLite in
+// schema_migrations.
+var dialectInfrastructureTables = map[string]struct{}{
+	"schema_migrations": {},
+	"goose_db_version":  {},
+}
+
 var (
 	createTablePattern = regexp.MustCompile(`(?is)create\s+table\s+(?:if\s+not\s+exists\s+)?["']?(\w+)["']?\s*\((.*?)\n\s*\)\s*;`)
 	addColumnPattern   = regexp.MustCompile(`(?is)alter\s+table\s+["']?(\w+)["']?\s+add\s+column\s+(?:if\s+not\s+exists\s+)?["']?(\w+)["']?`)
@@ -58,6 +66,9 @@ func parseMigrationSchema(t *testing.T, files fs.FS) map[string][]string {
 		}
 		for _, match := range createTablePattern.FindAllStringSubmatch(string(content), -1) {
 			table := strings.ToLower(match[1])
+			if _, infra := dialectInfrastructureTables[table]; infra {
+				continue
+			}
 			schema[table] = parseColumnNames(match[2])
 		}
 		// Later migrations extend tables with ALTER TABLE ... ADD COLUMN.
@@ -116,6 +127,9 @@ func sqliteSchema(t *testing.T, db *sql.DB) map[string][]string {
 		var name string
 		if err := rows.Scan(&name); err != nil {
 			t.Fatalf("scan table name: %v", err)
+		}
+		if _, infra := dialectInfrastructureTables[name]; infra {
+			continue
 		}
 		tables = append(tables, name)
 	}
@@ -245,5 +259,32 @@ func TestMigrationSchemaParseIsSubstantive(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected run_messages.tool_call_id in %#v", runMessages)
+	}
+}
+
+func TestSQLiteSchemaVersionIsRecordedAndGuarded(t *testing.T) {
+	t.Parallel()
+
+	store, err := Open(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatalf("open metadata store: %v", err)
+	}
+	defer store.DB.Close()
+
+	version, err := store.SchemaVersion()
+	if err != nil {
+		t.Fatalf("SchemaVersion: %v", err)
+	}
+	if version != SQLiteSchemaVersion {
+		t.Fatalf("expected the current generation to be recorded, got %d", version)
+	}
+
+	// A database written by a newer binary must refuse to open rather than be
+	// silently used with an older, incompatible schema.
+	if _, err := store.DB.Exec(`INSERT INTO schema_migrations (version, applied_at) VALUES (?, datetime('now'))`, SQLiteSchemaVersion+1); err != nil {
+		t.Fatalf("record a future version: %v", err)
+	}
+	if err := store.recordSchemaVersion(); err == nil {
+		t.Fatalf("a newer recorded schema version must be refused")
 	}
 }

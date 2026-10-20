@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/ifnodoraemon/openDataAnalysis/agent"
 	"github.com/ifnodoraemon/openDataAnalysis/data"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
+	"github.com/ifnodoraemon/openDataAnalysis/internal/idgen"
 	"github.com/ifnodoraemon/openDataAnalysis/internal/jsoncontract"
 	"github.com/ifnodoraemon/openDataAnalysis/service"
 	"github.com/ifnodoraemon/openDataAnalysis/tools"
@@ -306,7 +306,7 @@ func (s *Session) StartRun(parent context.Context) (string, context.Context, err
 		return "", nil, fmt.Errorf("a task is still running or not yet cleaned up, please wait and try again after stopping")
 	}
 
-	runID := "r_" + uuid.New().String()[:8]
+	runID := idgen.Prefixed("r_")
 	ctx, cancel := context.WithCancel(parent)
 	s.ActiveRun = &RunState{
 		RunID:     runID,

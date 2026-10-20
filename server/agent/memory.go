@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/ifnodoraemon/openDataAnalysis/internal/idgen"
 )
 
 const (
@@ -210,7 +210,7 @@ func (s *SubgoalManager) AddGoalWithBlocking(description, parentGoalID string, b
 		}
 	}
 
-	id := "goal_" + uuid.New().String()[:8]
+	id := idgen.Prefixed("goal_")
 	s.Goals = append(s.Goals, Subgoal{
 		ID:           id,
 		ParentGoalID: parentGoalID,

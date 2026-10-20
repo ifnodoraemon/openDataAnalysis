@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
+	"github.com/ifnodoraemon/openDataAnalysis/internal/idgen"
 	"github.com/ifnodoraemon/openDataAnalysis/repository"
 	"github.com/ifnodoraemon/openDataAnalysis/storage"
 )
@@ -46,7 +47,7 @@ func (s *FileService) Upload(ctx context.Context, in UploadFileInput) (*domain.F
 		return nil, fmt.Errorf("user not authorized to access workspace")
 	}
 
-	fileID := "f_" + uuid.New().String()[:8]
+	fileID := idgen.Prefixed("f_")
 	key := SourceFileKey(in.WorkspaceID, fileID, sanitizeFilename(in.FileName))
 	obj, err := s.Storage.Put(ctx, storage.PutObjectRequest{
 		Key:         key,
@@ -241,6 +242,32 @@ func (s *FileService) DeleteReportFile(ctx context.Context, fileID string, runID
 	return errors.Join(cleanupErrors...)
 }
 
+// replaceExistingReport removes the metadata rows of a report previously saved
+// for this run so the save is a replace rather than a duplicate-key failure.
+func (s *FileService) replaceExistingReport(ctx context.Context, runID, fileID string) error {
+	if s.ReportRepo != nil {
+		existing, err := s.ReportRepo.GetByRunID(ctx, runID)
+		if err != nil && !errors.Is(err, repository.ErrNotFound) {
+			return fmt.Errorf("failed to inspect the existing report for this task: %w", err)
+		}
+		if existing != nil {
+			if err := s.ReportRepo.Delete(ctx, existing.ID); err != nil {
+				return fmt.Errorf("failed to replace the existing report for this task: %w", err)
+			}
+		}
+	}
+	if s.FileRepo != nil {
+		if _, err := s.FileRepo.GetByID(ctx, fileID); err == nil {
+			if err := s.FileRepo.Delete(ctx, fileID); err != nil {
+				return fmt.Errorf("failed to replace the existing report file for this task: %w", err)
+			}
+		} else if !errors.Is(err, repository.ErrNotFound) {
+			return fmt.Errorf("failed to inspect the existing report file: %w", err)
+		}
+	}
+	return nil
+}
+
 func (s *FileService) SaveReportHTML(ctx context.Context, in SaveReportInput) (*domain.File, error) {
 	ok, err := s.WorkspaceRepo.IsMember(ctx, in.WorkspaceID, in.UserID)
 	if err != nil {
@@ -260,6 +287,14 @@ func (s *FileService) SaveReportHTML(ctx context.Context, in SaveReportInput) (*
 
 	fileID := "rep_" + in.RunID
 	displayName := "report-" + in.RunID + ".html"
+
+	// Re-finalizing a run is idempotent: the artifact ids are derived from the
+	// run id, so a previous report for this run must be replaced rather than
+	// colliding with the reports.run_id unique constraint and the files primary
+	// key. The stored object is overwritten by the Put below.
+	if err := s.replaceExistingReport(ctx, in.RunID, fileID); err != nil {
+		return nil, err
+	}
 
 	body := []byte(in.HTML)
 	key := ReportHTMLKey(in.WorkspaceID, in.RunID)

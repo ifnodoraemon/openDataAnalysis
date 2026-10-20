@@ -14,6 +14,7 @@ import (
 	"github.com/ifnodoraemon/openDataAnalysis/agent"
 	"github.com/ifnodoraemon/openDataAnalysis/auth"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
+	"github.com/ifnodoraemon/openDataAnalysis/internal/idgen"
 	"github.com/ifnodoraemon/openDataAnalysis/internal/jsoncontract"
 	"github.com/ifnodoraemon/openDataAnalysis/repository"
 	"github.com/ifnodoraemon/openDataAnalysis/service"
@@ -141,7 +142,7 @@ func (p delegateRunPersistence) StartChildRun(ctx context.Context, input agent.C
 	if strings.TrimSpace(input.GoalID) != input.GoalID {
 		return "", fmt.Errorf("goal id must be an exact value")
 	}
-	runID := "d_" + uuid.New().String()[:8]
+	runID := idgen.Prefixed("d_")
 	now := time.Now()
 	parentRunID := &input.ParentRunID
 	var goalID *string

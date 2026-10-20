@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/ifnodoraemon/openDataAnalysis/data"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
+	"github.com/ifnodoraemon/openDataAnalysis/internal/idgen"
 	"github.com/ifnodoraemon/openDataAnalysis/repository"
 	"github.com/ifnodoraemon/openDataAnalysis/service"
 )
@@ -94,7 +94,7 @@ func (m *Manager) GetOrCreate(ctx context.Context, sessionID, workspaceID, userI
 
 	id := sessionID
 	if id == "" {
-		id = "s_" + uuid.New().String()[:8]
+		id = idgen.Prefixed("s_")
 	}
 
 	created := true

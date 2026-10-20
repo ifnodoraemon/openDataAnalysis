@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -314,6 +315,10 @@ func (s *Store) migrate() error {
 			jti TEXT PRIMARY KEY,
 			expires_at_unix INTEGER NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS schema_migrations (
+			version INTEGER PRIMARY KEY,
+			applied_at DATETIME NOT NULL
+		)`,
 	}
 
 	for _, stmt := range stmts {
@@ -343,7 +348,49 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	return s.recordSchemaVersion()
+}
+
+// SQLiteSchemaVersion is the schema generation this binary expects. It mirrors
+// the highest goose migration applied to Postgres, so both dialects report the
+// same generation.
+const SQLiteSchemaVersion = 5
+
+// recordSchemaVersion writes the current generation and refuses to open a
+// database written by a newer binary. Without a recorded version the only
+// guard against an incompatible schema was a set of ad-hoc column checks, which
+// can only detect the specific columns someone remembered to list.
+func (s *Store) recordSchemaVersion() error {
+	var recorded sql.NullInt64
+	if err := s.DB.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&recorded); err != nil {
+		return fmt.Errorf("failed to read metadata schema version: %w", err)
+	}
+	if recorded.Valid && recorded.Int64 > SQLiteSchemaVersion {
+		return fmt.Errorf(
+			"metadata schema version %d is newer than this binary supports (%d); upgrade the server or restore a compatible database",
+			recorded.Int64, SQLiteSchemaVersion)
+	}
+	if recorded.Valid && recorded.Int64 == SQLiteSchemaVersion {
+		return nil
+	}
+	if _, err := s.DB.Exec(
+		`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?) ON CONFLICT(version) DO NOTHING`,
+		SQLiteSchemaVersion, time.Now()); err != nil {
+		return fmt.Errorf("failed to record metadata schema version: %w", err)
+	}
 	return nil
+}
+
+// SchemaVersion reports the recorded metadata schema generation.
+func (s *Store) SchemaVersion() (int, error) {
+	var version sql.NullInt64
+	if err := s.DB.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
+		return 0, err
+	}
+	if !version.Valid {
+		return 0, nil
+	}
+	return int(version.Int64), nil
 }
 
 func validateSessionSourceBindingsShape(db *sql.DB) error {
