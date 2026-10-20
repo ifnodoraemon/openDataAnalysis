@@ -21,10 +21,14 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.RunMessage) 
 func (r *MessageRepository) ListByRun(ctx context.Context, runID string) ([]domain.RunMessage, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, run_id, session_id, workspace_id, type, name, tool_call_id, content, success, duration, created_at
-		FROM run_messages
-		WHERE run_id = ?
+		FROM (
+			SELECT id, run_id, session_id, workspace_id, type, name, tool_call_id, content, success, duration, created_at
+			FROM run_messages
+			WHERE run_id = ?
+			ORDER BY created_at DESC
+			LIMIT 5000
+		)
 		ORDER BY created_at ASC
-		LIMIT 5000
 	`, runID)
 	if err != nil {
 		return nil, err
@@ -68,11 +72,15 @@ func (r *MessageRepository) ListByRunPath(ctx context.Context, runID string) ([]
 			SELECT r.id, r.parent_run_id, r.created_at FROM analysis_runs r
 			INNER JOIN run_path p ON r.id = p.parent_run_id
 		)
-		SELECT m.id, m.run_id, m.session_id, m.workspace_id, m.type, m.name, m.tool_call_id, m.content, m.success, m.duration, m.created_at
-		FROM run_messages m
-		JOIN run_path p ON m.run_id = p.id
-		ORDER BY m.created_at ASC
-		LIMIT 5000
+		SELECT id, run_id, session_id, workspace_id, type, name, tool_call_id, content, success, duration, created_at
+		FROM (
+			SELECT m.id, m.run_id, m.session_id, m.workspace_id, m.type, m.name, m.tool_call_id, m.content, m.success, m.duration, m.created_at
+			FROM run_messages m
+			JOIN run_path p ON m.run_id = p.id
+			ORDER BY m.created_at DESC
+			LIMIT 5000
+		)
+		ORDER BY created_at ASC
 	`, runID)
 	if err != nil {
 		return nil, err

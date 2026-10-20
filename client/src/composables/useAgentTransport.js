@@ -148,6 +148,29 @@ export function useAgentTransport() {
         }
       };
 
+      // Named events carry protocol-level signals rather than run events, so
+      // they are bound separately from onmessage. The guard keeps minimal
+      // EventSource implementations (and test doubles) working.
+      const onNamedEvent = (name, handler) => {
+        if (typeof es.addEventListener === "function")
+          es.addEventListener(name, handler);
+      };
+
+      onNamedEvent("resync_required", () => {
+        // The server could not locate our cursor, so replayed events cannot be
+        // trusted to fill the gap. Reload state from the authoritative endpoint.
+        lastEventId = "";
+        resyncSessionState().catch((err) => {
+          console.error("游标失效后重新同步失败", err);
+        });
+      });
+
+      onNamedEvent("overflow", (e) => {
+        // The server dropped events under backpressure and closes the stream.
+        // Reconnect from the last acknowledged cursor so the gap is replayed.
+        console.warn("事件流溢出，将重连补齐", e.data);
+      });
+
       es.onerror = () => {
         connected.value = false;
         if (!opened) {

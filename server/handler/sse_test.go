@@ -139,14 +139,18 @@ func TestSessionReplayMessagesLocatesCursorInTimeOrder(t *testing.T) {
 		{ID: "m_4", Type: "tool_result", Content: "four", CreatedAt: time.Now().Add(-1 * time.Second)},
 	}
 
-	if got := sessionReplayMessages(messages, ""); len(got) != 0 {
-		t.Fatalf("expected no replay without cursor, got %d", len(got))
+	if got, found := sessionReplayMessages(messages, ""); len(got) != 0 || found {
+		t.Fatalf("expected no replay without cursor, got %d (found=%v)", len(got), found)
 	}
-	if got := sessionReplayMessages(messages, "m_2"); len(got) != 2 || got[0].ID != "m_3" || got[1].ID != "m_4" {
-		t.Fatalf("expected replay strictly after cursor, got %#v", got)
+	got, found := sessionReplayMessages(messages, "m_2")
+	if !found || len(got) != 2 || got[0].ID != "m_3" || got[1].ID != "m_4" {
+		t.Fatalf("expected replay strictly after cursor, got %#v (found=%v)", got, found)
 	}
-	if got := sessionReplayMessages(messages, "missing"); len(got) != len(messages) {
-		t.Fatalf("expected full replay for unknown cursor, got %d", len(got))
+	// An unknown cursor means the client's position cannot be determined.
+	// Replaying the whole session would be unbounded and still not prove the
+	// client is consistent, so the caller is told to resynchronize instead.
+	if got, found := sessionReplayMessages(messages, "missing"); found || len(got) != 0 {
+		t.Fatalf("expected an unusable cursor to report not-found, got %d (found=%v)", len(got), found)
 	}
 }
 
@@ -282,5 +286,24 @@ func TestSSEHandlerReplaysPersistedEventsAfterLastEventID(t *testing.T) {
 	}
 	if !strings.Contains(body, `"content":"working"`) || !strings.Contains(body, `"summary":"done"`) {
 		t.Fatalf("expected reconstructed payloads, got %q", body)
+	}
+}
+
+func TestWriteSSEResyncRequiredEmitsNamedEvent(t *testing.T) {
+	t.Parallel()
+
+	var buf strings.Builder
+	if err := writeSSEResyncRequired(&buf); err != nil {
+		t.Fatalf("writeSSEResyncRequired: %v", err)
+	}
+	out := buf.String()
+	if !strings.HasPrefix(out, "event: resync_required\n") {
+		t.Fatalf("expected a named event so the client can bind it, got %q", out)
+	}
+	if !strings.HasSuffix(out, "\n\n") {
+		t.Fatalf("SSE frames must end with a blank line, got %q", out)
+	}
+	if !strings.Contains(out, "cursor_not_found") {
+		t.Fatalf("expected a machine-readable reason, got %q", out)
 	}
 }

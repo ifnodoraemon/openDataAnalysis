@@ -224,7 +224,20 @@ func replaySessionMessages(w io.Writer, flusher http.Flusher, r *http.Request, s
 		log.Printf("SSE replay load failed session_id=%s cursor=%s err=%v", sessionID, clipLogText(lastEventID, 64), err)
 		return replayed
 	}
-	for _, msg := range sessionReplayMessages(messages, lastEventID) {
+	replay, cursorFound := sessionReplayMessages(messages, lastEventID)
+	if !cursorFound {
+		// The client's cursor is not in this session's history, so the runtime
+		// cannot know what it already has. Replaying everything would be
+		// unbounded; asking for an explicit resynchronization is bounded and
+		// honest about the gap.
+		log.Printf("SSE replay cursor not found session_id=%s cursor=%s; requesting resync", sessionID, clipLogText(lastEventID, 64))
+		if err := writeSSEResyncRequired(w); err != nil {
+			return replayed
+		}
+		flusher.Flush()
+		return replayed
+	}
+	for _, msg := range replay {
 		evt, err := runMessageToRuntimeEvent(msg)
 		if err != nil {
 			log.Printf("SSE replay event decode failed session_id=%s message_id=%s type=%s err=%v", sessionID, msg.ID, msg.Type, err)
@@ -244,16 +257,21 @@ func replaySessionMessages(w io.Writer, flusher http.Flusher, r *http.Request, s
 	return replayed
 }
 
-func sessionReplayMessages(messages []domain.RunMessage, cursor string) []domain.RunMessage {
+// sessionReplayMessages returns the messages a reconnecting client has not
+// seen. found reports whether the cursor was located in this session's history:
+// when it was not, the client's position is unknown and replaying the entire
+// session would be both unbounded and misleading, so the caller asks the client
+// to resynchronize instead.
+func sessionReplayMessages(messages []domain.RunMessage, cursor string) (replay []domain.RunMessage, found bool) {
 	if cursor == "" {
-		return nil
+		return nil, false
 	}
 	for i, msg := range messages {
 		if msg.ID == cursor {
-			return messages[i+1:]
+			return messages[i+1:], true
 		}
 	}
-	return messages
+	return nil, false
 }
 
 func runMessageToRuntimeEvent(msg domain.RunMessage) (agent.RuntimeEvent, error) {
@@ -314,6 +332,20 @@ func writeSSEEvent(w io.Writer, id string, data []byte) error {
 		}
 	}
 	_, err := fmt.Fprintf(w, "data: %s\n\n", data)
+	return err
+}
+
+// writeSSEResyncRequired tells the client its cursor is unusable and that it
+// must reload session state instead of relying on replayed events.
+func writeSSEResyncRequired(w io.Writer) error {
+	payload, err := json.Marshal(map[string]string{
+		"reason":  "cursor_not_found",
+		"message": "增量回放游标已失效，请重新同步会话状态。",
+	})
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "event: resync_required\ndata: %s\n\n", payload)
 	return err
 }
 
