@@ -420,14 +420,10 @@ func TestInspectReportEditStateToolLayoutScope(t *testing.T) {
 	}
 }
 
-func TestCompactMessagesByMeasuredPromptTokens(t *testing.T) {
+func TestApplyCompactionReplacesSpanWithSummary(t *testing.T) {
 	t.Parallel()
 
-	engine := &Engine{
-		policy:  "system",
-		history: []ConversationItem{},
-	}
-
+	engine := &Engine{policy: "system", history: []ConversationItem{}}
 	for i := 0; i < 16; i++ {
 		engine.history = append(engine.history,
 			ConversationItem{Role: LLMRoleUser, Content: strings.Repeat("a", 40000)},
@@ -435,17 +431,29 @@ func TestCompactMessagesByMeasuredPromptTokens(t *testing.T) {
 		)
 	}
 
-	engine.compactMessagesLocked(contextCompactTriggerTokens + 1)
-
-	if len(engine.history) >= 33 {
-		t.Fatalf("expected messages to be compacted, got %d", len(engine.history))
+	before := len(engine.history)
+	span, count := engine.selectCompactionSpan()
+	if count == 0 || len(span) != count {
+		t.Fatalf("expected a non-empty compaction span, got count=%d span=%d", count, len(span))
 	}
-	if engine.omittedHistoryMessages == 0 {
-		t.Fatalf("expected omitted-message count after compaction")
+
+	engine.applyCompaction(count, "用户在反复追问同一件事。")
+
+	if len(engine.history) != before-count+1 {
+		t.Fatalf("expected the span to be replaced by one summary item, got %d items", len(engine.history))
+	}
+	if !strings.HasPrefix(engine.history[0].Content, "Earlier conversation in this session was compacted") {
+		t.Fatalf("expected the summary item first, got %q", engine.history[0].Content)
+	}
+	if !strings.Contains(engine.history[0].Content, "<compacted-summary>") {
+		t.Fatalf("expected the summary marker, got %q", engine.history[0].Content)
+	}
+	if engine.omittedHistoryMessages != 0 {
+		t.Fatalf("a summary carries the facts, so nothing should be reported as omitted, got %d", engine.omittedHistoryMessages)
 	}
 }
 
-func TestCompactMessagesLockedSkipsWithoutMeasuredTokens(t *testing.T) {
+func TestApplyCompactionWithoutSummaryCountsOmittedItems(t *testing.T) {
 	t.Parallel()
 
 	engine := &Engine{
@@ -457,10 +465,42 @@ func TestCompactMessagesLockedSkipsWithoutMeasuredTokens(t *testing.T) {
 		},
 	}
 
-	before := len(engine.history)
-	engine.compactMessagesLocked(0)
-	if len(engine.history) != before {
-		t.Fatalf("expected no compaction without measured tokens")
+	engine.applyCompaction(2, "")
+
+	if len(engine.history) != 1 {
+		t.Fatalf("expected two items to be dropped, got %d", len(engine.history))
+	}
+	if engine.omittedHistoryMessages != 2 {
+		t.Fatalf("expected the dropped count to be reported, got %d", engine.omittedHistoryMessages)
+	}
+}
+
+func TestSelectCompactionSpanKeepsRecentWindow(t *testing.T) {
+	t.Parallel()
+
+	engine := &Engine{policy: "system"}
+	for i := 0; i < 30; i++ {
+		engine.history = append(engine.history, ConversationItem{Role: LLMRoleUser, Content: "m"})
+	}
+
+	_, count := engine.selectCompactionSpan()
+	if count != 30-recentContextWindow {
+		t.Fatalf("expected the recent window to be retained, got boundary %d", count)
+	}
+
+	short := &Engine{policy: "system", history: []ConversationItem{{Role: LLMRoleUser, Content: "only"}}}
+	if _, count := short.selectCompactionSpan(); count != 0 {
+		t.Fatalf("expected no compaction for a short history, got %d", count)
+	}
+}
+
+func TestApplyCompactionIgnoresOutOfRangeCount(t *testing.T) {
+	t.Parallel()
+
+	engine := &Engine{policy: "system", history: []ConversationItem{{Role: LLMRoleUser, Content: "a"}}}
+	engine.applyCompaction(5, "summary")
+	if len(engine.history) != 1 || engine.history[0].Content != "a" {
+		t.Fatalf("out-of-range compaction must be a no-op, got %#v", engine.history)
 	}
 }
 
@@ -477,7 +517,7 @@ func TestAskUserSuspensionEventRequiresCompleteArguments(t *testing.T) {
 	t.Parallel()
 
 	tool := &AskUserTool{}
-	event, err := tool.SuspensionEvent(json.RawMessage(`{"question":"How are you?","required":true,"selection_mode":"single","allow_custom":true}`))
+	event, err := tool.SuspensionEvent("call_ask_1", json.RawMessage(`{"question":"How are you?","required":true,"selection_mode":"single","allow_custom":true}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -488,8 +528,11 @@ func TestAskUserSuspensionEventRequiresCompleteArguments(t *testing.T) {
 	if payload.Question != "How are you?" {
 		t.Fatalf("expected question 'How are you?', got %q", payload.Question)
 	}
+	if payload.ToolCallID != "call_ask_1" {
+		t.Fatalf("expected suspension event to carry the tool call id, got %q", payload.ToolCallID)
+	}
 
-	_, err = tool.SuspensionEvent(json.RawMessage(`{}`))
+	_, err = tool.SuspensionEvent("call_ask_2", json.RawMessage(`{}`))
 	if err == nil || !strings.Contains(err.Error(), "question is required") {
 		t.Fatalf("expected error containing 'question is required', got: %v", err)
 	}

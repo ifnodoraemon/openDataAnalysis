@@ -26,9 +26,12 @@ type Engine struct {
 	policy                 string
 	history                []ConversationItem
 	omittedHistoryMessages int
-	confirmationReceipts   map[string]*ConfirmationReceipt
-	reportState            *tools.ReportState
-	mu                     sync.Mutex
+	// lastPromptTokens is the provider-reported prompt size of the previous
+	// request, used as a lower bound when estimating the next one.
+	lastPromptTokens     int
+	confirmationReceipts map[string]*ConfirmationReceipt
+	reportState          *tools.ReportState
+	mu                   sync.Mutex
 }
 
 // ConfirmationReceipt binds one authenticated user response to the exact
@@ -49,10 +52,10 @@ type ConfirmationReceipt struct {
 }
 
 const (
-	contextBudgetTokens         = 128000
-	contextCompactTriggerTokens = contextBudgetTokens * 9 / 10
-	recentContextWindow         = 12
-	maxMainLoopIterations       = 50
+	// recentContextWindow is the number of most recent history items kept
+	// verbatim when older conversation is compacted.
+	recentContextWindow   = 12
+	maxMainLoopIterations = 50
 )
 
 type eventEmitterAware interface {
@@ -64,7 +67,7 @@ type executionContextAware interface {
 }
 
 type suspensionEventTool interface {
-	SuspensionEvent(json.RawMessage) (RuntimeEvent, error)
+	SuspensionEvent(toolCallID string, args json.RawMessage) (RuntimeEvent, error)
 }
 
 type userResponseTool interface {
@@ -110,11 +113,15 @@ func retryableToolExec(ctx context.Context, registry *tools.Registry, toolName s
 }
 
 // compactWorkerBundle 对子代理消息历史做上下文压缩。
+//
+// Delegated children are bounded by maxWorkerIterations and their internal
+// history is never rebuilt from the session log, so they trim rather than
+// summarize and write no compaction checkpoint.
 func compactWorkerBundle(bundle *PromptBundle, promptTokens int) {
 	if len(bundle.History) <= 1 {
 		return
 	}
-	if promptTokens <= 0 || promptTokens <= contextCompactTriggerTokens {
+	if promptTokens <= 0 || promptTokens <= contextCompactTriggerTokens() {
 		return
 	}
 
@@ -170,23 +177,28 @@ func (e *Engine) ResetMessages() {
 	e.confirmationReceipts = make(map[string]*ConfirmationReceipt)
 }
 
-func (e *Engine) compactMessagesLocked(promptTokens int) {
-	if len(e.history) <= 1 {
-		return
+// SetHistory replaces the in-memory conversation history. It is used when a
+// session is rehydrated from the persisted event log, so a run started after a
+// restart or cache eviction continues the existing conversation instead of
+// starting with no context.
+//
+// omitted reports how many older items the history no longer carries; it is
+// surfaced to the model as a factual omission count.
+func (e *Engine) SetHistory(items []ConversationItem, omitted int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.history = append([]ConversationItem(nil), items...)
+	if omitted < 0 {
+		omitted = 0
 	}
-	if promptTokens <= 0 || promptTokens <= contextCompactTriggerTokens {
-		return
-	}
+	e.omittedHistoryMessages = omitted
+}
 
-	recentStart := len(e.history) - recentContextWindow
-	if recentStart <= 0 {
-		return
-	}
-
-	recentStart = adjustCompactionBoundary(e.history, recentStart)
-
-	e.omittedHistoryMessages += recentStart
-	e.history = e.history[recentStart:]
+// History returns a copy of the current conversation history.
+func (e *Engine) History() []ConversationItem {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]ConversationItem(nil), e.history...)
 }
 
 func adjustCompactionBoundary(history []ConversationItem, boundary int) int {
@@ -316,22 +328,9 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 			return
 		}
 
-		e.mu.Lock()
-		bundle := &PromptBundle{
-			Policy: e.policy,
-			Task:   userTask,
-		}
-		if getRuntimeVars != nil {
-			bundle.RuntimeContext = append(bundle.RuntimeContext, getRuntimeVars()...)
-		}
-		bundle.RuntimeContext = append(bundle.RuntimeContext, continuationFacts...)
-		if e.omittedHistoryMessages > 0 {
-			bundle.RuntimeContext = append(bundle.RuntimeContext, RuntimeContextBlock{
-				Name: "history_window", Role: "user", Content: fmt.Sprintf(`{"omitted_message_count":%d}`, e.omittedHistoryMessages),
-			})
-		}
-		bundle.History = append([]ConversationItem(nil), e.history...)
-		e.mu.Unlock()
+		// Context pressure is controlled before the request is sent, so an
+		// over-budget prompt is never issued first and trimmed afterwards.
+		bundle := e.prepareRequestBundle(ctx, emit, userTask, getRuntimeVars, continuationFacts, toolSpecs)
 
 		resp, llmErr := e.llm.ChatWithTools(ctx, bundle, toolSpecs)
 		if llmErr != nil {
@@ -347,7 +346,9 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 			})
 			userTask = ""
 		}
-		e.compactMessagesLocked(resp.Usage.PromptTokens)
+		if resp.Usage.PromptTokens > 0 {
+			e.lastPromptTokens = resp.Usage.PromptTokens
+		}
 		e.mu.Unlock()
 
 		if len(resp.Choices) == 0 {
@@ -468,7 +469,7 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 						return
 					}
 					suspendStart := time.Now()
-					event, suspendErr := provider.SuspensionEvent(json.RawMessage(toolCall.Function.Arguments))
+					event, suspendErr := provider.SuspensionEvent(toolCall.ID, json.RawMessage(toolCall.Function.Arguments))
 					if suspendErr != nil {
 						// Invalid suspension arguments are a recoverable tool
 						// failure, not an engine failure: feed the contract
@@ -577,6 +578,7 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 					emitEngineError(emit, "tool_result_compaction_failed", "处理工具结果失败", compactErr)
 					return
 				}
+				compactedResult = pruneToolResultForHistory(toolCall.Function.Name, compactedResult)
 				e.mu.Lock()
 				e.history = append(e.history, ConversationItem{
 					Role:       LLMRoleTool,
@@ -646,21 +648,8 @@ func isSuccessfulDeliveryBoundaryResult(result string) bool {
 }
 
 func (e *Engine) finalResponseAfterFinalize(ctx context.Context, getRuntimeVars func() []RuntimeContextBlock) (string, error) {
-	e.mu.Lock()
-	bundle := &PromptBundle{
-		Policy: e.policy,
-	}
-	if getRuntimeVars != nil {
-		bundle.RuntimeContext = append(bundle.RuntimeContext, getRuntimeVars()...)
-	}
-	if e.omittedHistoryMessages > 0 {
-		bundle.RuntimeContext = append(bundle.RuntimeContext, RuntimeContextBlock{
-			Name: "history_window", Role: "user", Content: fmt.Sprintf(`{"omitted_message_count":%d}`, e.omittedHistoryMessages),
-		})
-	}
-	baseHistory := append([]ConversationItem(nil), e.history...)
-	bundle.History = baseHistory
-	e.mu.Unlock()
+	bundle := e.buildBundle("", getRuntimeVars, nil)
+	baseHistory := append([]ConversationItem(nil), bundle.History...)
 
 	// The continuation runs without tools, so models that "want one more
 	// verification call" sometimes leak their native tool-call markup into
@@ -708,7 +697,9 @@ func (e *Engine) finalResponseAfterFinalize(ctx context.Context, getRuntimeVars 
 		Content:          summary,
 		ReasoningContent: reasoningContent,
 	})
-	e.compactMessagesLocked(usage.PromptTokens)
+	if usage.PromptTokens > 0 {
+		e.lastPromptTokens = usage.PromptTokens
+	}
 	e.mu.Unlock()
 	return summary, nil
 }

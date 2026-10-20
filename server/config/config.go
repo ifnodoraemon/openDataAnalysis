@@ -25,37 +25,41 @@ type Config struct {
 	LLMMaxTokens       int
 	LLMHTTPTimeoutSec  int
 	LLMRetryBudgetSec  int
-	LLMDebug           bool
-	LLMDebugDir        string
+	// LLMContextWindowTokens is the model's context window used for context
+	// pressure control. It must match the deployed model, because the runtime
+	// compacts history against this budget instead of a fixed default.
+	LLMContextWindowTokens int
+	LLMDebug               bool
+	LLMDebugDir            string
 
 	// 服务配置
-	ServerPort               string
-	DeploymentMode           string
-	AllowedOrigins           []string
-	MetadataStore            string
-	StorageProvider          string
-	RunBackend               string
-	AnalysisStore            string
-	PythonArtifactStore      string
-	StorageRoot              string
-	CacheRoot                string
-	MetadataDBPath           string
-	TempDir                  string
-	PythonMCPURL             string
-	PythonMaxTimeoutSec      int
-	ProxyToken               string
-	PublicAPIBaseURL         string
-	AuthSecret               string
-	AuthCookieSecure         bool
-	TrustedProxyCIDRs        []*net.IPNet
+	ServerPort                 string
+	DeploymentMode             string
+	AllowedOrigins             []string
+	MetadataStore              string
+	StorageProvider            string
+	RunBackend                 string
+	AnalysisStore              string
+	PythonArtifactStore        string
+	StorageRoot                string
+	CacheRoot                  string
+	MetadataDBPath             string
+	TempDir                    string
+	PythonMCPURL               string
+	PythonMaxTimeoutSec        int
+	ProxyToken                 string
+	PublicAPIBaseURL           string
+	AuthSecret                 string
+	AuthCookieSecure           bool
+	TrustedProxyCIDRs          []*net.IPNet
 	DatasourceCredentialSecret string
-	DefaultUserID            string
-	DefaultUserEmail         string
-	DefaultUserName          string
-	DefaultUserPassword      string
-	DefaultWorkspaceID       string
-	DefaultWorkspaceName     string
-	BootstrapDefaultIdentity bool
+	DefaultUserID              string
+	DefaultUserEmail           string
+	DefaultUserName            string
+	DefaultUserPassword        string
+	DefaultWorkspaceID         string
+	DefaultWorkspaceName       string
+	BootstrapDefaultIdentity   bool
 
 	// 生命周期管理
 	SessionTTLHours    int    // 空闲 session 自动清理阈值（小时），0 = 不自动清理
@@ -101,46 +105,47 @@ func Load() {
 	apiProtocol := getEnv("LLM_API_PROTOCOL", "")
 
 	Cfg = &Config{
-		LLMProvider:              provider,
-		LLMAPIProtocol:           apiProtocol,
-		LLMBaseURL:               baseURL,
-		LLMAPIEndpoint:           getEnv("LLM_API_ENDPOINT", ""),
-		LLMAPIKey:                getEnv("LLM_API_KEY", ""),
-		LLMModel:                 getEnv("LLM_MODEL", ""),
-		LLMReasoningEffort:       getEnv("LLM_REASONING_EFFORT", ""),
-		LLMTextVerbosity:         getEnv("LLM_TEXT_VERBOSITY", ""),
-		LLMMaxTokens:             getEnvInt("LLM_MAX_TOKENS", 0),
-		LLMHTTPTimeoutSec:        getEnvInt("LLM_HTTP_TIMEOUT_SECONDS", 240),
-		LLMRetryBudgetSec:        getEnvInt("LLM_RETRY_BUDGET_SECONDS", 360),
-		LLMDebug:                 getEnvBool("LLM_DEBUG", false),
-		LLMDebugDir:              getEnv("LLM_DEBUG_DIR", "./data/llm-debug"),
-		ServerPort:               getEnv("SERVER_PORT", "8080"),
-		DeploymentMode:           deploymentMode,
-		AllowedOrigins:           getEnvList("CORS_ALLOWED_ORIGINS", defaultAllowedOrigins()),
-		MetadataStore:            getEnv("METADATA_STORE", "sqlite"),
-		StorageProvider:          getEnv("STORAGE_PROVIDER", "local"),
-		RunBackend:               getEnv("RUN_BACKEND", "inprocess"),
-		AnalysisStore:            getEnv("ANALYSIS_STORE", "session_sqlite"),
-		PythonArtifactStore:      getEnv("PYTHON_ARTIFACT_STORE", "object_storage"),
-		StorageRoot:              getEnv("STORAGE_ROOT", "./data/storage"),
-		CacheRoot:                getEnv("CACHE_ROOT", "./data/cache"),
-		MetadataDBPath:           getEnv("METADATA_DB_PATH", "./data/metadata/app.db"),
-		TempDir:                  getEnv("TEMP_DIR", "./data/tmp"),
-		PythonMCPURL:             getEnv("PYTHON_MCP_URL", "http://python-executor:8081"),
-		PythonMaxTimeoutSec:      getEnvInt("PYTHON_MAX_TIMEOUT_SECONDS", 120),
-		ProxyToken:               getEnv("PROXY_TOKEN", ""),
-		PublicAPIBaseURL:         getEnv("PUBLIC_API_BASE_URL", ""),
-		AuthSecret:               getEnv("AUTH_SECRET", ""),
-		AuthCookieSecure:         getEnvBool("AUTH_COOKIE_SECURE", true),
-		TrustedProxyCIDRs:        parseTrustedProxyCIDRs(getEnvList("TRUSTED_PROXY_CIDRS", nil)),
+		LLMProvider:                provider,
+		LLMAPIProtocol:             apiProtocol,
+		LLMBaseURL:                 baseURL,
+		LLMAPIEndpoint:             getEnv("LLM_API_ENDPOINT", ""),
+		LLMAPIKey:                  getEnv("LLM_API_KEY", ""),
+		LLMModel:                   getEnv("LLM_MODEL", ""),
+		LLMReasoningEffort:         getEnv("LLM_REASONING_EFFORT", ""),
+		LLMTextVerbosity:           getEnv("LLM_TEXT_VERBOSITY", ""),
+		LLMMaxTokens:               getEnvInt("LLM_MAX_TOKENS", 0),
+		LLMHTTPTimeoutSec:          getEnvInt("LLM_HTTP_TIMEOUT_SECONDS", 240),
+		LLMRetryBudgetSec:          getEnvInt("LLM_RETRY_BUDGET_SECONDS", 360),
+		LLMContextWindowTokens:     getEnvInt("LLM_CONTEXT_WINDOW_TOKENS", 128000),
+		LLMDebug:                   getEnvBool("LLM_DEBUG", false),
+		LLMDebugDir:                getEnv("LLM_DEBUG_DIR", "./data/llm-debug"),
+		ServerPort:                 getEnv("SERVER_PORT", "8080"),
+		DeploymentMode:             deploymentMode,
+		AllowedOrigins:             getEnvList("CORS_ALLOWED_ORIGINS", defaultAllowedOrigins()),
+		MetadataStore:              getEnv("METADATA_STORE", "sqlite"),
+		StorageProvider:            getEnv("STORAGE_PROVIDER", "local"),
+		RunBackend:                 getEnv("RUN_BACKEND", "inprocess"),
+		AnalysisStore:              getEnv("ANALYSIS_STORE", "session_sqlite"),
+		PythonArtifactStore:        getEnv("PYTHON_ARTIFACT_STORE", "object_storage"),
+		StorageRoot:                getEnv("STORAGE_ROOT", "./data/storage"),
+		CacheRoot:                  getEnv("CACHE_ROOT", "./data/cache"),
+		MetadataDBPath:             getEnv("METADATA_DB_PATH", "./data/metadata/app.db"),
+		TempDir:                    getEnv("TEMP_DIR", "./data/tmp"),
+		PythonMCPURL:               getEnv("PYTHON_MCP_URL", "http://python-executor:8081"),
+		PythonMaxTimeoutSec:        getEnvInt("PYTHON_MAX_TIMEOUT_SECONDS", 120),
+		ProxyToken:                 getEnv("PROXY_TOKEN", ""),
+		PublicAPIBaseURL:           getEnv("PUBLIC_API_BASE_URL", ""),
+		AuthSecret:                 getEnv("AUTH_SECRET", ""),
+		AuthCookieSecure:           getEnvBool("AUTH_COOKIE_SECURE", true),
+		TrustedProxyCIDRs:          parseTrustedProxyCIDRs(getEnvList("TRUSTED_PROXY_CIDRS", nil)),
 		DatasourceCredentialSecret: getEnv("DATASOURCE_CREDENTIAL_SECRET", ""),
-		DefaultUserID:            getEnv("DEFAULT_USER_ID", ""),
-		DefaultUserEmail:         getEnv("DEFAULT_USER_EMAIL", ""),
-		DefaultUserName:          getEnv("DEFAULT_USER_NAME", ""),
-		DefaultUserPassword:      getEnv("DEFAULT_USER_PASSWORD", ""),
-		DefaultWorkspaceID:       getEnv("DEFAULT_WORKSPACE_ID", ""),
-		DefaultWorkspaceName:     getEnv("DEFAULT_WORKSPACE_NAME", ""),
-		BootstrapDefaultIdentity: getEnvBool("BOOTSTRAP_DEFAULT_IDENTITY", false),
+		DefaultUserID:              getEnv("DEFAULT_USER_ID", ""),
+		DefaultUserEmail:           getEnv("DEFAULT_USER_EMAIL", ""),
+		DefaultUserName:            getEnv("DEFAULT_USER_NAME", ""),
+		DefaultUserPassword:        getEnv("DEFAULT_USER_PASSWORD", ""),
+		DefaultWorkspaceID:         getEnv("DEFAULT_WORKSPACE_ID", ""),
+		DefaultWorkspaceName:       getEnv("DEFAULT_WORKSPACE_NAME", ""),
+		BootstrapDefaultIdentity:   getEnvBool("BOOTSTRAP_DEFAULT_IDENTITY", false),
 
 		SessionTTLHours:    getEnvInt("SESSION_TTL_HOURS", 0),
 		TraceRetentionDays: getEnvInt("TRACE_RETENTION_DAYS", 0),
@@ -244,6 +249,11 @@ func (c *Config) ValidateProductionReadiness() error {
 	}
 	if c.LLMMaxTokens < 0 {
 		return fmt.Errorf("LLM_MAX_TOKENS must not be negative")
+	}
+	// A zero window means "unset"; the runtime falls back to its default. A
+	// negative window is a configuration error rather than a silent fallback.
+	if c.LLMContextWindowTokens < 0 {
+		return fmt.Errorf("LLM_CONTEXT_WINDOW_TOKENS must not be negative")
 	}
 	if c.LLMProvider == "anthropic" {
 		if err := validateExactConfigValue("LLM_BASE_URL", c.LLMBaseURL, true); err != nil {

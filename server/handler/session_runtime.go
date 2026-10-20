@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ifnodoraemon/openDataAnalysis/agent"
 	"github.com/ifnodoraemon/openDataAnalysis/domain"
 	"github.com/ifnodoraemon/openDataAnalysis/repository"
 	"github.com/ifnodoraemon/openDataAnalysis/session"
@@ -47,7 +48,11 @@ func hydrateSessionFromPersistence(ctx context.Context, sess *session.Session) e
 	if sess == nil {
 		return fmt.Errorf("session is not initialized")
 	}
-	entries, subgoals, reportSnapshot, _, editState, err := loadSessionRuntimeStateFromPersistence(ctx, sess.ID)
+	messages, err := collectSessionMessages(ctx, sess.ID)
+	if err != nil {
+		return fmt.Errorf("failed to read persisted session events: %w", err)
+	}
+	entries, subgoals, reportSnapshot, _, editState, err := deriveRuntimeStateFromMessages(messages)
 	if err != nil {
 		return fmt.Errorf("failed to read persisted runtime state: %w", err)
 	}
@@ -63,6 +68,13 @@ func hydrateSessionFromPersistence(ctx context.Context, sess *session.Session) e
 		sess.ConfigureEditState(editState.EditContext)
 	} else {
 		sess.ClearEditState()
+	}
+	history, omitted, err := agent.RebuildHistoryFromMessages(messages)
+	if err != nil {
+		return fmt.Errorf("failed to rebuild conversation history: %w", err)
+	}
+	if sess.Engine != nil {
+		sess.Engine.SetHistory(history, omitted)
 	}
 	return nil
 }

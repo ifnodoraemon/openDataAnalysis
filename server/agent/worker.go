@@ -476,7 +476,13 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 				bundle.Task = ""
 			}
 			// 子任务仅记录被省略的消息数量，不生成运行时语义摘要。
-			compactWorkerBundle(bundle, resp.Usage.PromptTokens)
+			// Provider usage is authoritative; when a gateway omits it the
+			// estimate still detects context pressure.
+			promptTokens := resp.Usage.PromptTokens
+			if promptTokens <= 0 {
+				promptTokens = EstimatePromptTokens(bundle, nil)
+			}
+			compactWorkerBundle(bundle, promptTokens)
 		}
 		if err != nil {
 			var stateErrors []string

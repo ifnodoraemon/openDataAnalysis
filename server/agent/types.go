@@ -31,6 +31,31 @@ const (
 	EventStateMemoryUpdated     = "state_memory_updated"
 	EventStateReportEditUpdated = "state_report_edit_updated"
 	EventStateChildRunsUpdated  = "state_child_runs_updated"
+	// EventHistoryCompacted records that earlier conversation was replaced by a
+	// summary (or, when summarization failed, dropped) so history can be
+	// rebuilt deterministically from the persisted log.
+	EventHistoryCompacted = "history_compacted"
+)
+
+// HistoryCompactedData is the durable checkpoint written when context pressure
+// forces older conversation out of the active window.
+//
+// ShadowedItems counts the conversation items that were removed from the front
+// of the history at that moment; a rebuild replays the same fold and drops the
+// same number of items. Method is "summary" when the items were replaced by a
+// model-written summary and "trim" when summarization failed and the items were
+// dropped outright.
+type HistoryCompactedData struct {
+	Summary       string `json:"summary,omitempty"`
+	ShadowedItems int    `json:"shadowed_items"`
+	Method        string `json:"method"`
+	PromptTokens  int    `json:"prompt_tokens,omitempty"`
+	ContextWindow int    `json:"context_window,omitempty"`
+}
+
+const (
+	HistoryCompactionMethodSummary = "summary"
+	HistoryCompactionMethodTrim    = "trim"
 )
 
 // UserMessage 用户输入
@@ -156,6 +181,10 @@ type AskUserData struct {
 	AllowCustom   bool                        `json:"allow_custom"`
 	Options       []AskUserOption             `json:"options,omitempty"`
 	Authorization *ActionAuthorizationRequest `json:"authorization,omitempty"`
+	// ToolCallID is the id of the user_request_input tool call that suspended
+	// the run. The engine stamps it so the persisted event log stays a faithful
+	// record of the assistant's tool call and history can be rebuilt from it.
+	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 type ActionAuthorizationRequest struct {

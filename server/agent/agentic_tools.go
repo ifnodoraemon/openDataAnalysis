@@ -386,11 +386,12 @@ func (t *AskUserTool) Execute(args json.RawMessage) (string, error) {
 	})
 }
 
-func (t *AskUserTool) SuspensionEvent(args json.RawMessage) (RuntimeEvent, error) {
+func (t *AskUserTool) SuspensionEvent(toolCallID string, args json.RawMessage) (RuntimeEvent, error) {
 	payload, err := parseAskUserToolCallArguments(string(args))
 	if err != nil {
 		return RuntimeEvent{}, err
 	}
+	payload.ToolCallID = toolCallID
 	return RuntimeEvent{Type: EventUserRequestInput, Data: payload}, nil
 }
 

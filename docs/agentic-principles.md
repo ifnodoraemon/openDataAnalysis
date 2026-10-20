@@ -66,6 +66,10 @@ The model authors report content and structured chart option data. ECharts loade
 
 User-facing UI, HTTP/SSE status text, `ui_summary`, and operator CLI output use Simplified Chinese. Model-facing policy and tool contracts use English. Machine fields, enum values, protocols, product names, and library names keep their canonical spelling. English and Chinese documentation use separate `.md` and `.zh-CN.md` files.
 
+### 12. Conversation history is derived, not remembered
+
+The persisted session event log is the durable record of a conversation; the model history a run starts from is derived from that log. A session rehydrated after a restart or cache eviction rebuilds the same history instead of starting blank. A tool call whose result the log does not record is paired with an explicit outcome-unknown result rather than silently dropped, so derived history always satisfies the tool-call/result protocol.
+
 ## Prompt layering
 
 The runtime uses four layers:
@@ -75,7 +79,7 @@ The runtime uses four layers:
 3. `runtime`: ephemeral facts for the current turn, such as edit scope or active goals.
 4. `history`: original conversation and tool results still present in the context window.
 
-Window trimming exposes only factual omission counts in the `runtime` layer; the runtime does not invent semantic history summaries. Decisions that must survive the context window are written explicitly by the model to working memory. Temporary facts, history, and user preferences never move into `system`. Delegate constraints use `policy_appendix`, not context dumps.
+Window trimming reports only factual omission counts in the `runtime` layer; the runtime never authors semantic summaries itself. When history must be compacted, the replacement is a model-written summary recorded as a `history_compacted` checkpoint in the session log, so replay and rebuild reproduce the same condensed conversation. If summarization fails, the runtime falls back to dropping the oldest items, reports the omission count, and the checkpoint records that the facts were dropped rather than summarized. Decisions that must survive the context window are written explicitly by the model to working memory. Temporary facts, history, and user preferences never move into `system`. Delegate constraints use `policy_appendix`, not context dumps.
 
 ## Current anti-patterns
 

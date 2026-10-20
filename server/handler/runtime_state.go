@@ -83,6 +83,12 @@ func collectSessionMessages(ctx context.Context, sessionID string) ([]domain.Run
 	if err != nil {
 		return nil, fmt.Errorf("failed to list session tasks: %w", err)
 	}
+	// The repository returns root runs newest-first. Rebuilding conversation
+	// history depends on chronological order, and a stable sort below preserves
+	// this order for events that share a timestamp.
+	sort.SliceStable(runs, func(i, j int) bool {
+		return runs[i].CreatedAt.Before(runs[j].CreatedAt)
+	})
 	var messages []domain.RunMessage
 	for _, run := range runs {
 		runMessages, err := messageRepo.ListByRun(ctx, run.ID)
