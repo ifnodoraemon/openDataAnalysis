@@ -164,39 +164,38 @@ func (e *Engine) prepareRequestBundle(
 	bundle := e.buildBundle(userTask, getRuntimeVars, continuationFacts)
 	pressure := e.pressureTokens(EstimatePromptTokens(bundle, toolSpecs))
 	trigger := contextCompactTriggerTokens()
-	if pressure <= trigger {
-		return bundle
+	if pressure > trigger {
+		if span, count := e.selectCompactionSpan(); count > 0 {
+			summary, summaryErr := e.summarizeHistorySpan(ctx, span)
+			method := HistoryCompactionMethodSummary
+			if summaryErr != nil {
+				// A failed summarization must not stall the run. The span is
+				// dropped instead, and the checkpoint records that the facts
+				// were lost rather than summarized.
+				log.Printf("engine: history summarization failed, trimming instead: %v", summaryErr)
+				summary = ""
+				method = HistoryCompactionMethodTrim
+			}
+			e.applyCompaction(count, summary)
+			bundle = e.buildBundle(userTask, getRuntimeVars, continuationFacts)
+			emit(RuntimeEvent{
+				Type: EventHistoryCompacted,
+				Data: HistoryCompactedData{
+					Summary:       summary,
+					ShadowedItems: count,
+					Method:        method,
+					PromptTokens:  pressure,
+					ContextWindow: contextWindowTokens(),
+				},
+			})
+		}
 	}
 
-	span, count := e.selectCompactionSpan()
-	if count == 0 {
-		return bundle
+	// Advisories queued by the previous step ride this request as runtime facts.
+	if notices := e.takePendingNotices(); len(notices) > 0 {
+		bundle.RuntimeContext = append(bundle.RuntimeContext, notices...)
 	}
-
-	summary, summaryErr := e.summarizeHistorySpan(ctx, span)
-	method := HistoryCompactionMethodSummary
-	if summaryErr != nil {
-		// A failed summarization must not stall the run. The span is dropped
-		// instead, and the checkpoint records that the facts were lost rather
-		// than summarized.
-		log.Printf("engine: history summarization failed, trimming instead: %v", summaryErr)
-		summary = ""
-		method = HistoryCompactionMethodTrim
-	}
-	e.applyCompaction(count, summary)
-
-	emit(RuntimeEvent{
-		Type: EventHistoryCompacted,
-		Data: HistoryCompactedData{
-			Summary:       summary,
-			ShadowedItems: count,
-			Method:        method,
-			PromptTokens:  pressure,
-			ContextWindow: contextWindowTokens(),
-		},
-	})
-
-	return e.buildBundle(userTask, getRuntimeVars, continuationFacts)
+	return bundle
 }
 
 // pruneToolResultForHistory bounds a tool result before it enters the model

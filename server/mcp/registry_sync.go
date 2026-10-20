@@ -48,6 +48,19 @@ func (t *MCPSyncedTool) SetExecutionContext(ctx context.Context) {
 	t.parentCtx = ctx
 }
 
+// IsConcurrencySafe lets a read-only MCP tool overlap other calls in the same
+// batch. Each call is an independent HTTP round trip to an external server, so
+// overlap is where parallelism actually pays off. A tool the server does not
+// declare read-only stays exclusive.
+//
+// Local tools deliberately do not opt in: the session analysis database runs
+// with a single open connection, so overlapping those calls would add
+// contention without any real concurrency.
+func (t *MCPSyncedTool) IsConcurrencySafe(json.RawMessage) bool {
+	annotations := t.Schema.Annotations
+	return annotations != nil && annotations.ReadOnlyHint
+}
+
 func (t *MCPSyncedTool) Execute(args json.RawMessage) (string, error) {
 	execCtx := t.parentCtx
 	if execCtx == nil {

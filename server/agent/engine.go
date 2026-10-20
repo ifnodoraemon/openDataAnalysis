@@ -28,7 +28,11 @@ type Engine struct {
 	omittedHistoryMessages int
 	// lastPromptTokens is the provider-reported prompt size of the previous
 	// request, used as a lower bound when estimating the next one.
-	lastPromptTokens     int
+	lastPromptTokens int
+	// repeatCalls counts identical tool calls in the current conversation and
+	// pendingNotices carries the advisories queued for the next request.
+	repeatCalls          map[string]int
+	pendingNotices       []RuntimeContextBlock
 	confirmationReceipts map[string]*ConfirmationReceipt
 	reportState          *tools.ReportState
 	mu                   sync.Mutex
@@ -301,7 +305,7 @@ func (e *Engine) filterUnavailableToolSpecs(ctx context.Context, specs []tools.T
 		tool, err := e.registry.Get(spec.Function.Name)
 		if err == nil {
 			if checker, ok := tool.(tools.AvailabilityTool); ok {
-				if checkErr := checker.CheckAvailability(ctx); checkErr != nil {
+				if checkErr := probeToolAvailability(ctx, checker); checkErr != nil {
 					log.Printf("engine: tool %s unavailable for this run: %v", spec.Function.Name, checkErr)
 					continue
 				}
@@ -310,6 +314,40 @@ func (e *Engine) filterUnavailableToolSpecs(ctx context.Context, specs []tools.T
 		filtered = append(filtered, spec)
 	}
 	return filtered
+}
+
+// availabilityProbeTimeout bounds how long starting a run may wait on one
+// tool's health check. Some checks make a live HTTP call, and an unbounded wait
+// stalls every run start behind an unhealthy backend.
+const availabilityProbeTimeout = 500 * time.Millisecond
+
+// probeToolAvailability runs one availability check under a bounded deadline.
+//
+// An inconclusive probe (the check did not finish in time) keeps the tool
+// advertised: the runtime does not know the tool is down, and the tool reports
+// its own failure when called. Only a definite negative removes it from the
+// request. This trades a possible wasted call for never stalling a run start.
+func probeToolAvailability(ctx context.Context, checker tools.AvailabilityTool) error {
+	probeCtx, cancel := context.WithTimeout(ctx, availabilityProbeTimeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- checker.CheckAvailability(probeCtx)
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-probeCtx.Done():
+		if ctx.Err() != nil {
+			// The run itself was cancelled; surface that rather than pretending
+			// the tool is fine.
+			return ctx.Err()
+		}
+		log.Printf("engine: availability probe exceeded %s; keeping the tool advertised", availabilityProbeTimeout)
+		return nil
+	}
 }
 
 func (e *Engine) prepareRuntimeTools(ctx context.Context, emit func(RuntimeEvent)) {
@@ -357,6 +395,11 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 	toolSpecs = e.filterUnavailableToolSpecs(ctx, toolSpecs)
 
 	userTask := userInput
+	if userInput != "" {
+		// A new user message is a new intent: previous repeat tracking no
+		// longer applies.
+		e.resetRepeatTracking()
+	}
 	var startMutationVersion uint64
 	e.mu.Lock()
 	initialReportState := e.reportState
@@ -494,24 +537,38 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 			e.history = append(e.history, compactAssistantMessage(choice.Message))
 			e.mu.Unlock()
 
-			for _, toolCall := range choice.Message.ToolCalls {
-				registeredTool, lookupErr := e.registry.Get(toolCall.Function.Name)
-				if lookupErr != nil {
-					emitEngineError(emit, "tool_not_available", "请求的工具不可用", lookupErr)
-					return
-				}
-				capability := toolCapability(registeredTool)
+			// The batch is planned once so admission and concurrency are
+			// decided in the model's order; the loop below only consumes them.
+			plan, planErr := e.planToolCalls(choice.Message.ToolCalls)
+			if planErr != nil {
+				emitEngineError(emit, "tool_not_available", "请求的工具不可用", planErr)
+				return
+			}
+			futures := make(map[string]*toolFuture)
+			parallelBudget := make(chan struct{}, maxParallelToolCalls())
+
+			for index, planned := range plan {
+				toolCall := planned.call
+				registeredTool := planned.tool
+				capability := planned.capability
 
 				// Single admission point: a gated action never executes without
 				// a receipt that authorizes exactly this call. Both a missing
 				// receipt and an unverifiable one are closed.
-				if admission := tools.DecideToolCall(registeredTool, json.RawMessage(toolCall.Function.Arguments), e); admission.Kind != tools.AdmissionAllow {
-					if blocked, blockedErr := e.blockToolCall(emit, toolCall, admission); blockedErr != nil {
+				if planned.admission.Kind != tools.AdmissionAllow {
+					if blocked, blockedErr := e.blockToolCall(emit, toolCall, planned.admission); blockedErr != nil {
 						emitEngineError(emit, "tool_admission_failed", "处理授权拦截失败", blockedErr)
 						return
 					} else if blocked {
 						continue
 					}
+				}
+
+				// Start the maximal run of parallel-safe calls beginning here.
+				// An exclusive call is never overlapped, so it stays an
+				// ordering barrier.
+				if planned.safe {
+					startParallelRun(plan, index, futures, parallelBudget, ctx, e.registry)
 				}
 
 				toolSpan := llmDebugWriter.StartSpan(
@@ -590,7 +647,7 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 					},
 				})
 
-				result, execErr := retryableToolExec(ctx, e.registry, toolCall.Function.Name, json.RawMessage(toolCall.Function.Arguments))
+				result, execErr := runPlannedToolCall(ctx, e.registry, toolCall, futures)
 
 				duration := time.Since(start).Milliseconds()
 
@@ -651,6 +708,7 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 					return
 				}
 				compactedResult = pruneToolResultForHistory(toolCall.Function.Name, compactedResult)
+				e.recordRepeatCall(toolCall)
 				e.mu.Lock()
 				e.history = append(e.history, ConversationItem{
 					Role:       LLMRoleTool,

@@ -29,8 +29,11 @@ type Config struct {
 	// pressure control. It must match the deployed model, because the runtime
 	// compacts history against this budget instead of a fixed default.
 	LLMContextWindowTokens int
-	LLMDebug               bool
-	LLMDebugDir            string
+	// MaxParallelToolCalls bounds how many parallel-safe tool calls may overlap
+	// within one model turn. Exclusive calls always run alone.
+	MaxParallelToolCalls int
+	LLMDebug             bool
+	LLMDebugDir          string
 
 	// 服务配置
 	ServerPort                 string
@@ -254,6 +257,9 @@ func (c *Config) ValidateProductionReadiness() error {
 	// negative window is a configuration error rather than a silent fallback.
 	if c.LLMContextWindowTokens < 0 {
 		return fmt.Errorf("LLM_CONTEXT_WINDOW_TOKENS must not be negative")
+	}
+	if c.MaxParallelToolCalls < 0 {
+		return fmt.Errorf("MAX_PARALLEL_TOOL_CALLS must not be negative")
 	}
 	if c.LLMProvider == "anthropic" {
 		if err := validateExactConfigValue("LLM_BASE_URL", c.LLMBaseURL, true); err != nil {
