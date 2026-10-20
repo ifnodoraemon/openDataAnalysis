@@ -110,7 +110,7 @@ func TestCompactWorkerBundleNoOpBelowThreshold(t *testing.T) {
 			{Role: LLMRoleAssistant, Content: "ok"},
 		},
 	}
-	compactWorkerBundle(bundle, contextCompactTriggerTokens()-1)
+	compactWorkerBundle(bundle, contextCompactTriggerTokens()-1, 0)
 	if len(bundle.History) != 1 {
 		t.Fatalf("expected no compaction below threshold, got %d messages in history", len(bundle.History))
 	}
@@ -124,7 +124,7 @@ func TestCompactWorkerBundleNoOpShortHistory(t *testing.T) {
 		Task:    "user task",
 		History: []ConversationItem{},
 	}
-	compactWorkerBundle(bundle, contextCompactTriggerTokens()+1)
+	compactWorkerBundle(bundle, contextCompactTriggerTokens()+1, 0)
 	if len(bundle.History) != 0 {
 		t.Fatalf("expected empty history to be untouched, got %d", len(bundle.History))
 	}
@@ -146,7 +146,7 @@ func TestCompactWorkerBundleCompactsLongHistory(t *testing.T) {
 	}
 	originalLen := len(bundle.History)
 
-	compactWorkerBundle(bundle, contextCompactTriggerTokens()+1)
+	compactWorkerBundle(bundle, contextCompactTriggerTokens()+1, 0)
 
 	if len(bundle.History) >= originalLen {
 		t.Fatalf("expected history to be compacted, got %d (original %d)", len(bundle.History), originalLen)
@@ -178,7 +178,7 @@ func TestCompactWorkerBundlePreservesExistingRuntimeContext(t *testing.T) {
 	}
 	originalLen := len(bundle.History)
 
-	compactWorkerBundle(bundle, contextCompactTriggerTokens()+1)
+	compactWorkerBundle(bundle, contextCompactTriggerTokens()+1, 0)
 
 	if len(bundle.History) >= originalLen {
 		t.Fatalf("expected compaction with existing digest, got %d", len(bundle.History))

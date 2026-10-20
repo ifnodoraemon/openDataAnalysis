@@ -32,6 +32,10 @@ type ToolCapability struct {
 	RunControl          string `json:"run_control,omitempty"`
 	DeliveryBoundary    bool   `json:"delivery_boundary,omitempty"`
 	EmitsReportPreview  bool   `json:"emits_report_preview,omitempty"`
+	// Idempotent declares that repeating this call is safe. Observation tools
+	// are idempotent by mode; an action tool must opt in explicitly before the
+	// runtime will retry it after a transient failure.
+	Idempotent bool `json:"idempotent,omitempty"`
 }
 
 type CapabilityTool interface {

@@ -440,6 +440,7 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 	const maxWorkerIterations = 25
 	totalPromptTokens := 0
 	totalCompletionTokens := 0
+	omittedHistoryMessages := 0
 	for i := 0; i < maxWorkerIterations; i++ {
 		if childCtx.Err() != nil {
 			var cleanupErrors []error
@@ -482,7 +483,7 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 			if promptTokens <= 0 {
 				promptTokens = EstimatePromptTokens(bundle, nil)
 			}
-			compactWorkerBundle(bundle, promptTokens)
+			omittedHistoryMessages = compactWorkerBundle(bundle, promptTokens, omittedHistoryMessages)
 		}
 		if err != nil {
 			var stateErrors []string
@@ -575,7 +576,7 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 				childEmit(resultEv)
 				bundle.History = append(bundle.History, ConversationItem{
 					Role:         LLMRoleTool,
-					Content:      result,
+					Content:      historyToolResultContent(toolCall.Function.Name, result),
 					ToolCallID:   toolCall.ID,
 					ToolCallName: toolCall.Function.Name,
 				})
@@ -588,7 +589,7 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 					return "", fmt.Errorf("failed to encode delegated tool contract failure: %w", marshalErr)
 				}
 				childEmit(RuntimeEvent{Type: EventToolResult, RunID: childRunID, Data: ToolResultData{ID: toolCall.ID, Name: toolCall.Function.Name, Result: failureResult, Success: false, Duration: duration}})
-				bundle.History = append(bundle.History, ConversationItem{Role: LLMRoleTool, Content: failureResult, ToolCallID: toolCall.ID, ToolCallName: toolCall.Function.Name})
+				bundle.History = append(bundle.History, ConversationItem{Role: LLMRoleTool, Content: historyToolResultContent(toolCall.Function.Name, failureResult), ToolCallID: toolCall.ID, ToolCallName: toolCall.Function.Name})
 				continue
 			}
 
@@ -606,7 +607,7 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 			childEmit(resultEv)
 			bundle.History = append(bundle.History, ConversationItem{
 				Role:         LLMRoleTool,
-				Content:      result,
+				Content:      historyToolResultContent(toolCall.Function.Name, result),
 				ToolCallID:   toolCall.ID,
 				ToolCallName: toolCall.Function.Name,
 			})

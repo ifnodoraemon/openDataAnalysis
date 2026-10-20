@@ -87,8 +87,17 @@ func isRetryableToolError(err error) bool {
 	return isTransientTransportError(err)
 }
 
-// retryableToolExec retries transient execution failures within a bounded budget.
+// retryableToolExec retries transient execution failures within a bounded
+// budget.
+//
+// Only read-only tools are retried. Re-running a tool that mutates state can
+// duplicate its effect — a second import, a second report mutation — so an
+// action tool's transient failure is surfaced to the model instead of being
+// replayed behind its back.
 func retryableToolExec(ctx context.Context, registry *tools.Registry, toolName string, args json.RawMessage) (string, error) {
+	if !toolIsIdempotent(registry, toolName) {
+		return registry.Execute(toolName, args)
+	}
 	delays := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 	var result string
 	var execErr error
@@ -112,30 +121,57 @@ func retryableToolExec(ctx context.Context, registry *tools.Registry, toolName s
 	return result, execErr
 }
 
+// toolIsIdempotent reports whether repeating a call is safe. Observation tools
+// are read-only; an action tool must opt in explicitly.
+func toolIsIdempotent(registry *tools.Registry, toolName string) bool {
+	if registry == nil {
+		return false
+	}
+	tool, err := registry.Get(toolName)
+	if err != nil {
+		return false
+	}
+	capability := toolCapability(tool)
+	return capability.Idempotent || capability.Mode == "observe"
+}
+
 // compactWorkerBundle 对子代理消息历史做上下文压缩。
 //
 // Delegated children are bounded by maxWorkerIterations and their internal
 // history is never rebuilt from the session log, so they trim rather than
 // summarize and write no compaction checkpoint.
-func compactWorkerBundle(bundle *PromptBundle, promptTokens int) {
+//
+// omitted is the running total of items already dropped from this child's
+// history; the returned value is the updated total. The window fact is
+// replaced rather than appended so a long delegated run does not accumulate
+// duplicate runtime-context blocks.
+func compactWorkerBundle(bundle *PromptBundle, promptTokens int, omitted int) int {
 	if len(bundle.History) <= 1 {
-		return
+		return omitted
 	}
 	if promptTokens <= 0 || promptTokens <= contextCompactTriggerTokens() {
-		return
+		return omitted
 	}
 
 	recentStart := len(bundle.History) - recentContextWindow
 	if recentStart <= 0 {
-		return
+		return omitted
 	}
 
 	recentStart = adjustCompactionBoundary(bundle.History, recentStart)
 
-	bundle.RuntimeContext = append(bundle.RuntimeContext, RuntimeContextBlock{
-		Name: "history_window", Role: "user", Content: fmt.Sprintf(`{"omitted_message_count":%d}`, recentStart),
+	omitted += recentStart
+	retained := bundle.RuntimeContext[:0]
+	for _, block := range bundle.RuntimeContext {
+		if block.Name != "history_window" {
+			retained = append(retained, block)
+		}
+	}
+	bundle.RuntimeContext = append(retained, RuntimeContextBlock{
+		Name: "history_window", Role: "user", Content: fmt.Sprintf(`{"omitted_message_count":%d}`, omitted),
 	})
 	bundle.History = bundle.History[recentStart:]
+	return omitted
 }
 
 // NewEngine 使用项目唯一的静态策略创建智能体引擎。
@@ -199,6 +235,14 @@ func (e *Engine) History() []ConversationItem {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return append([]ConversationItem(nil), e.history...)
+}
+
+// repairDanglingToolCalls pairs any assistant tool call that has no recorded
+// result. It is idempotent: a fully paired history is returned unchanged.
+func (e *Engine) repairDanglingToolCalls() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.history = repairToolPairing(e.history)
 }
 
 func adjustCompactionBoundary(history []ConversationItem, boundary int) int {
@@ -291,6 +335,11 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 	if emit == nil {
 		panic("agent runtime event emitter must not be nil")
 	}
+	// A run can end without completing its tool batch (cancellation, engine
+	// error, iteration limit). An assistant tool call left unanswered would make
+	// the next request in this session invalid, so the history is repaired on
+	// every exit path.
+	defer e.repairDanglingToolCalls()
 	e.prepareRuntimeTools(ctx, emit)
 
 	e.mu.Lock()
@@ -331,6 +380,10 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 		// Context pressure is controlled before the request is sent, so an
 		// over-budget prompt is never issued first and trimmed afterwards.
 		bundle := e.prepareRequestBundle(ctx, emit, userTask, getRuntimeVars, continuationFacts, toolSpecs)
+		// Continuation facts describe one follow-up request only. Clearing them
+		// here keeps a stale delivery-state fact from being re-injected on every
+		// later iteration of the same run.
+		continuationFacts = nil
 
 		resp, llmErr := e.llm.ChatWithTools(ctx, bundle, toolSpecs)
 		if llmErr != nil {
