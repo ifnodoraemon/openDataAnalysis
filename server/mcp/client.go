@@ -17,10 +17,22 @@ import (
 	"github.com/ifnodoraemon/openDataAnalysis/internal/jsoncontract"
 )
 
+// ToolAnnotations carries the MCP tool safety hints. They are advisory metadata
+// the server publishes about its own tool, so the runtime only uses them to
+// decide whether replaying a call is safe.
+type ToolAnnotations struct {
+	Title           string `json:"title,omitempty"`
+	ReadOnlyHint    bool   `json:"readOnlyHint,omitempty"`
+	DestructiveHint bool   `json:"destructiveHint,omitempty"`
+	IdempotentHint  bool   `json:"idempotentHint,omitempty"`
+	OpenWorldHint   bool   `json:"openWorldHint,omitempty"`
+}
+
 type ToolSchema struct {
 	Name        string                 `json:"name"`
 	Description string                 `json:"description"`
 	InputSchema map[string]interface{} `json:"inputSchema"`
+	Annotations *ToolAnnotations       `json:"annotations,omitempty"`
 }
 
 type discoveredTool struct {

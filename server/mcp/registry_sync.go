@@ -21,6 +21,18 @@ func (t *MCPSyncedTool) Name() string { return t.Schema.Name }
 
 func (t *MCPSyncedTool) Description() string { return t.Schema.Description }
 
+// Capability surfaces the MCP server's own safety hints. A read-only or
+// explicitly idempotent tool may be replayed after a transient transport
+// failure; an unannotated tool is treated as unsafe to repeat, because the
+// runtime cannot know whether it mutates state.
+func (t *MCPSyncedTool) Capability() tools.ToolCapability {
+	idempotent := false
+	if annotations := t.Schema.Annotations; annotations != nil {
+		idempotent = annotations.ReadOnlyHint || annotations.IdempotentHint
+	}
+	return tools.ToolCapability{Idempotent: idempotent}
+}
+
 func (t *MCPSyncedTool) Parameters() json.RawMessage {
 	if t.Schema.InputSchema == nil {
 		panic("MCP tool input schema is not initialized")

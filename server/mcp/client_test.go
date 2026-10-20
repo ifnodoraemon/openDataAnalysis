@@ -283,3 +283,45 @@ func TestClientExecuteToolRejectsInexactArgumentsBeforeTransport(t *testing.T) {
 		}
 	}
 }
+
+func TestMCPSyncedToolCapabilityFollowsAnnotations(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		schema     ToolSchema
+		idempotent bool
+	}{
+		{
+			name:       "read-only hint allows replay",
+			schema:     ToolSchema{Name: "read_thing", Annotations: &ToolAnnotations{ReadOnlyHint: true}},
+			idempotent: true,
+		},
+		{
+			name:       "idempotent hint allows replay",
+			schema:     ToolSchema{Name: "put_thing", Annotations: &ToolAnnotations{IdempotentHint: true}},
+			idempotent: true,
+		},
+		{
+			name:       "destructive tool is not replayed",
+			schema:     ToolSchema{Name: "delete_thing", Annotations: &ToolAnnotations{DestructiveHint: true}},
+			idempotent: false,
+		},
+		{
+			name:       "unannotated tool is not replayed",
+			schema:     ToolSchema{Name: "unknown_thing"},
+			idempotent: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tool := &MCPSyncedTool{Schema: tc.schema}
+			if got := tool.Capability().Idempotent; got != tc.idempotent {
+				t.Fatalf("expected idempotent=%v, got %v", tc.idempotent, got)
+			}
+		})
+	}
+}
