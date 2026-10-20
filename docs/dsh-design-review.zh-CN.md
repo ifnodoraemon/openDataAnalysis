@@ -4,7 +4,11 @@
 
 本文只讨论**运行时工程**，不讨论产品定位。项目自身的产品原则（`docs/product-first-principles.zh-CN.md`）和 agent 原则（`docs/agentic-principles.md`）已经相当克制且自洽，多数方向与 DSH 一致；下面列的是 DSH 走得比我们更远、或我们明显存在缺口的地方。
 
-> **实施状态（2026-10-20）**：P0 两项已落地。P0-1 由 `server/agent/history_rebuild.go` 的 `RebuildHistoryFromMessages` 实现，并在 `hydrateSessionFromPersistence` 中接入；P0-2 由 `server/agent/compaction.go`、`server/agent/tokens.go` 实现，新增 `LLM_CONTEXT_WINDOW_TOKENS` 配置与 `history_compacted` checkpoint 事件。P1 及以下仍未处理。详见第 3 节各项末尾的"已实现"说明。
+> **实施状态（2026-10-20）**：P0 两项已落地。P0-1 由 `server/agent/history_rebuild.go` 的 `RebuildHistoryFromMessages` 实现，并在 `hydrateSessionFromPersistence` 中接入；P0-2 由 `server/agent/compaction.go`、`server/agent/tokens.go` 实现，新增 `LLM_CONTEXT_WINDOW_TOKENS` 配置与 `history_compacted` checkpoint 事件。详见第 3 节各项末尾的"已实现"说明。
+>
+> P1 部分落地：重试幂等化、异常退出的悬挂工具调用修复、`continuationFacts` 清理、子代理上下文窗口去重与结果归一化（commit `9b77c83`），以及 MCP 工具按注解声明幂等性（commit `6060e5f`）。
+>
+> P1 仍未处理：**权限与审批准入收敛（P1-3）**、工具并行执行、重复调用提醒、可用性探测去阻塞。其中并行执行会改变结果顺序与工具上下文共享语义，建议单独立项；可用性探测的单次阻塞上限约 5–6 秒，属于体验问题而非正确性问题。
 
 ---
 
