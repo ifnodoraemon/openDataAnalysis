@@ -98,7 +98,7 @@ func TestProvideAskUserResultStoresStructuredToolResult(t *testing.T) {
 		},
 	}
 	answer := `{"response_type":"selection","selected_option_ids":["gross"],"custom_response":""}`
-	if err := engine.ProvideAskUserResult(answer, "user_1"); err != nil {
+	if _, err := engine.ProvideAskUserResult(answer, "user_1"); err != nil {
 		t.Fatalf("ProvideAskUserResult: %v", err)
 	}
 	if len(engine.history) != 2 || engine.history[1].Role != LLMRoleTool || engine.history[1].ToolCallID != "call_1" {
@@ -131,7 +131,7 @@ func TestActionAuthorizationReceiptBindsActorActionResourceAndPayload(t *testing
 		}}}},
 	}
 	answer := `{"response_type":"authorization","authorization_decision":"approve","action":"profile_patch_commit","resource_ref":"sp_1"}`
-	if err := engine.ProvideAskUserResult(answer, "user_1"); err != nil {
+	if _, err := engine.ProvideAskUserResult(answer, "user_1"); err != nil {
 		t.Fatalf("ProvideAskUserResult: %v", err)
 	}
 	var result map[string]interface{}
@@ -168,7 +168,7 @@ func TestActionAuthorizationRejectDoesNotMintReceipt(t *testing.T) {
 		}}}},
 	}
 	answer := `{"response_type":"authorization","authorization_decision":"reject","action":"write","resource_ref":"r1"}`
-	if err := engine.ProvideAskUserResult(answer, "user_1"); err != nil {
+	if _, err := engine.ProvideAskUserResult(answer, "user_1"); err != nil {
 		t.Fatal(err)
 	}
 	if len(engine.confirmationReceipts) != 0 || strings.Contains(engine.history[1].Content, "confirmation_receipt_id") {

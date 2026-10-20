@@ -35,7 +35,26 @@ const (
 	// summary (or, when summarization failed, dropped) so history can be
 	// rebuilt deterministically from the persisted log.
 	EventHistoryCompacted = "history_compacted"
+	// EventApprovalDenied records that the runtime refused to execute a gated
+	// tool call. It is the auditable trace of a fail-closed admission decision.
+	EventApprovalDenied = "approval_denied"
 )
+
+// ApprovalDeniedData describes one blocked tool call.
+type ApprovalDeniedData struct {
+	Tool     string `json:"tool"`
+	Decision string `json:"decision"` // ask | deny
+	Reason   string `json:"reason"`
+}
+
+// ApprovalOutcome reports what a user's answer to an authorization request
+// meant, so the caller can record the decision.
+type ApprovalOutcome struct {
+	Requested   bool
+	Approved    bool
+	Action      string
+	ResourceRef string
+}
 
 // HistoryCompactedData is the durable checkpoint written when context pressure
 // forces older conversation out of the active window.

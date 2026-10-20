@@ -348,12 +348,16 @@ func resumeWaitingRun(requestCtx context.Context, sess *session.Session, identit
 		sess.ReturnRunToWaiting(runID)
 		return fmt.Errorf("failed to persist resumed run state: %w", err)
 	}
-	if err := sess.Engine.ProvideAskUserResult(userMsg.Content, identity.UserID); err != nil {
+	outcome, err := sess.Engine.ProvideAskUserResult(userMsg.Content, identity.UserID)
+	if err != nil {
 		sess.ReturnRunToWaiting(runID)
 		rollbackErr := withPersistenceContext(requestCtx, func(persistCtx context.Context) error {
 			return runRepo.UpdateStatus(persistCtx, runID, domain.RunStatusWaitingUserInput, nil)
 		})
 		return errors.Join(err, rollbackErr)
+	}
+	if outcome.Requested {
+		recordApprovalDecision(requestCtx, sess, identity, runID, outcome)
 	}
 	go func() {
 		runEmitter := newRuntimeEventDispatcher(requestCtx, sess, identity, runID)

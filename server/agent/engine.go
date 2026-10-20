@@ -35,7 +35,9 @@ type Engine struct {
 }
 
 // ConfirmationReceipt binds one authenticated user response to the exact
-// user_request_input context that requested it. Receipts are single-use.
+// user_request_input context that requested it. Receipts are single-use and
+// expire: an approval is valid only for the change the user actually saw, and
+// only for a bounded window.
 type ConfirmationReceipt struct {
 	ID           string
 	ToolCallID   string
@@ -48,6 +50,7 @@ type ConfirmationReceipt struct {
 	ResourceRef  string
 	PayloadHash  string
 	CreatedAt    time.Time
+	ExpiresAt    time.Time
 	ConsumedAt   *time.Time
 }
 
@@ -56,6 +59,9 @@ const (
 	// verbatim when older conversation is compacted.
 	recentContextWindow   = 12
 	maxMainLoopIterations = 50
+	// confirmationReceiptTTL bounds how long a user approval stays usable. An
+	// expired receipt fails closed: the model must ask again.
+	confirmationReceiptTTL = 30 * time.Minute
 )
 
 type eventEmitterAware interface {
@@ -495,6 +501,19 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 					return
 				}
 				capability := toolCapability(registeredTool)
+
+				// Single admission point: a gated action never executes without
+				// a receipt that authorizes exactly this call. Both a missing
+				// receipt and an unverifiable one are closed.
+				if admission := tools.DecideToolCall(registeredTool, json.RawMessage(toolCall.Function.Arguments), e); admission.Kind != tools.AdmissionAllow {
+					if blocked, blockedErr := e.blockToolCall(emit, toolCall, admission); blockedErr != nil {
+						emitEngineError(emit, "tool_admission_failed", "处理授权拦截失败", blockedErr)
+						return
+					} else if blocked {
+						continue
+					}
+				}
+
 				toolSpan := llmDebugWriter.StartSpan(
 					TraceMetadataFromContext(ctx),
 					"tool",
@@ -839,15 +858,20 @@ func normalizeToolExecutionResult(toolName, result string, execErr error) (strin
 }
 
 // ProvideAskUserResult 将已认证用户的回复作为唯一挂起工具调用的结构化执行结果注入 LLM 对话上下文。
-func (e *Engine) ProvideAskUserResult(userResponse, actorUserID string) error {
+//
+// The returned outcome reports what the answer meant for an authorization
+// request, so the caller can record the decision.
+func (e *Engine) ProvideAskUserResult(userResponse, actorUserID string) (ApprovalOutcome, error) {
+	var outcome ApprovalOutcome
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.registry == nil {
-		return fmt.Errorf("tool registry is not initialized")
+		return outcome, fmt.Errorf("tool registry is not initialized")
 	}
 	if actorUserID == "" || actorUserID != strings.TrimSpace(actorUserID) {
-		return fmt.Errorf("authenticated actor user id is required")
+		return outcome, fmt.Errorf("authenticated actor user id is required")
 	}
+	e.purgeExpiredReceiptsLocked(time.Now())
 
 	type pendingAsk struct {
 		ID   string
@@ -863,7 +887,7 @@ func (e *Engine) ProvideAskUserResult(userResponse, actorUserID string) error {
 				if err == nil && ok && provider.AcceptsUserResponse() {
 					var args askUserToolCallArguments
 					if err := jsoncontract.Decode([]byte(tc.Function.Arguments), &args); err != nil {
-						return fmt.Errorf("pending user_request_input arguments are invalid: %w", err)
+						return outcome, fmt.Errorf("pending user_request_input arguments are invalid: %w", err)
 					}
 					pending = append(pending, pendingAsk{ID: tc.ID, Args: args})
 				}
@@ -875,10 +899,10 @@ func (e *Engine) ProvideAskUserResult(userResponse, actorUserID string) error {
 	}
 
 	if len(pending) == 0 {
-		return fmt.Errorf("no pending user_request_input tool call found")
+		return outcome, fmt.Errorf("no pending user_request_input tool call found")
 	}
 	if len(pending) != 1 {
-		return fmt.Errorf("expected one pending user response tool call, found %d", len(pending))
+		return outcome, fmt.Errorf("expected one pending user response tool call, found %d", len(pending))
 	}
 
 	appended := 0
@@ -894,17 +918,22 @@ func (e *Engine) ProvideAskUserResult(userResponse, actorUserID string) error {
 			receiptID := ""
 			approved := false
 			if ask.Args.Authorization != nil {
+				outcome.Requested = true
+				outcome.Action = ask.Args.Authorization.Action
+				outcome.ResourceRef = ask.Args.Authorization.ResourceRef
 				var err error
 				approved, err = authorizationResponseApproved(userResponse, ask.Args.Authorization)
 				if err != nil {
-					return err
+					return outcome, err
 				}
 			}
+			outcome.Approved = approved
 			if approved {
 				payloadHash, err := authorizationPayloadHash(ask.Args.Authorization.PayloadJSON)
 				if err != nil {
-					return err
+					return outcome, err
 				}
+				now := time.Now()
 				receiptID = "ucr_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:20]
 				e.confirmationReceipts[receiptID] = &ConfirmationReceipt{
 					ID:           receiptID,
@@ -917,12 +946,13 @@ func (e *Engine) ProvideAskUserResult(userResponse, actorUserID string) error {
 					Action:       ask.Args.Authorization.Action,
 					ResourceRef:  ask.Args.Authorization.ResourceRef,
 					PayloadHash:  payloadHash,
-					CreatedAt:    time.Now(),
+					CreatedAt:    now,
+					ExpiresAt:    now.Add(confirmationReceiptTTL),
 				}
 			}
 			toolResult, err := buildAskUserToolResult(userResponse, receiptID)
 			if err != nil {
-				return err
+				return outcome, err
 			}
 			e.history = append(e.history, ConversationItem{
 				Role:       LLMRoleTool,
@@ -934,9 +964,114 @@ func (e *Engine) ProvideAskUserResult(userResponse, actorUserID string) error {
 	}
 
 	if appended == 0 {
-		return fmt.Errorf("all user_request_input calls already have results")
+		return outcome, fmt.Errorf("all user_request_input calls already have results")
 	}
 
+	return outcome, nil
+}
+
+// blockToolCall records a refused or approval-pending tool call without running
+// it. The model receives a structured failure it can act on, the UI sees the
+// attempt and the outcome, and the decision is emitted for auditing.
+func (e *Engine) blockToolCall(emit func(RuntimeEvent), toolCall LLMToolCall, admission tools.Admission) (bool, error) {
+	errorCode := "approval_required"
+	if admission.Kind == tools.AdmissionDeny {
+		errorCode = "approval_denied"
+	}
+	encoded, err := json.Marshal(map[string]interface{}{
+		"ok":         false,
+		"tool":       toolCall.Function.Name,
+		"error_code": errorCode,
+		"message":    admission.Reason,
+	})
+	if err != nil {
+		return false, err
+	}
+	result := string(encoded)
+
+	emit(RuntimeEvent{
+		Type: EventToolCall,
+		Data: ToolCallData{
+			ID:        toolCall.ID,
+			Name:      toolCall.Function.Name,
+			Arguments: json.RawMessage(toolCall.Function.Arguments),
+		},
+	})
+	emit(RuntimeEvent{
+		Type: EventApprovalDenied,
+		Data: ApprovalDeniedData{
+			Tool:     toolCall.Function.Name,
+			Decision: string(admission.Kind),
+			Reason:   admission.Reason,
+		},
+	})
+	emit(RuntimeEvent{
+		Type: EventToolResult,
+		Data: ToolResultData{
+			ID:      toolCall.ID,
+			Name:    toolCall.Function.Name,
+			Result:  result,
+			Success: false,
+		},
+	})
+
+	e.mu.Lock()
+	e.history = append(e.history, ConversationItem{
+		Role:         LLMRoleTool,
+		Content:      result,
+		ToolCallID:   toolCall.ID,
+		ToolCallName: toolCall.Function.Name,
+	})
+	e.mu.Unlock()
+	return true, nil
+}
+
+// purgeExpiredReceiptsLocked drops receipts that are past their validity window
+// so an old approval cannot be replayed much later. The caller holds e.mu.
+func (e *Engine) purgeExpiredReceiptsLocked(now time.Time) {
+	for id, receipt := range e.confirmationReceipts {
+		if receipt == nil || (!receipt.ExpiresAt.IsZero() && now.After(receipt.ExpiresAt)) {
+			delete(e.confirmationReceipts, id)
+		}
+	}
+}
+
+// VerifyApproval implements tools.ApprovalStore. It is the runtime's single
+// check that a receipt authorizes exactly the call being admitted, and it fails
+// closed on every mismatch.
+func (e *Engine) VerifyApproval(receiptID string, request tools.ApprovalRequest) error {
+	if receiptID == "" || receiptID != strings.TrimSpace(receiptID) {
+		return fmt.Errorf("authorization receipt id must be a non-empty exact value")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.confirmationReceipts == nil {
+		return fmt.Errorf("no authorization receipts are available in this session; ask the user for authorization again")
+	}
+	receipt := e.confirmationReceipts[receiptID]
+	if receipt == nil {
+		return fmt.Errorf("authorization receipt %q is unknown or has expired; ask the user for authorization again", receiptID)
+	}
+	if receipt.ConsumedAt != nil {
+		return fmt.Errorf("authorization receipt %q has already been used", receiptID)
+	}
+	if !receipt.ExpiresAt.IsZero() && time.Now().After(receipt.ExpiresAt) {
+		delete(e.confirmationReceipts, receiptID)
+		return fmt.Errorf("authorization receipt %q has expired; ask the user for authorization again", receiptID)
+	}
+	if receipt.Action != request.Action {
+		return fmt.Errorf("authorization receipt %q approves action %q, not %q", receiptID, receipt.Action, request.Action)
+	}
+	if receipt.ResourceRef != request.ResourceRef {
+		return fmt.Errorf("authorization receipt %q approves resource %q, not %q", receiptID, receipt.ResourceRef, request.ResourceRef)
+	}
+	payloadHash, err := authorizationPayloadHash(request.PayloadJSON)
+	if err != nil {
+		return fmt.Errorf("authorization payload is invalid: %w", err)
+	}
+	if receipt.PayloadHash != payloadHash {
+		return fmt.Errorf("authorization receipt %q approves a different payload than the one being committed", receiptID)
+	}
 	return nil
 }
 
@@ -957,6 +1092,10 @@ func (e *Engine) CommitWithConfirmationReceipt(receiptID, action, resourceRef, p
 	}
 	if receipt.ConsumedAt != nil {
 		return fmt.Errorf("confirmation receipt has already been consumed")
+	}
+	if !receipt.ExpiresAt.IsZero() && time.Now().After(receipt.ExpiresAt) {
+		delete(e.confirmationReceipts, receiptID)
+		return fmt.Errorf("confirmation receipt has expired; ask the user for authorization again")
 	}
 	if action == "" || receipt.Action != action {
 		return fmt.Errorf("confirmation receipt action does not match %q", action)

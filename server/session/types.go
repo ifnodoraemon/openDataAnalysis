@@ -282,22 +282,11 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 	return s, nil
 }
 
+// semanticConfirmationAuthorizationPayload delegates to the tool layer so the
+// payload the user approves and the payload the tool commits are canonicalized
+// by exactly one implementation.
 func semanticConfirmationAuthorizationPayload(scope, overridesJSON string) (string, error) {
-	if scope == "" || scope != strings.TrimSpace(scope) {
-		return "", fmt.Errorf("scope must be a non-empty exact value")
-	}
-	if overridesJSON == "" || overridesJSON != strings.TrimSpace(overridesJSON) {
-		return "", fmt.Errorf("overrides_json must be a non-empty exact JSON object")
-	}
-	var overrides map[string]interface{}
-	if err := jsoncontract.Decode([]byte(overridesJSON), &overrides); err != nil {
-		return "", fmt.Errorf("overrides_json must be a strict JSON object: %w", err)
-	}
-	payload, err := json.Marshal(map[string]interface{}{"scope": scope, "overrides": overrides})
-	if err != nil {
-		return "", err
-	}
-	return string(payload), nil
+	return tools.SemanticConfirmationAuthorizationPayload(scope, overridesJSON)
 }
 
 func (s *Session) Touch() {

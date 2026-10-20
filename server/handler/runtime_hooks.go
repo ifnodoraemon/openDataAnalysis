@@ -61,6 +61,14 @@ func newRuntimeEventDispatcher(ctx context.Context, sess *session.Session, ident
 			return err
 		}
 		sendSessionEvent(sess.ID, targetRunID, ev, persistedMessageID(msg))
+		// Approval decisions are accountability facts rather than runtime state,
+		// and every runtime event passes through this single point.
+		switch data := ev.Data.(type) {
+		case agent.AskUserData:
+			recordApprovalRequested(ctx, sess.WorkspaceID, sess.ID, targetRunID, data)
+		case agent.ApprovalDeniedData:
+			recordApprovalDenied(ctx, sess.WorkspaceID, sess.ID, targetRunID, data)
+		}
 		return nil
 	}
 	deliver := func(ev agent.RuntimeEvent) error { return deliverToRun(runID, ev) }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/ifnodoraemon/openDataAnalysis/service"
 )
@@ -205,10 +206,47 @@ func (t *ConfirmSourceProfileTool) SetExecutionContext(ctx context.Context) { t.
 
 func (t *ConfirmSourceProfileTool) Name() string { return "profile_patch_commit" }
 func (t *ConfirmSourceProfileTool) Capability() ToolCapability {
-	return ToolCapability{Mode: "action", RuntimeEnabled: true, RequiresUserReceipt: true}
+	return ToolCapability{Mode: "action", RuntimeEnabled: true}
 }
 func (t *ConfirmSourceProfileTool) Description() string {
 	return "Commit an exact user-authorized patch for one stored profile. Requires a single-use authorization receipt bound to action=profile_patch_commit, this profile_id, and the canonical scope/patch payload. Writes actor and receipt provenance; it does not modify source data or infer additional fields."
+}
+
+// ApprovalReceiptID returns the receipt supplied with this call, or "" when the
+// model has not obtained authorization yet.
+func (t *ConfirmSourceProfileTool) ApprovalReceiptID(args json.RawMessage) string {
+	var params struct {
+		ReceiptID string `json:"confirmation_receipt_id"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return ""
+	}
+	return params.ReceiptID
+}
+
+// ApprovalRequest returns the exact authorization this call needs. The runtime
+// evaluates it before execution, so an unapproved call never reaches Execute.
+func (t *ConfirmSourceProfileTool) ApprovalRequest(args json.RawMessage) (ApprovalRequest, error) {
+	var params struct {
+		ProfileID     string `json:"profile_id"`
+		Scope         string `json:"scope"`
+		OverridesJSON string `json:"overrides_json"`
+	}
+	if err := decodeToolArgs(args, &params); err != nil {
+		return ApprovalRequest{}, err
+	}
+	if strings.TrimSpace(params.ProfileID) == "" {
+		return ApprovalRequest{}, fmt.Errorf("profile_id must be a non-empty exact value")
+	}
+	payload, err := SemanticConfirmationAuthorizationPayload(params.Scope, params.OverridesJSON)
+	if err != nil {
+		return ApprovalRequest{}, err
+	}
+	return ApprovalRequest{
+		Action:      "profile_patch_commit",
+		ResourceRef: params.ProfileID,
+		PayloadJSON: payload,
+	}, nil
 }
 func (t *ConfirmSourceProfileTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{

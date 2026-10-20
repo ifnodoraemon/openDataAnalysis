@@ -6,9 +6,9 @@
 
 > **实施状态（2026-10-20）**：P0 两项已落地。P0-1 由 `server/agent/history_rebuild.go` 的 `RebuildHistoryFromMessages` 实现，并在 `hydrateSessionFromPersistence` 中接入；P0-2 由 `server/agent/compaction.go`、`server/agent/tokens.go` 实现，新增 `LLM_CONTEXT_WINDOW_TOKENS` 配置与 `history_compacted` checkpoint 事件。详见第 3 节各项末尾的"已实现"说明。
 >
-> P1 部分落地：重试幂等化、异常退出的悬挂工具调用修复、`continuationFacts` 清理、子代理上下文窗口去重与结果归一化（commit `9b77c83`），以及 MCP 工具按注解声明幂等性（commit `6060e5f`）。
+> P1 部分落地：重试幂等化、异常退出的悬挂工具调用修复、`continuationFacts` 清理、子代理上下文窗口去重与结果归一化（commit `9b77c83`），MCP 工具按注解声明幂等性（commit `6060e5f`），以及**权限与审批收敛（P1-3）**：`tools.DecideToolCall` 成为唯一准入判定点（allow/ask/deny），所有失败路径 fail closed，每次授权请求、用户决定与拦截都写入 `audit_events`，receipt 增加 30 分钟有效期，准入规则写入静态 policy。
 >
-> P1 仍未处理：**权限与审批准入收敛（P1-3）**、工具并行执行、重复调用提醒、可用性探测去阻塞。其中并行执行会改变结果顺序与工具上下文共享语义，建议单独立项；可用性探测的单次阻塞上限约 5–6 秒，属于体验问题而非正确性问题。
+> P1 仍未处理：工具并行执行、重复调用提醒、可用性探测去阻塞。其中并行执行会改变结果顺序与工具上下文共享语义，建议单独立项；可用性探测的单次阻塞上限约 5–6 秒，属于体验问题而非正确性问题。
 
 ---
 
