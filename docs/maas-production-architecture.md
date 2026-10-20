@@ -35,6 +35,26 @@ When `DEPLOYMENT_MODE=production`, the server must fail closed if any of these l
 4. Cleanup must be driven by durable metadata and object storage lifecycle, not by whichever process currently has a session in memory.
 5. Production origins must be explicit. Wildcard and localhost origins are development-only.
 
+## Process-Local Assumptions
+
+Development mode is single-process by construction. These are the specific
+places where correctness currently depends on that, and what each needs before a
+second instance can serve the same workspace:
+
+| Assumption | Where | Why it breaks with two instances | Direction |
+|---|---|---|---|
+| Session liveness is a map lookup | `session.Manager.IsSessionLive`, `Peek` | A second instance sees the session as not live, so `recoverStaleSessionRuns` marks the first instance's running runs failed | Liveness must come from durable run state and a worker lease, not process memory |
+| Model history lives in the session object | `agent.Engine.history` | A run resumed on another instance would start from whatever that instance rebuilt, and the two could diverge | Already partly addressed: history is derived from the persisted event log on cold load, so any instance rebuilds the same history |
+| Confirmation receipts are in-process | `agent.Engine.confirmationReceipts` | An approval granted on one instance is unknown to another, so the authorized commit is refused | Fail-closed and acceptable for now; a shared store would be needed for cross-instance approval |
+| Run execution is in-process | `RUN_BACKEND=inprocess` | Production readiness already rejects it | Durable run/job backend with a worker lease loop |
+| Event fan-out is a process-local broker | `handler.GlobalSSEBroker` | A client attached to instance B does not see events produced by instance A | Durable event log plus a shared subscription channel; SSE stays a subscription surface only |
+| Session analysis database is a local file | session-scoped SQLite | Two workers cannot share one session's scratch database | Worker-materialized scratch state rebuilt from a durable snapshot manifest |
+
+The second row is the important one for the agent runtime: because model history
+is now derived from the persisted log rather than remembered in memory, the
+runtime no longer has to be pinned to the process that started a run. The
+remaining rows are the work items in the migration order below.
+
 ## Migration Order
 
 1. Keep development mode working, but make production mode fail closed while local backends remain selected.
