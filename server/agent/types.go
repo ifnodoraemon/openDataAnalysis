@@ -38,7 +38,17 @@ const (
 	// EventApprovalDenied records that the runtime refused to execute a gated
 	// tool call. It is the auditable trace of a fail-closed admission decision.
 	EventApprovalDenied = "approval_denied"
+	// EventRunUsage reports the model usage a run accumulated. It is emitted
+	// once the run settles and carries operational cost facts.
+	EventRunUsage = "run_usage"
 )
+
+// RunUsageData is the usage a run accumulated.
+type RunUsageData struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
 
 // ApprovalDeniedData describes one blocked tool call.
 type ApprovalDeniedData struct {

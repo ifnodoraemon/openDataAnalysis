@@ -14,4 +14,5 @@ type RunRepository interface {
 	UpdateStatus(ctx context.Context, runID string, status domain.RunStatus, errMsg *string) error
 	UpdateSummary(ctx context.Context, runID, summary string) error
 	BindReportFile(ctx context.Context, runID, reportFileID string) error
+	UpdateTokens(ctx context.Context, runID string, promptTokens, completionTokens int) error
 }

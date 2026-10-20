@@ -31,8 +31,12 @@ type AnalysisRun struct {
 	Summary      string
 	ErrorMessage *string
 	ReportFileID *string
-	StartedAt    *time.Time
-	FinishedAt   *time.Time
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// PromptTokens and CompletionTokens are the model usage accumulated for this
+	// run. They are operational facts used for cost visibility, not billing.
+	PromptTokens     int
+	CompletionTokens int
+	StartedAt        *time.Time
+	FinishedAt       *time.Time
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }

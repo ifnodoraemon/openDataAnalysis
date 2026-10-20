@@ -333,6 +333,18 @@ func (r *RunRepository) UpdateSummary(ctx context.Context, runID, summary string
 	return nil
 }
 
+func (r *RunRepository) UpdateTokens(ctx context.Context, runID string, promptTokens, completionTokens int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	run, ok := r.runs[runID]
+	if !ok {
+		return fmt.Errorf("%w: run %s", repository.ErrNotFound, runID)
+	}
+	run.PromptTokens = promptTokens
+	run.CompletionTokens = completionTokens
+	return nil
+}
+
 func (r *RunRepository) BindReportFile(ctx context.Context, runID, reportFileID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

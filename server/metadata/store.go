@@ -143,6 +143,8 @@ func (s *Store) migrate() error {
 			report_file_id TEXT,
 			started_at DATETIME,
 			finished_at DATETIME,
+			prompt_tokens INTEGER NOT NULL DEFAULT 0,
+			completion_tokens INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
 			FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
@@ -354,7 +356,7 @@ func (s *Store) migrate() error {
 // SQLiteSchemaVersion is the schema generation this binary expects. It mirrors
 // the highest goose migration applied to Postgres, so both dialects report the
 // same generation.
-const SQLiteSchemaVersion = 5
+const SQLiteSchemaVersion = 6
 
 // recordSchemaVersion writes the current generation and refuses to open a
 // database written by a newer binary. Without a recorded version the only
@@ -370,6 +372,9 @@ func (s *Store) recordSchemaVersion() error {
 			"metadata schema version %d is newer than this binary supports (%d); upgrade the server or restore a compatible database",
 			recorded.Int64, SQLiteSchemaVersion)
 	}
+	if err := s.applySchemaMigrations(recorded); err != nil {
+		return err
+	}
 	if recorded.Valid && recorded.Int64 == SQLiteSchemaVersion {
 		return nil
 	}
@@ -379,6 +384,83 @@ func (s *Store) recordSchemaVersion() error {
 		return fmt.Errorf("failed to record metadata schema version: %w", err)
 	}
 	return nil
+}
+
+// sqliteMigrations are the forward steps applied to a database created by an
+// earlier generation. A fresh database already has the current shape from the
+// statement list above, so each step first checks whether it is needed.
+var sqliteMigrations = []struct {
+	version int
+	table   string
+	columns []string
+	ddl     string
+}{
+	{
+		version: 6,
+		table:   "analysis_runs",
+		columns: []string{"prompt_tokens"},
+		ddl:     `ALTER TABLE analysis_runs ADD COLUMN prompt_tokens INTEGER NOT NULL DEFAULT 0`,
+	},
+	{
+		version: 6,
+		table:   "analysis_runs",
+		columns: []string{"completion_tokens"},
+		ddl:     `ALTER TABLE analysis_runs ADD COLUMN completion_tokens INTEGER NOT NULL DEFAULT 0`,
+	},
+}
+
+// applySchemaMigrations brings a database created by an earlier generation up
+// to the current one. Every step is guarded by a column existence check, so
+// running it against an already-current database is a no-op.
+func (s *Store) applySchemaMigrations(recorded sql.NullInt64) error {
+	from := 0
+	if recorded.Valid {
+		from = int(recorded.Int64)
+	}
+	if from >= SQLiteSchemaVersion {
+		return nil
+	}
+	for _, migration := range sqliteMigrations {
+		if migration.version <= from {
+			continue
+		}
+		exists, err := columnExists(s.DB, migration.table, migration.columns[0])
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := s.DB.Exec(migration.ddl); err != nil {
+			return fmt.Errorf("failed to apply metadata migration %d on %s: %w", migration.version, migration.table, err)
+		}
+	}
+	return nil
+}
+
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false, fmt.Errorf("failed to inspect %s: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			colType    string
+			notNull    int
+			defaultVal sql.NullString
+			pk         int
+		)
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultVal, &pk); err != nil {
+			return false, fmt.Errorf("failed to read %s structure: %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // SchemaVersion reports the recorded metadata schema generation.

@@ -111,3 +111,16 @@ func recordApprovalDenied(ctx context.Context, workspaceID, sessionID, runID str
 		}),
 	})
 }
+
+// recordRunUsage persists the model usage a run accumulated. Cost facts must
+// not break a run, so a failure is logged rather than propagated.
+func recordRunUsage(ctx context.Context, runID string, usage agent.RunUsageData) {
+	if runRepo == nil || runID == "" {
+		return
+	}
+	if err := withPersistenceContext(ctx, func(persistCtx context.Context) error {
+		return runRepo.UpdateTokens(persistCtx, runID, usage.PromptTokens, usage.CompletionTokens)
+	}); err != nil {
+		log.Printf("run usage persistence failed run_id=%s err=%v", runID, err)
+	}
+}

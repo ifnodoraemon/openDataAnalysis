@@ -165,6 +165,13 @@ func (r *RunRepository) UpdateSummary(ctx context.Context, runID, summary string
 	return err
 }
 
+func (r *RunRepository) UpdateTokens(ctx context.Context, runID string, promptTokens, completionTokens int) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE analysis_runs SET prompt_tokens = ?, completion_tokens = ?, updated_at = ? WHERE id = ?`,
+		promptTokens, completionTokens, time.Now(), runID)
+	return err
+}
+
 func (r *RunRepository) BindReportFile(ctx context.Context, runID, reportFileID string) error {
 	_, err := r.db.ExecContext(ctx, `UPDATE analysis_runs SET report_file_id = ?, updated_at = ? WHERE id = ?`, reportFileID, time.Now(), runID)
 	return err

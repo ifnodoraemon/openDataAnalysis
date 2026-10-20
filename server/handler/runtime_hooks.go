@@ -68,6 +68,8 @@ func newRuntimeEventDispatcher(ctx context.Context, sess *session.Session, ident
 			recordApprovalRequested(ctx, sess.WorkspaceID, sess.ID, targetRunID, data)
 		case agent.ApprovalDeniedData:
 			recordApprovalDenied(ctx, sess.WorkspaceID, sess.ID, targetRunID, data)
+		case agent.RunUsageData:
+			recordRunUsage(ctx, targetRunID, data)
 		}
 		return nil
 	}

@@ -175,3 +175,57 @@ func TestRunSkipsCompactionBelowThreshold(t *testing.T) {
 		t.Fatalf("history must be untouched below the threshold, got %d items", len(engine.History()))
 	}
 }
+
+// Usage is an operational fact about a run, so it must be reported once the run
+// settles rather than only landing in debug traces.
+func TestRunEmitsAccumulatedUsage(t *testing.T) {
+	server, _ := scriptedLLMServer(t, []string{
+		responsesAPITextBody(t, "结论。"),
+	})
+	installTestLLMConfig(t, server)
+
+	engine := &Engine{llm: NewLLMClient(), registry: tools.NewRegistry(), policy: "system"}
+	var events []RuntimeEvent
+	engine.Run(context.Background(), "分析数据", nil, func(ev RuntimeEvent) { events = append(events, ev) })
+
+	var usage *RunUsageData
+	for _, ev := range events {
+		if ev.Type == EventRunUsage {
+			data := ev.Data.(RunUsageData)
+			usage = &data
+		}
+	}
+	if usage == nil {
+		t.Fatalf("expected a run_usage event, got %#v", events)
+	}
+	// The scripted body reports input_tokens=10 and output_tokens=5.
+	if usage.PromptTokens != 10 || usage.CompletionTokens != 5 || usage.TotalTokens != 15 {
+		t.Fatalf("unexpected usage: %#v", usage)
+	}
+
+	// The usage event must be the last thing the run reports.
+	if events[len(events)-1].Type != EventRunUsage {
+		t.Fatalf("expected usage to be reported after the run settles, got %q", events[len(events)-1].Type)
+	}
+}
+
+func TestRunOmitsUsageWhenTheProviderReportsNone(t *testing.T) {
+	// A gateway that omits the usage block entirely.
+	body := `{"id":"resp_text","status":"completed","model":"gpt-test","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"结论。"}]}]}`
+	server, _ := scriptedLLMServer(t, []string{body})
+	installTestLLMConfig(t, server)
+
+	engine := &Engine{llm: NewLLMClient(), registry: tools.NewRegistry(), policy: "system"}
+	var sawUsage bool
+	engine.Run(context.Background(), "分析数据", nil, func(ev RuntimeEvent) {
+		if ev.Type == EventRunUsage {
+			sawUsage = true
+		}
+	})
+	if sawUsage {
+		t.Fatalf("a run with no provider-reported usage must not emit a zero usage event")
+	}
+	if prompt, completion := engine.runTokens(); prompt != 0 || completion != 0 {
+		t.Fatalf("expected no accumulated usage, got %d/%d", prompt, completion)
+	}
+}

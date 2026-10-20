@@ -31,8 +31,12 @@ type Engine struct {
 	lastPromptTokens int
 	// repeatCalls counts identical tool calls in the current conversation and
 	// pendingNotices carries the advisories queued for the next request.
-	repeatCalls          map[string]int
-	pendingNotices       []RuntimeContextBlock
+	repeatCalls    map[string]int
+	pendingNotices []RuntimeContextBlock
+	// promptTokens and completionTokens accumulate provider-reported usage for
+	// this run so the caller can persist cost facts.
+	promptTokens         int
+	completionTokens     int
 	confirmationReceipts map[string]*ConfirmationReceipt
 	reportState          *tools.ReportState
 	mu                   sync.Mutex
@@ -247,6 +251,13 @@ func (e *Engine) History() []ConversationItem {
 	return append([]ConversationItem(nil), e.history...)
 }
 
+// runTokens returns the usage accumulated for this run.
+func (e *Engine) runTokens() (int, int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.promptTokens, e.completionTokens
+}
+
 // repairDanglingToolCalls pairs any assistant tool call that has no recorded
 // result. It is idempotent: a fully paired history is returned unchanged.
 func (e *Engine) repairDanglingToolCalls() {
@@ -384,6 +395,19 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 	// the next request in this session invalid, so the history is repaired on
 	// every exit path.
 	defer e.repairDanglingToolCalls()
+	// Usage is an operational fact about the run, so it is reported once the run
+	// settles on every exit path.
+	defer func() {
+		promptTokens, completionTokens := e.runTokens()
+		if promptTokens == 0 && completionTokens == 0 {
+			return
+		}
+		emit(RuntimeEvent{Type: EventRunUsage, Data: RunUsageData{
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      promptTokens + completionTokens,
+		}})
+	}()
 	e.prepareRuntimeTools(ctx, emit)
 
 	e.mu.Lock()
@@ -451,6 +475,8 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 		if resp.Usage.PromptTokens > 0 {
 			e.lastPromptTokens = resp.Usage.PromptTokens
 		}
+		e.promptTokens += resp.Usage.PromptTokens
+		e.completionTokens += resp.Usage.CompletionTokens
 		e.mu.Unlock()
 
 		if len(resp.Choices) == 0 {
@@ -830,6 +856,8 @@ func (e *Engine) finalResponseAfterFinalize(ctx context.Context, getRuntimeVars 
 	if usage.PromptTokens > 0 {
 		e.lastPromptTokens = usage.PromptTokens
 	}
+	e.promptTokens += usage.PromptTokens
+	e.completionTokens += usage.CompletionTokens
 	e.mu.Unlock()
 	return summary, nil
 }
