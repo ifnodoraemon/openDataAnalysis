@@ -89,6 +89,15 @@ function parseYamlScalar(raw) {
   ) {
     return value.slice(1, -1);
   }
+  // Flow sequences such as `terminal_types: [run_completed, user_request_input]`
+  // are valid YAML and are used throughout the scenario corpus. Without this
+  // the value stays a string and every array-shaped acceptance field breaks at
+  // evaluation time.
+  if (value.startsWith("[") && value.endsWith("]")) {
+    const inner = value.slice(1, -1).trim();
+    if (!inner) return [];
+    return inner.split(",").map((item) => parseYamlScalar(item));
+  }
   return value;
 }
 
@@ -586,9 +595,14 @@ async function main() {
   }, args.timeoutSec * 1000);
 
   const streamController = new AbortController();
-  const streamURL = `${apiOrigin}/api/sse?token=${encodeURIComponent(token)}&session_id=${encodeURIComponent(sessionId)}`;
+  const streamURL = `${apiOrigin}/api/sse?session_id=${encodeURIComponent(sessionId)}`;
+  // The stream is authenticated the same way as every other endpoint: a bearer
+  // token or the session cookie. The token query parameter is not accepted.
   const streamResponse = await fetch(streamURL, {
-    headers: { Accept: "text/event-stream" },
+    headers: {
+      Accept: "text/event-stream",
+      Authorization: `Bearer ${token}`,
+    },
     signal: streamController.signal,
   });
   if (!streamResponse.ok) {
