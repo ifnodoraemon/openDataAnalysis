@@ -287,6 +287,8 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 
 	s.Engine = agent.NewEngine(runtimeRegistry)
 	s.Engine.SetReportState(s.ReportState)
+	// Completed jobs are reported to the model on the next request.
+	s.Engine.SetJobManager(jobs)
 
 	return s, nil
 }

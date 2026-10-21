@@ -338,7 +338,9 @@ DSH 的对应做法是构建期静态、无缺口、不可运行时改动的格�
 | `job_status` | 读取状态（running/succeeded/failed）、耗时、结果大小、失败原因 |
 | `job_output` | 分页读取已完成 job 的结果（每次最多 6000 rune） |
 
-设计取向是**不预设路径**：runtime 不替模型决定"提交后要等还是先做别的"，也不在 job 完成时主动打断当前轮次。模型自己决定何时查。
+设计取向是**不预设路径**：runtime 不替模型决定"提交后要等还是先做别的"，也不在 job 完成时打断当前轮次。模型自己决定何时查。
+
+完成的 job 会以 `background_job_finished` 这个 runtime context 事实在下一次请求里告知模型，内容只有事实：`job_id`、`job_tool`、`status`、`duration_ms`、`result_chars`、失败时的 `error_message`。它不提示下一步，也不重复下发——每次完成只出现一次。这样"提交完继续做别的"不需要额外轮次去轮询，而"想读结果"仍然由模型自己决定。
 
 ### 10.2 边界与取舍
 
@@ -351,6 +353,5 @@ DSH 的对应做法是构建期静态、无缺口、不可运行时改动的格�
 
 ### 10.3 未做
 
-- 完成通知（DSH 的 settlement notice）。模型需要主动轮询，多花轮次。
 - 持久化与跨进程恢复。job 不像 run 那样有事件日志，重启后无法续读。
 - owner fencing 与多实例：job 归属单进程，与 `docs/maas-production-architecture.md` 的单进程假设一致。

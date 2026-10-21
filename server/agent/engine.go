@@ -42,6 +42,9 @@ type Engine struct {
 	// longer in history. It is delivered as a runtime-context fact rather than a
 	// fake user turn, so history stays a pure record of what was said.
 	historySummary string
+	// jobs is the session's background job manager. Finished jobs are reported
+	// to the model as runtime facts so they need not be polled for.
+	jobs *JobManager
 	// promptTokens and completionTokens accumulate provider-reported usage for
 	// this run so the caller can persist cost facts.
 	promptTokens         int
@@ -284,6 +287,14 @@ func (e *Engine) SetReportState(state *tools.ReportState) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.reportState = state
+}
+
+// SetJobManager attaches the session's background job manager, so completed
+// jobs can be reported as runtime facts on the next request.
+func (e *Engine) SetJobManager(jobs *JobManager) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.jobs = jobs
 }
 
 func (e *Engine) reportDraftAfterMutation(startVersion uint64) (bool, uint64) {

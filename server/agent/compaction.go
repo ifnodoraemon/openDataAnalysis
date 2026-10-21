@@ -59,6 +59,12 @@ func (e *Engine) buildBundleLocked(userTask string, getRuntimeVars func() []Runt
 			Name: "history_window", Role: "user", Content: fmt.Sprintf(`{"omitted_message_count":%d}`, e.omittedHistoryMessages),
 		})
 	}
+	// Finished background jobs ride the request as facts, so a job that ends
+	// between steps is noticed without the model having to poll for it. Taking
+	// them here clears the queue: each completion is announced exactly once.
+	if e.jobs != nil {
+		bundle.RuntimeContext = append(bundle.RuntimeContext, e.jobs.TakeCompletedNotices()...)
+	}
 	bundle.History = append([]ConversationItem(nil), e.history...)
 	return bundle
 }

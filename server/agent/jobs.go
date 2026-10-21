@@ -66,6 +66,10 @@ type JobManager struct {
 	registry *tools.Registry
 	jobs     map[string]*Job
 	order    []string
+	// unannounced holds finished job ids that the model has not been told
+	// about yet. They ride the next request as runtime facts, so a finished
+	// job does not have to be discovered by polling for it to be noticed.
+	unannounced []string
 }
 
 // NewJobManager creates an empty job manager. The registry is attached once the
@@ -163,9 +167,59 @@ func (m *JobManager) finish(jobID, resultID string, resultChars int, failure err
 	if failure != nil {
 		job.Status = JobStatusFailed
 		job.ErrorMessage = sanitizeToolError(failure.Error())
-		return
+	} else {
+		job.Status = JobStatusSucceeded
 	}
-	job.Status = JobStatusSucceeded
+	m.unannounced = append(m.unannounced, jobID)
+}
+
+// TakeCompletedNotices returns one factual notice per job that finished since
+// the last call, and clears them so each is delivered exactly once.
+//
+// This is how a finished job reaches the model without being polled for: the
+// notices ride the next request alongside the other runtime facts. They state
+// what happened and leave the decision to the model.
+func (m *JobManager) TakeCompletedNotices() []RuntimeContextBlock {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.unannounced) == 0 {
+		return nil
+	}
+	ids := m.unannounced
+	m.unannounced = nil
+
+	notices := make([]RuntimeContextBlock, 0, len(ids))
+	for _, id := range ids {
+		job, ok := m.jobs[id]
+		if !ok {
+			// Evicted before it could be announced; the model will find the id
+			// unknown if it asks, which is the same fact.
+			continue
+		}
+		payload := map[string]interface{}{
+			"job_id":       job.ID,
+			"job_tool":     job.Tool,
+			"status":       job.Status,
+			"duration_ms":  job.Duration().Milliseconds(),
+			"result_chars": job.ResultChars,
+		}
+		if job.ErrorMessage != "" {
+			payload["error_message"] = job.ErrorMessage
+		}
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			continue
+		}
+		notices = append(notices, RuntimeContextBlock{
+			Name:    "background_job_finished",
+			Role:    LLMRoleUser,
+			Content: string(encoded),
+		})
+	}
+	return notices
 }
 
 // Status returns a snapshot of one job.

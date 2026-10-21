@@ -235,3 +235,66 @@ func TestJobToolsAreRegisteredAndContractShaped(t *testing.T) {
 		t.Fatalf("job tools must not be registered without a job manager")
 	}
 }
+
+// A finished job is announced once, as a fact, on the next request's runtime
+// context. It must not require polling to be noticed, and must not repeat.
+func TestCompletedJobIsAnnouncedOnceAsRuntimeFact(t *testing.T) {
+	manager := newJobTestManager(t, &jobTestTool{name: "code_run_python", delay: 20 * time.Millisecond, body: "done"})
+
+	job, err := manager.Submit(context.Background(), "code_run_python", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	waitForJobStatus(t, manager, job.ID, JobStatusSucceeded)
+
+	notices := manager.TakeCompletedNotices()
+	if len(notices) != 1 {
+		t.Fatalf("expected one completion notice, got %d", len(notices))
+	}
+	notice := notices[0]
+	if notice.Name != "background_job_finished" || notice.Role != LLMRoleUser {
+		t.Fatalf("unexpected notice block: %#v", notice)
+	}
+	if !strings.Contains(notice.Content, job.ID) || !strings.Contains(notice.Content, JobStatusSucceeded) {
+		t.Fatalf("notice must state the job and its outcome: %q", notice.Content)
+	}
+	if again := manager.TakeCompletedNotices(); len(again) != 0 {
+		t.Fatalf("a completion must be announced exactly once, got %#v", again)
+	}
+}
+
+// The engine carries the notice on the request it builds, so the model sees the
+// completion without calling job_status.
+func TestEngineInjectsJobCompletionIntoRuntimeContext(t *testing.T) {
+	manager := newJobTestManager(t, &jobTestTool{name: "code_run_python", delay: 10 * time.Millisecond, body: "done"})
+
+	job, err := manager.Submit(context.Background(), "code_run_python", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	waitForJobStatus(t, manager, job.ID, JobStatusSucceeded)
+
+	engine := &Engine{policy: "system", jobs: manager}
+	bundle := engine.buildBundle("", nil, nil)
+
+	found := false
+	for _, block := range bundle.RuntimeContext {
+		if block.Name == "background_job_finished" {
+			found = true
+			if !strings.Contains(block.Content, job.ID) {
+				t.Fatalf("unexpected notice content %q", block.Content)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a background_job_finished block, got %#v", bundle.RuntimeContext)
+	}
+
+	// The next request must not repeat it.
+	next := engine.buildBundle("", nil, nil)
+	for _, block := range next.RuntimeContext {
+		if block.Name == "background_job_finished" {
+			t.Fatalf("the completion notice must be delivered once, got %#v", block)
+		}
+	}
+}
