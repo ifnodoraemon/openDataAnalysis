@@ -41,7 +41,19 @@ const (
 	// EventRunUsage reports the model usage a run accumulated. It is emitted
 	// once the run settles and carries operational cost facts.
 	EventRunUsage = "run_usage"
+	// EventSystemFeedback records a corrective turn the runtime wrote into the
+	// model conversation, such as rejecting an answer that leaked raw tool-call
+	// markup. It is logged so a rebuilt history reproduces the same
+	// conversation instead of silently dropping the turn.
+	EventSystemFeedback = "system_feedback"
 )
+
+// SystemFeedbackData is one corrective turn the runtime wrote into the model
+// conversation. It is model-facing text, not a user statement.
+type SystemFeedbackData struct {
+	Content string `json:"content"`
+	Reason  string `json:"reason,omitempty"`
+}
 
 // RunUsageData is the usage a run accumulated.
 type RunUsageData struct {
@@ -77,6 +89,9 @@ type ApprovalOutcome struct {
 type HistoryCompactedData struct {
 	Summary       string `json:"summary,omitempty"`
 	ShadowedItems int    `json:"shadowed_items"`
+	// PinnedItems counts leading conversation items compaction never touches,
+	// so the user's original task survives every compaction.
+	PinnedItems   int    `json:"pinned_items,omitempty"`
 	Method        string `json:"method"`
 	PromptTokens  int    `json:"prompt_tokens,omitempty"`
 	ContextWindow int    `json:"context_window,omitempty"`

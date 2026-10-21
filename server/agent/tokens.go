@@ -69,6 +69,9 @@ func EstimatePromptTokens(bundle *PromptBundle, toolSpecs []tools.ToolSpec) int 
 	}
 	for _, item := range bundle.History {
 		total += promptMessageOverheadTokens + estimateTextTokens(item.Content)
+		// Reasoning text is replayed to providers that accept it, so it is part
+		// of the prompt footprint.
+		total += estimateTextTokens(item.ReasoningContent)
 		for _, call := range item.ToolCalls {
 			total += estimateTextTokens(call.Function.Name) + estimateTextTokens(call.Function.Arguments)
 		}

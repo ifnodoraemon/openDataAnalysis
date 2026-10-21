@@ -79,7 +79,7 @@ func (l *LLMClient) chatGoogle(ctx context.Context, bundle *PromptBundle, toolSp
 	if bundle.Policy != "" || bundle.PolicyAppendix != "" {
 		systemText := bundle.Policy
 		if bundle.PolicyAppendix != "" {
-			systemText += "\n\n" + bundle.PolicyAppendix
+			systemText += "\n\n## Delegate Additional Constraints\n" + bundle.PolicyAppendix
 		}
 		req.SystemInstruction = &geminiContent{
 			Role:  "user",
@@ -93,9 +93,6 @@ func (l *LLMClient) chatGoogle(ctx context.Context, bundle *PromptBundle, toolSp
 	// consecutive user-role contents.
 	for _, c := range bundle.RuntimeContext {
 		req.Contents = append(req.Contents, geminiContent{Role: "user", Parts: []geminiPart{{Text: fmt.Sprintf("[runtime_context role=%s name=%s]\n%s", runtimeContextTransportRole(c), c.Name, c.Content)}}})
-	}
-	if bundle.Task != "" {
-		req.Contents = append(req.Contents, geminiContent{Role: "user", Parts: []geminiPart{{Text: bundle.Task}}})
 	}
 	for _, h := range bundle.History {
 		if h.Role == LLMRoleUser {
@@ -142,6 +139,11 @@ func (l *LLMClient) chatGoogle(ctx context.Context, bundle *PromptBundle, toolSp
 			}
 			req.Contents = append(req.Contents, geminiContent{Role: "user", Parts: []geminiPart{{FunctionResponse: &geminiFunctionResponse{Name: toolName, Response: response}}}})
 		}
+	}
+	// The task travels last, matching the OpenAI and Anthropic assembly: the
+	// current instruction stays closest to the request.
+	if bundle.Task != "" {
+		req.Contents = append(req.Contents, geminiContent{Role: "user", Parts: []geminiPart{{Text: bundle.Task}}})
 	}
 
 	if len(toolSpecs) > 0 {

@@ -225,6 +225,16 @@ func countHistoryChars(hist []ConversationItem) int {
 	return total
 }
 
+// countHistoryReasoningChars measures replayed reasoning text. It is separate
+// from history_chars so a trace shows why a prompt is larger than its messages.
+func countHistoryReasoningChars(hist []ConversationItem) int {
+	var total int
+	for _, h := range hist {
+		total += len([]rune(h.ReasoningContent))
+	}
+	return total
+}
+
 type openAIAPIKind string
 
 const (
@@ -255,21 +265,23 @@ func (l *LLMClient) chatOpenAI(ctx context.Context, bundle *PromptBundle, toolSp
 	span := llmDebugWriter.StartSpan(TraceMetadataFromContext(ctx), "llm", l.provider, "", "")
 	requestPath := llmDebugWriter.WriteBlob(span, "request.json", reqBytes)
 	l.debugLog(span, "llm.request", map[string]interface{}{
-		"provider":              l.provider,
-		"model":                 l.model,
-		"endpoint":              endpoint,
-		"message_count":         len(bundle.History),
-		"tool_count":            len(toolSpecs),
-		"tools":                 summarizeTools(toolSpecs),
-		"user_preview":          clipText(lastUserMessage(bundle.History), 240),
-		"instruction_chars":     len([]rune(reqBody.Instructions)),
-		"policy_chars":          len([]rune(bundle.Policy)),
-		"task_chars":            len([]rune(bundle.Task)),
-		"runtime_context_chars": countRuntimeContextChars(bundle.RuntimeContext),
-		"history_chars":         countHistoryChars(bundle.History),
-		"request_bytes":         len(reqBytes),
-		"request_sha256":        blobSHA256(reqBytes),
-		"request_path":          requestPath,
+		"provider":                l.provider,
+		"model":                   l.model,
+		"endpoint":                endpoint,
+		"message_count":           len(bundle.History),
+		"tool_count":              len(toolSpecs),
+		"tools":                   summarizeTools(toolSpecs),
+		"user_preview":            clipText(lastUserMessage(bundle.History), 240),
+		"instruction_chars":       len([]rune(reqBody.Instructions)),
+		"policy_chars":            len([]rune(bundle.Policy)),
+		"policy_appendix_chars":   len([]rune(bundle.PolicyAppendix)),
+		"history_reasoning_chars": countHistoryReasoningChars(bundle.History),
+		"task_chars":              len([]rune(bundle.Task)),
+		"runtime_context_chars":   countRuntimeContextChars(bundle.RuntimeContext),
+		"history_chars":           countHistoryChars(bundle.History),
+		"request_bytes":           len(reqBytes),
+		"request_sha256":          blobSHA256(reqBytes),
+		"request_path":            requestPath,
 	})
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBytes))
@@ -647,22 +659,24 @@ func (l *LLMClient) chatOpenAIChatCompletions(ctx context.Context, endpoint stri
 	span := llmDebugWriter.StartSpan(TraceMetadataFromContext(ctx), "llm", l.provider, "", "")
 	requestPath := llmDebugWriter.WriteBlob(span, "request.json", reqBytes)
 	l.debugLog(span, "llm.request", map[string]interface{}{
-		"provider":              l.provider,
-		"model":                 l.model,
-		"endpoint":              endpoint,
-		"api_kind":              string(openAIAPIChatCompletions),
-		"message_count":         len(bundle.History),
-		"tool_count":            len(toolSpecs),
-		"tools":                 summarizeTools(toolSpecs),
-		"user_preview":          clipText(lastUserMessage(bundle.History), 240),
-		"instruction_chars":     len([]rune(buildChatSystemPrompt(bundle))),
-		"policy_chars":          len([]rune(bundle.Policy)),
-		"task_chars":            len([]rune(bundle.Task)),
-		"runtime_context_chars": countRuntimeContextChars(bundle.RuntimeContext),
-		"history_chars":         countHistoryChars(bundle.History),
-		"request_bytes":         len(reqBytes),
-		"request_sha256":        blobSHA256(reqBytes),
-		"request_path":          requestPath,
+		"provider":                l.provider,
+		"model":                   l.model,
+		"endpoint":                endpoint,
+		"api_kind":                string(openAIAPIChatCompletions),
+		"message_count":           len(bundle.History),
+		"tool_count":              len(toolSpecs),
+		"tools":                   summarizeTools(toolSpecs),
+		"user_preview":            clipText(lastUserMessage(bundle.History), 240),
+		"instruction_chars":       len([]rune(buildChatSystemPrompt(bundle))),
+		"policy_chars":            len([]rune(bundle.Policy)),
+		"policy_appendix_chars":   len([]rune(bundle.PolicyAppendix)),
+		"history_reasoning_chars": countHistoryReasoningChars(bundle.History),
+		"task_chars":              len([]rune(bundle.Task)),
+		"runtime_context_chars":   countRuntimeContextChars(bundle.RuntimeContext),
+		"history_chars":           countHistoryChars(bundle.History),
+		"request_bytes":           len(reqBytes),
+		"request_sha256":          blobSHA256(reqBytes),
+		"request_path":            requestPath,
 	})
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBytes))
@@ -1145,21 +1159,23 @@ func (l *LLMClient) chatAnthropic(ctx context.Context, bundle *PromptBundle, too
 	if err == nil {
 		requestPath := llmDebugWriter.WriteBlob(span, "request.json", reqBytes)
 		l.debugLog(span, "llm.request", map[string]interface{}{
-			"provider":              l.provider,
-			"model":                 l.model,
-			"endpoint":              config.Cfg.LLMAPIEndpoint,
-			"message_count":         len(bundle.History),
-			"tool_count":            len(toolSpecs),
-			"tools":                 summarizeTools(toolSpecs),
-			"user_preview":          clipText(lastUserMessage(bundle.History), 240),
-			"instruction_chars":     len([]rune(systemPrompt)),
-			"policy_chars":          len([]rune(bundle.Policy)),
-			"task_chars":            len([]rune(bundle.Task)),
-			"runtime_context_chars": countRuntimeContextChars(bundle.RuntimeContext),
-			"history_chars":         countHistoryChars(bundle.History),
-			"request_bytes":         len(reqBytes),
-			"request_sha256":        blobSHA256(reqBytes),
-			"request_path":          requestPath,
+			"provider":                l.provider,
+			"model":                   l.model,
+			"endpoint":                config.Cfg.LLMAPIEndpoint,
+			"message_count":           len(bundle.History),
+			"tool_count":              len(toolSpecs),
+			"tools":                   summarizeTools(toolSpecs),
+			"user_preview":            clipText(lastUserMessage(bundle.History), 240),
+			"instruction_chars":       len([]rune(systemPrompt)),
+			"policy_chars":            len([]rune(bundle.Policy)),
+			"policy_appendix_chars":   len([]rune(bundle.PolicyAppendix)),
+			"history_reasoning_chars": countHistoryReasoningChars(bundle.History),
+			"task_chars":              len([]rune(bundle.Task)),
+			"runtime_context_chars":   countRuntimeContextChars(bundle.RuntimeContext),
+			"history_chars":           countHistoryChars(bundle.History),
+			"request_bytes":           len(reqBytes),
+			"request_sha256":          blobSHA256(reqBytes),
+			"request_path":            requestPath,
 		})
 	} else {
 		l.debugLog(span, "llm.debug_serialize_error", map[string]interface{}{"error": err.Error()})

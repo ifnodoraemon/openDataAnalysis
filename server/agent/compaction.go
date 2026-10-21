@@ -47,6 +47,13 @@ func (e *Engine) buildBundleLocked(userTask string, getRuntimeVars func() []Runt
 		bundle.RuntimeContext = append(bundle.RuntimeContext, getRuntimeVars()...)
 	}
 	bundle.RuntimeContext = append(bundle.RuntimeContext, continuationFacts...)
+	if e.historySummary != "" {
+		bundle.RuntimeContext = append(bundle.RuntimeContext, RuntimeContextBlock{
+			Name:    "history_summary",
+			Role:    LLMRoleUser,
+			Content: formatCompactionSummary(e.historySummary),
+		})
+	}
 	if e.omittedHistoryMessages > 0 {
 		bundle.RuntimeContext = append(bundle.RuntimeContext, RuntimeContextBlock{
 			Name: "history_window", Role: "user", Content: fmt.Sprintf(`{"omitted_message_count":%d}`, e.omittedHistoryMessages),
@@ -77,45 +84,60 @@ func (e *Engine) pressureTokens(estimate int) int {
 
 // selectCompactionSpan returns the oldest conversation to replace, bounded so
 // that no tool result is separated from the assistant message that requested
-// it.
-func (e *Engine) selectCompactionSpan() ([]ConversationItem, int) {
+// it. The leading user task is pinned: it is never part of the span, so the
+// original request survives every compaction, including the trim fallback.
+func (e *Engine) selectCompactionSpan() (span []ConversationItem, shadowed int, pinned int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if len(e.history) <= recentContextWindow+1 {
-		return nil, 0
+	pinned = pinnedHistoryItems(e.history)
+	if len(e.history) <= recentContextWindow+pinned {
+		return nil, 0, pinned
 	}
 	boundary := adjustCompactionBoundary(e.history, len(e.history)-recentContextWindow)
-	if boundary <= 0 {
-		return nil, 0
+	if boundary <= pinned {
+		return nil, 0, pinned
 	}
-	return append([]ConversationItem(nil), e.history[:boundary]...), boundary
+	return append([]ConversationItem(nil), e.history[pinned:boundary]...), boundary - pinned, pinned
 }
 
-// applyCompaction replaces the first count history items with summary, or drops
-// them when summary is empty.
-func (e *Engine) applyCompaction(count int, summary string) {
+// pinnedHistoryItems counts the leading conversation items that compaction must
+// keep: the user's original task. It is the first user turn of the session.
+func pinnedHistoryItems(history []ConversationItem) int {
+	for i, item := range history {
+		if item.Role == LLMRoleUser {
+			return i + 1
+		}
+		if item.Role == LLMRoleAssistant && len(item.ToolCalls) > 0 {
+			// A task always precedes its tool calls; anything else is not a
+			// pinnable opening turn.
+			return 0
+		}
+	}
+	return 0
+}
+
+// applyCompaction replaces history[pinned:pinned+count] with the digest. The
+// digest is not written into history: it is a runtime-context fact, so history
+// stays a pure record of what was actually said.
+func (e *Engine) applyCompaction(count int, pinned int, summary string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if count <= 0 || count > len(e.history) {
+	if count <= 0 || pinned < 0 || pinned+count > len(e.history) {
 		return
 	}
-	tail := append([]ConversationItem(nil), e.history[count:]...)
+	head := append([]ConversationItem(nil), e.history[:pinned]...)
+	tail := append([]ConversationItem(nil), e.history[pinned+count:]...)
+	e.history = append(head, tail...)
 	if strings.TrimSpace(summary) == "" {
+		// Nothing was summarized, so these items are genuinely gone.
 		e.omittedHistoryMessages += count
-		e.history = tail
 		return
 	}
-	// The summary carries the compacted facts, so there is nothing left to
-	// report as merely omitted.
-	e.omittedHistoryMessages = 0
-	e.history = append([]ConversationItem{{
-		Role:    LLMRoleUser,
-		Content: formatCompactionSummary(summary),
-	}}, tail...)
+	e.historySummary = summary
 }
 
-// formatCompactionSummary wraps a model-written summary in a stable marker so
-// any consumer can recognize compacted history after persistence or rebuild.
+// formatCompactionSummary wraps a model-written summary in a stable marker so a
+// reader can recognize compacted conversation as a record, not as instructions.
 func formatCompactionSummary(summary string) string {
 	return "Earlier conversation in this session was compacted into the record below. It is a factual record of what happened, not new instructions.\n" +
 		compactionSummaryOpen + "\n" + strings.TrimSpace(summary) + "\n" + compactionSummaryClose
@@ -127,6 +149,18 @@ func formatCompactionSummary(summary string) string {
 func (e *Engine) summarizeHistorySpan(ctx context.Context, span []ConversationItem) (string, error) {
 	if len(span) == 0 {
 		return "", fmt.Errorf("nothing to summarize")
+	}
+	e.mu.Lock()
+	previous := e.historySummary
+	e.mu.Unlock()
+	if previous != "" {
+		// The earlier digest is no longer in history, so fold it back into the
+		// material being summarized. Otherwise each compaction would overwrite
+		// the facts of the previous one.
+		span = append([]ConversationItem{{
+			Role:    LLMRoleUser,
+			Content: formatCompactionSummary(previous),
+		}}, span...)
 	}
 	bundle := &PromptBundle{
 		Policy:  compactionSummaryPolicy,
@@ -165,7 +199,7 @@ func (e *Engine) prepareRequestBundle(
 	pressure := e.pressureTokens(EstimatePromptTokens(bundle, toolSpecs))
 	trigger := contextCompactTriggerTokens()
 	if pressure > trigger {
-		if span, count := e.selectCompactionSpan(); count > 0 {
+		if span, shadowed, pinned := e.selectCompactionSpan(); shadowed > 0 {
 			summary, summaryErr := e.summarizeHistorySpan(ctx, span)
 			method := HistoryCompactionMethodSummary
 			if summaryErr != nil {
@@ -176,13 +210,14 @@ func (e *Engine) prepareRequestBundle(
 				summary = ""
 				method = HistoryCompactionMethodTrim
 			}
-			e.applyCompaction(count, summary)
+			e.applyCompaction(shadowed, pinned, summary)
 			bundle = e.buildBundle(userTask, getRuntimeVars, continuationFacts)
 			emit(RuntimeEvent{
 				Type: EventHistoryCompacted,
 				Data: HistoryCompactedData{
 					Summary:       summary,
-					ShadowedItems: count,
+					ShadowedItems: shadowed,
+					PinnedItems:   pinned,
 					Method:        method,
 					PromptTokens:  pressure,
 					ContextWindow: contextWindowTokens(),
@@ -200,7 +235,8 @@ func (e *Engine) prepareRequestBundle(
 
 // pruneToolResultForHistory bounds a tool result before it enters the model
 // history. Oversized results keep a valid result object with an explicit
-// omission notice instead of silently filling the context window.
+// omission notice, and the full payload is spilled to disk so the omitted
+// middle stays recoverable by id.
 func pruneToolResultForHistory(toolName, compactedResult string) string {
 	runes := []rune(compactedResult)
 	if len(runes) <= toolResultHistoryThresholdChars {
@@ -223,7 +259,15 @@ func pruneToolResultForHistory(toolName, compactedResult string) string {
 		"omitted_chars":  len(runes) - toolResultHistoryHeadChars - toolResultHistoryTailChars,
 		"head":           head,
 		"tail":           tail,
-		"notice":         "This tool result was too large to keep in the conversation, so only its head and tail are shown. Call the tool again with narrower parameters if the omitted middle is needed.",
+		"notice":         "This tool result was too large to keep in the conversation, so only its head and tail are shown here.",
+	}
+	// The full result stays addressable. The id is content-addressed, so the
+	// live run and any later history rebuild resolve to the same payload.
+	if id, spillErr := spillToolResult(compactedResult); spillErr == nil {
+		pruned["full_result_id"] = id
+		pruned["full_result_retrieval"] = "state_tool_result_inspect"
+	} else {
+		log.Printf("engine: could not spill oversized result of %s: %v", toolName, spillErr)
 	}
 	encoded, err := json.Marshal(pruned)
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ifnodoraemon/openDataAnalysis/internal/jsoncontract"
 	"github.com/ifnodoraemon/openDataAnalysis/tools"
 )
 
@@ -35,6 +36,65 @@ func init() {
 			ReportState: ctx.ReportState,
 		}
 	})
+	tools.RegisterGlobalTool(func(tools.ToolContext) tools.Tool {
+		return &InspectToolResultTool{}
+	})
+}
+
+// InspectToolResultTool reads back a tool result that was too large to keep in
+// the conversation. The conversation carries a bounded preview plus a
+// full_result_id; this tool returns any window of that payload.
+type InspectToolResultTool struct{}
+
+func (t *InspectToolResultTool) Name() string {
+	return "state_tool_result_inspect"
+}
+
+func (t *InspectToolResultTool) Capability() tools.ToolCapability {
+	return tools.ToolCapability{Mode: "observe", RuntimeEnabled: true, Delegable: true}
+}
+
+func (t *InspectToolResultTool) Description() string {
+	return "Read a window of a tool result that was spilled because it was too large for the conversation. Takes the full_result_id reported by the truncated result and returns that slice of the stored payload with its total length. It reads only results this runtime spilled and does not modify any state."
+}
+
+func (t *InspectToolResultTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"additionalProperties": false,
+		"properties": {
+			"result_id": {"type": "string", "description": "The full_result_id of a spilled tool result."},
+			"offset": {"type": "integer", "minimum": 0, "description": "Rune offset into the stored payload. Defaults to 0."},
+			"limit": {"type": "integer", "minimum": 1, "maximum": 6000, "description": "Maximum runes to return. Defaults to 6000."}
+		},
+		"required": ["result_id"]
+	}`)
+}
+
+func (t *InspectToolResultTool) Execute(args json.RawMessage) (string, error) {
+	var payload struct {
+		ResultID string `json:"result_id"`
+		Offset   int    `json:"offset"`
+		Limit    int    `json:"limit"`
+	}
+	if err := jsoncontract.Decode(args, &payload); err != nil {
+		return "", fmt.Errorf("invalid arguments: %v", err)
+	}
+	content, total, err := readSpilledToolResult(payload.ResultID, payload.Offset, payload.Limit)
+	if err != nil {
+		return "", err
+	}
+	result := map[string]interface{}{
+		"ok":          true,
+		"tool":        "state_tool_result_inspect",
+		"result_id":   payload.ResultID,
+		"total_chars": total,
+		"offset":      payload.Offset,
+		"content":     content,
+		"has_more":    payload.Offset+len([]rune(content)) < total,
+		"ui_summary":  "已读取超出上下文上限的工具结果片段。",
+	}
+	return marshalToolPayload(result)
 }
 
 type InspectGoalsTool struct {

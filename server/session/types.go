@@ -427,6 +427,27 @@ func (s *Session) ReturnRunToWaiting(runID string) bool {
 	return true
 }
 
+// RestoreWaitingRun rebuilds the in-memory waiting mark for a run that was
+// waiting when this process last stopped.
+//
+// The waiting state normally lives only in memory, so a session rehydrated from
+// persistence does not know which run asked the question. The persisted run
+// status is the authority in that case: adopting it lets the user's answer
+// resume the run instead of being rejected as "not waiting".
+func (s *Session) RestoreWaitingRun(runID string) bool {
+	if runID == "" || runID != strings.TrimSpace(runID) {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ActiveRun != nil {
+		return false
+	}
+	s.ActiveRun = &RunState{RunID: runID, Status: "waiting_user_input", StartedAt: time.Now()}
+	s.LastSeenAt = time.Now()
+	return true
+}
+
 func (s *Session) CancelRun(runID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -739,7 +760,7 @@ func (s *Session) RuntimeVars() []agent.RuntimeContextBlock {
 			content += fmt.Sprintf("TargetChartID: %s\n", s.EditState.TargetChartID)
 		}
 		if s.EditState.SelectionText != "" {
-			content += fmt.Sprintf("SelectionText: %s\n", s.EditState.SelectionText)
+			content += fmt.Sprintf("SelectionText: %s\n", clipSelectionText(s.EditState.SelectionText))
 			if s.EditState.SelectionRangeSet && s.EditState.SelectionEnd > s.EditState.SelectionStart {
 				content += fmt.Sprintf("SelectionRange: %d-%d\n", s.EditState.SelectionStart, s.EditState.SelectionEnd)
 			}
@@ -755,4 +776,20 @@ func (s *Session) RuntimeVars() []agent.RuntimeContextBlock {
 	}
 
 	return vars
+}
+
+// maxSelectionTextRunes bounds the selected text carried as a runtime fact.
+// A selection can be an entire report section, and it is re-sent on every
+// request of the run, so an unbounded copy would dominate the prompt.
+const maxSelectionTextRunes = 4000
+
+// clipSelectionText bounds selected text and reports that it was cut, so the
+// model knows it is looking at an excerpt rather than the whole selection.
+func clipSelectionText(text string) string {
+	runes := []rune(text)
+	if len(runes) <= maxSelectionTextRunes {
+		return text
+	}
+	return string(runes[:maxSelectionTextRunes]) +
+		fmt.Sprintf("…(truncated, %d chars total)", len(runes))
 }

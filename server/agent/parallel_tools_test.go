@@ -112,7 +112,7 @@ func TestPlanToolCallsMarksSafeCallsAndPreservesOrder(t *testing.T) {
 		{ID: "c3", Type: LLMToolTypeFunction, Function: LLMFunctionCall{Name: "safe_tool", Arguments: `{"id":"3"}`}},
 	}
 
-	plan, err := engine.planToolCalls(calls)
+	plan, err := engine.planToolCalls(context.Background(), calls)
 	if err != nil {
 		t.Fatalf("planToolCalls: %v", err)
 	}

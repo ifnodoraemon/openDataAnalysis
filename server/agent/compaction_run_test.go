@@ -60,24 +60,33 @@ func TestRunCompactsAndSummarizesBeforeRequest(t *testing.T) {
 	if compacted.Method != HistoryCompactionMethodSummary {
 		t.Fatalf("expected a summary checkpoint, got method %q", compacted.Method)
 	}
-	if compacted.ShadowedItems != 8 {
-		t.Fatalf("expected 8 shadowed items, got %d", compacted.ShadowedItems)
+	if compacted.ShadowedItems != 7 {
+		t.Fatalf("expected 7 shadowed items (the opening task is pinned), got %d", compacted.ShadowedItems)
+	}
+	if compacted.PinnedItems != 1 {
+		t.Fatalf("expected the opening task to be recorded as pinned, got %d", compacted.PinnedItems)
 	}
 	if compacted.ContextWindow != 8000 {
 		t.Fatalf("expected the checkpoint to record the window, got %d", compacted.ContextWindow)
 	}
 
 	history := engine.History()
-	// summary + the recent window, then the user task and the final answer that
-	// the run appends after the request.
-	if len(history) != 15 {
-		t.Fatalf("expected summary plus the recent window plus this turn, got %d items", len(history))
+	// The pinned task, the recent window, then the user task and the final
+	// answer that the run appends around the request.
+	if want := 20 - compacted.ShadowedItems + 2; len(history) != want {
+		t.Fatalf("expected %d items, got %d", want, len(history))
 	}
-	if !strings.Contains(history[0].Content, "<compacted-summary>") {
-		t.Fatalf("expected the summary item first, got %q", history[0].Content)
+	if history[0].Content != strings.Repeat("a", 2000) {
+		t.Fatalf("expected the pinned opening task first, got %q", history[0].Content)
 	}
-	if !strings.Contains(history[0].Content, "销售额口径") {
-		t.Fatalf("expected the model-written summary to be kept, got %q", history[0].Content)
+	// The digest is a runtime fact, not a conversation turn.
+	for _, item := range history {
+		if strings.Contains(item.Content, "<compacted-summary>") {
+			t.Fatalf("the digest must not be replayed as a history item")
+		}
+	}
+	if engine.historySummary != "用户先确认了数据源，随后反复检查销售额口径。" {
+		t.Fatalf("expected the model-written summary beside history, got %q", engine.historySummary)
 	}
 	if engine.omittedHistoryMessages != 0 {
 		t.Fatalf("a summary replaces the omitted count, got %d", engine.omittedHistoryMessages)
@@ -122,20 +131,23 @@ func TestRunFallsBackToTrimWhenSummarizationFails(t *testing.T) {
 	if compacted.Method != HistoryCompactionMethodTrim {
 		t.Fatalf("expected a trim checkpoint after summarization failure, got %q", compacted.Method)
 	}
-	if compacted.ShadowedItems != 8 {
-		t.Fatalf("expected 8 shadowed items, got %d", compacted.ShadowedItems)
+	if compacted.ShadowedItems != 7 {
+		t.Fatalf("expected 7 shadowed items (the opening task is pinned), got %d", compacted.ShadowedItems)
 	}
 
 	history := engine.History()
-	// The recent window survives, plus the user task and final answer appended
-	// after the request.
-	if len(history) != 14 {
-		t.Fatalf("expected the recent window to survive, got %d items", len(history))
+	// The pinned task and the recent window survive, plus the user task and the
+	// final answer appended around the request.
+	if want := 20 - compacted.ShadowedItems + 2; len(history) != want {
+		t.Fatalf("expected %d items, got %d", want, len(history))
+	}
+	if history[0].Content != strings.Repeat("a", 2000) {
+		t.Fatalf("expected the pinned opening task to survive a trim, got %q", history[0].Content)
 	}
 	if strings.Contains(history[0].Content, "<compacted-summary>") {
 		t.Fatalf("no summary may be inserted when summarization failed")
 	}
-	if engine.omittedHistoryMessages != 8 {
+	if engine.omittedHistoryMessages != 7 {
 		t.Fatalf("the dropped items must be reported as omitted, got %d", engine.omittedHistoryMessages)
 	}
 	if got := len(snapshot()); got != 2 {

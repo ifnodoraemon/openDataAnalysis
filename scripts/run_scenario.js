@@ -439,6 +439,37 @@ function evaluateScenario(scenario, events, summary) {
     );
   }
 
+  // A run that asked a question and then continued proves the resume path
+  // works. Without this check a scenario silently accepts "asked and stopped".
+  if (acceptance.resume_required === true) {
+    const askedIndex = events.findIndex(
+      (event) => event.type === "user_request_input",
+    );
+    const completedIndex = events.findIndex(
+      (event) => event.type === "run_completed",
+    );
+    addCheck(
+      "resume_required",
+      askedIndex >= 0 && completedIndex > askedIndex,
+      `asked_at=${askedIndex} completed_at=${completedIndex}`,
+    );
+  }
+  // The lenient form: the run may finish without asking, but if it did ask and
+  // an answer was supplied, it must continue to completion.
+  if (acceptance.resume_if_asked === true) {
+    const askedIndex = events.findIndex(
+      (event) => event.type === "user_request_input",
+    );
+    const completedIndex = events.findIndex(
+      (event) => event.type === "run_completed",
+    );
+    addCheck(
+      "resume_if_asked",
+      askedIndex < 0 || completedIndex > askedIndex,
+      `asked_at=${askedIndex} completed_at=${completedIndex}`,
+    );
+  }
+
   for (const toolName of acceptance.required_tool_calls || []) {
     addCheck(
       `required_tool_call:${toolName}`,
@@ -532,6 +563,12 @@ async function main() {
 
   const events = [];
   let runId = "";
+  // Answers for user_request_input questions, in order. A scenario without
+  // answers still stops at the question, which is the historical behaviour.
+  const answers = [...(scenario.data.answers || [])];
+  const answeredQuestions = [];
+  let answerTask = Promise.resolve();
+  let answerFailure = null;
   let doneResolve;
   let doneReject;
   const done = new Promise((resolve, reject) => {
@@ -574,6 +611,38 @@ async function main() {
     if (event.type === "run_started" && event.data?.runId) {
       runId = event.data.runId;
     }
+    if (event.type === "user_request_input" && answers.length > 0) {
+      // Answer the pending question and keep streaming. Without this the
+      // resume path is never exercised: a scenario would stop at the question
+      // and the run would look terminal.
+      const response = answers.shift();
+      const targetRunId = event.data?.runId || runId;
+      answeredQuestions.push({
+        question: event.data?.question || "",
+        response,
+      });
+      const answerURL = `${apiOrigin}/api/runs/${encodeURIComponent(targetRunId)}/input`;
+      answerTask = answerTask.then(() =>
+        httpJson(answerURL, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ response }),
+        }).catch((error) => {
+          answerFailure = new Error(`回答待确认问题失败：${error.message}`);
+          appendTimelineNote(
+            outDir,
+            startedAt,
+            "answer_failed",
+            answerFailure.message,
+          );
+          doneReject(answerFailure);
+        }),
+      );
+      return;
+    }
     if (
       [
         "run_completed",
@@ -615,8 +684,11 @@ async function main() {
     clearTimeout(timer);
     streamController.abort();
     await streamTask;
+    // An answer POST can still be in flight when the stream closes.
+    await answerTask;
   }
   if (streamFailure) throw streamFailure;
+  if (answerFailure) throw answerFailure;
 
   let runData = null;
   let reportHtml = "";
@@ -660,6 +732,7 @@ async function main() {
     session_id: sessionId,
     run_id: runId,
     uploads,
+    answered_questions: answeredQuestions,
     report_fetch: reportFetch,
     summary,
     evaluation,

@@ -61,6 +61,14 @@ func (r *MessageRepository) ListByRun(ctx context.Context, runID string) ([]doma
 	return messages, nil
 }
 
+func (r *MessageRepository) CountByRun(ctx context.Context, runID string) (int, error) {
+	var count int
+	if err := r.db.QueryRow(ctx, `SELECT COUNT(*) FROM run_messages WHERE run_id = $1`, runID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("failed to count run messages: %w", err)
+	}
+	return count, nil
+}
+
 func (r *MessageRepository) ListByRunPath(ctx context.Context, runID string) ([]domain.RunMessage, error) {
 	rows, err := r.db.Query(ctx, `
 		WITH RECURSIVE run_path AS (

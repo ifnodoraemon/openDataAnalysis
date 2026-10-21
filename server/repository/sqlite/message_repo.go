@@ -64,6 +64,14 @@ func (r *MessageRepository) ListByRun(ctx context.Context, runID string) ([]doma
 	return messages, rows.Err()
 }
 
+func (r *MessageRepository) CountByRun(ctx context.Context, runID string) (int, error) {
+	var count int
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM run_messages WHERE run_id = ?`, runID).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func (r *MessageRepository) ListByRunPath(ctx context.Context, runID string) ([]domain.RunMessage, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		WITH RECURSIVE run_path AS (

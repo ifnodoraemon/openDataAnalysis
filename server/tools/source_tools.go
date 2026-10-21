@@ -59,7 +59,7 @@ func (t *InspectSessionSourcesTool) Capability() ToolCapability {
 	return ToolCapability{Mode: "observe", RuntimeEnabled: true, Delegable: true}
 }
 func (t *InspectSessionSourcesTool) Description() string {
-	return "Read current session data-source and snapshot facts, including source type, analysis table, observed size, import mode, profile status, and user patch count. Also lists pending_file_uploads: uploaded workspace files not yet imported into this session (multi-sheet workbooks awaiting selection, or files whose structure the strict importer rejected). To use a pending file, read its original bytes with code_run_python (source_file input) and import cleaned data via data_import_artifact. It does not modify state."
+	return "Read current session data-source and snapshot facts, including source type, analysis table, observed size, import mode, profile status, and user patch count. Also lists pending_file_uploads: uploaded workspace files not yet imported into this session (multi-sheet workbooks awaiting selection, or files whose structure the strict importer rejected). A pending file's original bytes are addressable as a code_run_python source_file input, and a CSV file id is importable by data_import_artifact. It does not modify state."
 }
 func (t *InspectSessionSourcesTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{}}`)

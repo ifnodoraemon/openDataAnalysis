@@ -4,9 +4,13 @@ task_length: medium
 prompt: 请分析各渠道收入和 ROI 趋势，并解释差异。
 files:
   - revenue_ambiguous_metrics.csv
+answers:
+  - 采用含税总收入口径，按自然月汇总。
 acceptance:
-  terminal_types: [user_request_input]
+  terminal_types: [run_completed, user_request_input]
   no_error: true
+  resume_if_asked: true
 manual_review:
   - 提问准确呈现了会实质改变结果的多个收入口径。
   - 未经用户确认不选择其中一个口径。
+  - 确认口径后继续完成分析，而不是停在提问处。

@@ -54,7 +54,11 @@ type plannedToolCall struct {
 
 // planToolCalls resolves admission and concurrency for a whole batch in the
 // model's order, so the execution loop only consumes decisions.
-func (e *Engine) planToolCalls(calls []LLMToolCall) ([]plannedToolCall, error) {
+//
+// Availability is decided here, at the point of dispatch, with the same check
+// that decides whether the tool is advertised. A tool that went down between
+// the request and the call fails with a structured result instead of running.
+func (e *Engine) planToolCalls(ctx context.Context, calls []LLMToolCall) ([]plannedToolCall, error) {
 	plan := make([]plannedToolCall, 0, len(calls))
 	for _, call := range calls {
 		tool, err := e.registry.Get(call.Function.Name)
@@ -64,6 +68,17 @@ func (e *Engine) planToolCalls(calls []LLMToolCall) ([]plannedToolCall, error) {
 		args := json.RawMessage(call.Function.Arguments)
 		capability := toolCapability(tool)
 		admission := tools.DecideToolCall(tool, args, e)
+		if admission.Kind == tools.AdmissionAllow {
+			if checker, ok := tool.(tools.AvailabilityTool); ok {
+				if checkErr := probeToolAvailability(ctx, checker); checkErr != nil {
+					admission = tools.Admission{
+						Kind:   tools.AdmissionDeny,
+						Code:   "tool_unavailable",
+						Reason: "tool " + call.Function.Name + " is currently unavailable: " + checkErr.Error(),
+					}
+				}
+			}
+		}
 		plan = append(plan, plannedToolCall{
 			call:       call,
 			tool:       tool,

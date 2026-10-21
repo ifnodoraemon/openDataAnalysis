@@ -60,7 +60,7 @@ func (t *RunPythonTool) Capability() ToolCapability {
 	return ToolCapability{Mode: "action", RuntimeEnabled: true, Delegable: true}
 }
 func (t *RunPythonTool) Description() string {
-	return "Execute Python code in an isolated sandbox. Optional inputs mount exact payloads as named files: analysis_result or artifact payloads, or the original file bytes of an uploaded file-upload source (kind source_file). Use source_file to read raw uploads whose structure the deterministic importer rejects (title rows above headers, side-by-side tables, multi-row headers, stacked tables) — parse them in code, write cleaned CSV outputs, and import those via data_import_artifact. Generated files are copied into durable object storage and returned as artifact IDs and authenticated API URLs. Returns stdout, stderr, artifacts, duration, and truncation facts."
+	return "Execute Python code in an isolated sandbox. Optional inputs mount exact payloads as named files: analysis_result or artifact payloads, or the original file bytes of an uploaded file-upload source (kind source_file). A source_file input carries the raw upload, including uploads whose structure the deterministic importer rejects (title rows above headers, side-by-side tables, multi-row headers, stacked tables). Generated files are copied into durable object storage and returned as artifact IDs and authenticated API URLs; a generated CSV is importable by data_import_artifact. Returns stdout, stderr, artifacts, duration, and truncation facts."
 }
 
 func (t *RunPythonTool) Parameters() json.RawMessage {

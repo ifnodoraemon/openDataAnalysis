@@ -42,6 +42,10 @@ func (r *captureMessageRepo) ListByRun(context.Context, string) ([]domain.RunMes
 	return nil, nil
 }
 
+func (r *captureMessageRepo) CountByRun(context.Context, string) (int, error) {
+	return 0, nil
+}
+
 func (r *captureMessageRepo) ListByRunPath(context.Context, string) ([]domain.RunMessage, error) {
 	return nil, nil
 }

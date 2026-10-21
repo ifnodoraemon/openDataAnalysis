@@ -2,7 +2,6 @@ package agent
 
 import (
 	"encoding/json"
-	"fmt"
 )
 
 // repeatNoticeThresholds are the identical-call counts that earn the model an
@@ -24,12 +23,13 @@ func canonicalToolArguments(raw string) string {
 	return string(encoded)
 }
 
-// recordRepeatCall counts one executed call and queues an advisory notice when
+// recordRepeatCall counts one executed call and queues a factual notice when
 // the same call has now been made an escalating number of times.
 //
-// The notice is advisory: it never blocks or delays a legitimate repeated call.
-// It is delivered as a runtime fact on the next request rather than as a
-// replacement for the tool result, so the model still sees what the tool said.
+// The notice is a fact about this conversation, not advice: it reports the
+// repetition and leaves the decision to the model. It is delivered on the next
+// request rather than replacing the tool result, so the model still sees what
+// the tool said.
 func (e *Engine) recordRepeatCall(call LLMToolCall) {
 	key := call.Function.Name + "\x00" + canonicalToolArguments(call.Function.Arguments)
 
@@ -47,7 +47,6 @@ func (e *Engine) recordRepeatCall(call LLMToolCall) {
 		content, err := json.Marshal(map[string]interface{}{
 			"tool":            call.Function.Name,
 			"identical_calls": count,
-			"notice":          fmt.Sprintf("This tool has now been called %d times with identical arguments. Inspect the previous result and change approach or finish, instead of repeating the same call.", count),
 		})
 		if err != nil {
 			continue

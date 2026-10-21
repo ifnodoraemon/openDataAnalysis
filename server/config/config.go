@@ -32,8 +32,13 @@ type Config struct {
 	// MaxParallelToolCalls bounds how many parallel-safe tool calls may overlap
 	// within one model turn. Exclusive calls always run alone.
 	MaxParallelToolCalls int
-	LLMDebug             bool
-	LLMDebugDir          string
+	// ToolCallTimeoutSeconds bounds one observation tool call. A call that
+	// exceeds it fails with a structured timeout instead of blocking the run;
+	// action tools are exempt because abandoning a commit mid-flight would make
+	// its outcome unknown.
+	ToolCallTimeoutSeconds int
+	LLMDebug               bool
+	LLMDebugDir            string
 
 	// 服务配置
 	ServerPort                 string
@@ -120,6 +125,7 @@ func Load() {
 		LLMHTTPTimeoutSec:          getEnvInt("LLM_HTTP_TIMEOUT_SECONDS", 240),
 		LLMRetryBudgetSec:          getEnvInt("LLM_RETRY_BUDGET_SECONDS", 360),
 		LLMContextWindowTokens:     getEnvInt("LLM_CONTEXT_WINDOW_TOKENS", 128000),
+		ToolCallTimeoutSeconds:     getEnvInt("TOOL_CALL_TIMEOUT_SECONDS", 300),
 		LLMDebug:                   getEnvBool("LLM_DEBUG", false),
 		LLMDebugDir:                getEnv("LLM_DEBUG_DIR", "./data/llm-debug"),
 		ServerPort:                 getEnv("SERVER_PORT", "8080"),
@@ -260,6 +266,9 @@ func (c *Config) ValidateProductionReadiness() error {
 	}
 	if c.MaxParallelToolCalls < 0 {
 		return fmt.Errorf("MAX_PARALLEL_TOOL_CALLS must not be negative")
+	}
+	if c.ToolCallTimeoutSeconds < 0 {
+		return fmt.Errorf("TOOL_CALL_TIMEOUT_SECONDS must not be negative")
 	}
 	if c.LLMProvider == "anthropic" {
 		if err := validateExactConfigValue("LLM_BASE_URL", c.LLMBaseURL, true); err != nil {

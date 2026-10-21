@@ -509,6 +509,12 @@ func saveEventToDBSync(workspaceID, sessionID, runID string, ev agent.RuntimeEve
 		msg.Content = data.Content
 	case agent.AssistantStatusData:
 		msg.Content = data.Content
+	case agent.SystemFeedbackData:
+		payload, err := json.Marshal(data)
+		if err != nil {
+			return nil, fmt.Errorf("encode system feedback event: %w", err)
+		}
+		msg.Content = string(payload)
 	case agent.AskUserData:
 		argsBytes, err := json.Marshal(data)
 		if err != nil {

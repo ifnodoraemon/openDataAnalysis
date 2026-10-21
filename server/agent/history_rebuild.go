@@ -26,9 +26,11 @@ import (
 // record, which keeps the derived history protocol-valid for providers that
 // require every tool call to be answered.
 //
-// The returned omitted count is reserved for a future compaction checkpoint and
-// is currently always zero.
-func RebuildHistoryFromMessages(messages []domain.RunMessage) ([]ConversationItem, int, error) {
+// The returned omitted count is the number of conversation items that are no
+// longer in history because compaction dropped them outright. The returned
+// summary is the compacted digest, which is delivered to the model as a
+// runtime-context fact instead of a synthetic user turn.
+func RebuildHistoryFromMessages(messages []domain.RunMessage) ([]ConversationItem, int, string, error) {
 	ordered := append([]domain.RunMessage(nil), messages...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		return ordered[i].CreatedAt.Before(ordered[j].CreatedAt)
@@ -37,12 +39,15 @@ func RebuildHistoryFromMessages(messages []domain.RunMessage) ([]ConversationIte
 	folder := &historyFolder{}
 	for _, msg := range ordered {
 		if err := folder.consume(msg); err != nil {
-			return nil, 0, err
+			return nil, 0, "", err
 		}
 	}
 	folder.flush()
 
-	return repairToolPairing(folder.items), folder.omitted, nil
+	// A trailing user_request_input without an answer is the question the user
+	// is about to answer. It stays unanswered so the resumed run can supply the
+	// real result instead of a synthetic "unknown" one.
+	return repairToolPairing(folder.items, folder.openAskID), folder.omitted, folder.summary, nil
 }
 
 type historyFolder struct {
@@ -58,6 +63,7 @@ type historyFolder struct {
 	openAskID  string
 	openAskRun string
 	omitted    int
+	summary    string
 }
 
 func (f *historyFolder) consume(msg domain.RunMessage) error {
@@ -109,7 +115,18 @@ func (f *historyFolder) consume(msg domain.RunMessage) error {
 		}
 		// The suspension is the assistant's tool call; it belongs to the same
 		// assistant message as any status text emitted just before it.
-		f.pendingToolCall(callID, "user_request_input", msg.Content)
+		//
+		// The persisted payload carries the runtime-stamped tool_call_id, which
+		// is not part of the tool's argument contract. Rebuilding the call with
+		// it would make the arguments invalid for a strict decode, so it is
+		// stripped here: what the model originally sent is what the history
+		// replays.
+		ask.ToolCallID = ""
+		arguments, err := json.Marshal(ask)
+		if err != nil {
+			return fmt.Errorf("rebuild user_request_input arguments %s: %w", msg.ID, err)
+		}
+		f.pendingToolCall(callID, "user_request_input", string(arguments))
 		f.flush()
 		f.openAskID = callID
 		f.openAskRun = msg.RunID
@@ -123,6 +140,16 @@ func (f *historyFolder) consume(msg domain.RunMessage) error {
 	case EventHistoryCompacted:
 		return f.applyCompactionCheckpoint(msg)
 
+	case EventSystemFeedback:
+		var feedback SystemFeedbackData
+		if err := jsoncontract.Decode([]byte(msg.Content), &feedback); err != nil {
+			return fmt.Errorf("decode system_feedback event %s: %w", msg.ID, err)
+		}
+		f.flush()
+		if strings.TrimSpace(feedback.Content) != "" {
+			f.items = append(f.items, ConversationItem{Role: LLMRoleUser, Content: feedback.Content})
+		}
+
 	case EventError, EventRunCancelled:
 		f.flush()
 
@@ -133,8 +160,9 @@ func (f *historyFolder) consume(msg domain.RunMessage) error {
 }
 
 // applyCompactionCheckpoint rewinds the fold to the state the engine had right
-// after it compacted history: the first shadowed_items items are replaced by
-// the summary, or dropped when summarization failed.
+// after it compacted history: the shadowed items are dropped, while the leading
+// pinned items and the compacted digest are reproduced exactly as the engine
+// held them.
 func (f *historyFolder) applyCompactionCheckpoint(msg domain.RunMessage) error {
 	var data HistoryCompactedData
 	if err := jsoncontract.Decode([]byte(msg.Content), &data); err != nil {
@@ -145,25 +173,28 @@ func (f *historyFolder) applyCompactionCheckpoint(msg domain.RunMessage) error {
 	// would not match the engine's history at that moment.
 	f.flush()
 
+	pinned := data.PinnedItems
+	if pinned < 0 || pinned > len(f.items) {
+		pinned = 0
+	}
 	shadowed := data.ShadowedItems
-	if shadowed < 0 || shadowed > len(f.items) {
+	if shadowed < 0 || pinned+shadowed > len(f.items) {
 		// The log does not hold exactly the items the checkpoint shadowed.
 		// Keeping everything is the safe direction: duplicating context is
 		// recoverable, dropping live context is not.
 		shadowed = 0
 	}
 
+	kept := append([]ConversationItem(nil), f.items[:pinned]...)
+	f.items = append(kept, f.items[pinned+shadowed:]...)
+
 	if data.Method == HistoryCompactionMethodSummary && strings.TrimSpace(data.Summary) != "" {
-		tail := append([]ConversationItem(nil), f.items[shadowed:]...)
-		f.items = append([]ConversationItem{{
-			Role:    LLMRoleUser,
-			Content: formatCompactionSummary(data.Summary),
-		}}, tail...)
-		f.omitted = 0
+		// The digest is delivered as a runtime-context fact, so it is carried
+		// beside history rather than replayed into it.
+		f.summary = data.Summary
 		return nil
 	}
 
-	f.items = f.items[shadowed:]
 	f.omitted += shadowed
 	return nil
 }
@@ -212,7 +243,11 @@ func toolCallIDOr(msg domain.RunMessage, prefix string) string {
 // repairToolPairing enforces the tool-call/result protocol the providers
 // require: every assistant tool call is followed by exactly the results for
 // that call, and no result appears without an owning call.
-func repairToolPairing(items []ConversationItem) []ConversationItem {
+//
+// skipCallID names a call whose result is deliberately absent because the run
+// suspended on it. It is left unanswered; that call is the pending question the
+// user is about to answer.
+func repairToolPairing(items []ConversationItem, skipCallID string) []ConversationItem {
 	repaired := make([]ConversationItem, 0, len(items))
 	for i := 0; i < len(items); i++ {
 		item := items[i]
@@ -233,6 +268,9 @@ func repairToolPairing(items []ConversationItem) []ConversationItem {
 		}
 		for _, call := range item.ToolCalls {
 			if _, ok := answered[call.ID]; ok {
+				continue
+			}
+			if skipCallID != "" && call.ID == skipCallID {
 				continue
 			}
 			repaired = append(repaired, ConversationItem{

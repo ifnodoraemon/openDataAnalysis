@@ -337,6 +337,12 @@ func runMessageToRuntimeEvent(msg domain.RunMessage) (agent.RuntimeEvent, error)
 			return agent.RuntimeEvent{}, err
 		}
 		evt.Data = data
+	case string(agent.EventSystemFeedback):
+		var data agent.SystemFeedbackData
+		if err := json.Unmarshal([]byte(msg.Content), &data); err != nil {
+			return agent.RuntimeEvent{}, err
+		}
+		evt.Data = data
 	default:
 		evt.Data = json.RawMessage(msg.Content)
 	}

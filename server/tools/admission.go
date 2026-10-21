@@ -27,6 +27,9 @@ const (
 type Admission struct {
 	Kind   AdmissionKind
 	Reason string
+	// Code is the structured error code the model receives when the call is
+	// blocked. An empty code falls back to the kind's default.
+	Code string
 }
 
 // ApprovalRequest is the exact authorization a gated call needs.
@@ -83,7 +86,7 @@ func DecideToolCall(tool Tool, args json.RawMessage, approvals ApprovalStore) Ad
 		return Admission{
 			Kind: AdmissionAsk,
 			Reason: fmt.Sprintf(
-				"action %q on %q requires explicit user authorization. Ask the user with user_request_input and an authorization block naming exactly this action, resource_ref and payload_json, then retry this call with the returned confirmation_receipt_id.",
+				"action %q on %q requires explicit user authorization and was not executed; no authorization receipt was supplied.",
 				request.Action, request.ResourceRef),
 		}
 	}

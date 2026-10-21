@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ifnodoraemon/openDataAnalysis/config"
 	"github.com/ifnodoraemon/openDataAnalysis/internal/jsoncontract"
 	"github.com/ifnodoraemon/openDataAnalysis/metrics"
 	"github.com/ifnodoraemon/openDataAnalysis/tools"
@@ -33,6 +34,14 @@ type Engine struct {
 	// pendingNotices carries the advisories queued for the next request.
 	repeatCalls    map[string]int
 	pendingNotices []RuntimeContextBlock
+	// pendingSuspensionID is the tool call the run suspended on. Its result is
+	// deliberately absent until the user answers, so pairing repair must not
+	// synthesize an outcome for it.
+	pendingSuspensionID string
+	// historySummary carries the compacted digest of conversation that is no
+	// longer in history. It is delivered as a runtime-context fact rather than a
+	// fake user turn, so history stays a pure record of what was said.
+	historySummary string
 	// promptTokens and completionTokens accumulate provider-reported usage for
 	// this run so the caller can persist cost facts.
 	promptTokens         int
@@ -101,6 +110,76 @@ func isRetryableToolError(err error) bool {
 	return isTransientTransportError(err)
 }
 
+// toolCallTimeout is the budget for one observation call. A configured zero
+// means "use the default".
+func toolCallTimeout() time.Duration {
+	seconds := defaultToolCallTimeoutSeconds
+	if config.Cfg != nil && config.Cfg.ToolCallTimeoutSeconds > 0 {
+		seconds = config.Cfg.ToolCallTimeoutSeconds
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// defaultToolCallTimeoutSeconds bounds an observation call that does not
+// declare its own budget.
+const defaultToolCallTimeoutSeconds = 300
+
+// toolTimeoutError reports that an observation call exceeded its budget. It has
+// its own error code so the model can tell a slow backend from a bug.
+type toolTimeoutError struct {
+	Tool    string
+	Timeout time.Duration
+}
+
+func (e *toolTimeoutError) Error() string {
+	return fmt.Sprintf("tool %s exceeded its %s execution budget", e.Tool, e.Timeout)
+}
+
+// executeToolCall runs one tool call, bounding observation calls by the
+// configured budget.
+//
+// A timed-out observation call is reported as a failure and its worker is left
+// to finish on its own; observation tools are read-only, so a straggler cannot
+// change state and its result is simply discarded. Action tools are never
+// abandoned: a mutating call may already have committed, and reporting a
+// failure the runtime cannot prove would be worse than waiting. They stay
+// bounded by the run context and by their own internal timeouts.
+func executeToolCall(ctx context.Context, registry *tools.Registry, toolName string, args json.RawMessage) (string, error) {
+	tool, err := registry.Get(toolName)
+	if err != nil {
+		return registry.Execute(toolName, args)
+	}
+	capability := toolCapability(tool)
+	// Only tools that declare themselves read-only are abandoned on timeout.
+	// Everything else either mutates state (where an abandoned call may still
+	// commit) or carries its own budget, as MCP tools do.
+	if capability.Mode != "observe" {
+		return registry.Execute(toolName, args)
+	}
+
+	timeout := toolCallTimeout()
+	type outcome struct {
+		result string
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, execErr := registry.Execute(toolName, args)
+		done <- outcome{result: result, err: execErr}
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case settled := <-done:
+		return settled.result, settled.err
+	case <-timer.C:
+		return "", &toolTimeoutError{Tool: toolName, Timeout: timeout}
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
 // retryableToolExec retries transient execution failures within a bounded
 // budget.
 //
@@ -110,7 +189,7 @@ func isRetryableToolError(err error) bool {
 // replayed behind its back.
 func retryableToolExec(ctx context.Context, registry *tools.Registry, toolName string, args json.RawMessage) (string, error) {
 	if !toolIsIdempotent(registry, toolName) {
-		return registry.Execute(toolName, args)
+		return executeToolCall(ctx, registry, toolName, args)
 	}
 	delays := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 	var result string
@@ -119,7 +198,7 @@ func retryableToolExec(ctx context.Context, registry *tools.Registry, toolName s
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		result, execErr = registry.Execute(toolName, args)
+		result, execErr = executeToolCall(ctx, registry, toolName, args)
 		if execErr == nil || !isRetryableToolError(execErr) {
 			return result, execErr
 		}
@@ -251,6 +330,14 @@ func (e *Engine) History() []ConversationItem {
 	return append([]ConversationItem(nil), e.history...)
 }
 
+// SetHistorySummary restores the compacted digest that belongs beside history.
+// It is empty until a compaction has happened.
+func (e *Engine) SetHistorySummary(summary string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.historySummary = strings.TrimSpace(summary)
+}
+
 // runTokens returns the usage accumulated for this run.
 func (e *Engine) runTokens() (int, int) {
 	e.mu.Lock()
@@ -260,10 +347,24 @@ func (e *Engine) runTokens() (int, int) {
 
 // repairDanglingToolCalls pairs any assistant tool call that has no recorded
 // result. It is idempotent: a fully paired history is returned unchanged.
+//
+// A run that suspends leaves its suspending call intentionally unanswered; that
+// call is skipped here so the pending question survives until the user answers.
 func (e *Engine) repairDanglingToolCalls() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.history = repairToolPairing(e.history)
+	e.history = repairToolPairing(e.history, e.pendingSuspensionID)
+}
+
+// clearAbandonedSuspension repairs any tool call a previous run left
+// unanswered. Resuming a run answers its pending call before Run is entered, so
+// anything still unanswered here was abandoned; it gets an explicit "outcome
+// unknown" result to keep the derived history protocol-valid.
+func (e *Engine) clearAbandonedSuspension() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pendingSuspensionID = ""
+	e.history = repairToolPairing(e.history, "")
 }
 
 func adjustCompactionBoundary(history []ConversationItem, boundary int) int {
@@ -409,6 +510,14 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 		}})
 	}()
 	e.prepareRuntimeTools(ctx, emit)
+	// Usage is reported per run, so the accumulator starts clean. The Engine
+	// lives for the whole session; without this reset every later run would
+	// report the session's cumulative usage as its own.
+	e.mu.Lock()
+	e.promptTokens = 0
+	e.completionTokens = 0
+	e.mu.Unlock()
+	e.clearAbandonedSuspension()
 
 	e.mu.Lock()
 	toolSpecs := e.registry.GetToolSpecs()
@@ -458,6 +567,20 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 		// later iteration of the same run.
 		continuationFacts = nil
 
+		// The request is assembled first so the new user turn travels as the
+		// task, not twice. It enters history before the call is issued: the
+		// message is already persisted by the caller, so a failed request must
+		// not leave the live conversation missing a turn the log holds.
+		if userTask != "" {
+			e.mu.Lock()
+			e.history = append(e.history, ConversationItem{
+				Role:    LLMRoleUser,
+				Content: userTask,
+			})
+			e.mu.Unlock()
+			userTask = ""
+		}
+
 		resp, llmErr := e.llm.ChatWithTools(ctx, bundle, toolSpecs)
 		if llmErr != nil {
 			emitEngineError(emit, "llm_request_failed", "模型服务调用失败", llmErr)
@@ -465,13 +588,6 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 		}
 
 		e.mu.Lock()
-		if userTask != "" {
-			e.history = append(e.history, ConversationItem{
-				Role:    LLMRoleUser,
-				Content: userTask,
-			})
-			userTask = ""
-		}
 		if resp.Usage.PromptTokens > 0 {
 			e.lastPromptTokens = resp.Usage.PromptTokens
 		}
@@ -518,6 +634,13 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 						Content: finalMarkupCorrectionMessage,
 					})
 					e.mu.Unlock()
+					// The corrective turn is written to the log too, so a
+					// rebuilt history reproduces it instead of silently losing
+					// a turn the live engine saw.
+					emit(RuntimeEvent{
+						Type: EventSystemFeedback,
+						Data: SystemFeedbackData{Content: finalMarkupCorrectionMessage, Reason: "invalid_final_output"},
+					})
 					continue
 				}
 				e.mu.Lock()
@@ -565,7 +688,7 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 
 			// The batch is planned once so admission and concurrency are
 			// decided in the model's order; the loop below only consumes them.
-			plan, planErr := e.planToolCalls(choice.Message.ToolCalls)
+			plan, planErr := e.planToolCalls(ctx, choice.Message.ToolCalls)
 			if planErr != nil {
 				emitEngineError(emit, "tool_not_available", "请求的工具不可用", planErr)
 				return
@@ -660,6 +783,11 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 						e.mu.Unlock()
 						continue
 					}
+					// The call stays unanswered until the user replies; pairing
+					// repair must not synthesize an outcome for it.
+					e.mu.Lock()
+					e.pendingSuspensionID = toolCall.ID
+					e.mu.Unlock()
 					emit(event)
 					return
 				}
@@ -914,8 +1042,13 @@ func stripHistorySummaryFields(payload map[string]interface{}) map[string]interf
 
 func normalizeToolExecutionResult(toolName, result string, execErr error) (string, bool, error) {
 	if execErr != nil {
+		code := "execution_error"
+		var timeoutErr *toolTimeoutError
+		if errors.As(execErr, &timeoutErr) {
+			code = "tool_timeout"
+		}
 		encoded, err := json.Marshal(map[string]interface{}{
-			"ok": false, "tool": toolName, "error_code": "execution_error", "message": sanitizeToolError(execErr.Error()),
+			"ok": false, "tool": toolName, "error_code": code, "message": sanitizeToolError(execErr.Error()),
 		})
 		if err != nil {
 			return "", false, errors.Join(execErr, err)
@@ -1045,6 +1178,11 @@ func (e *Engine) ProvideAskUserResult(userResponse, actorUserID string) (Approva
 				Content:    toolResult,
 				ToolCallID: ask.ID,
 			})
+			if e.pendingSuspensionID == ask.ID {
+				// The question is answered, so pairing repair may treat this
+				// call as normal history from now on.
+				e.pendingSuspensionID = ""
+			}
 			appended++
 		}
 	}
@@ -1063,6 +1201,9 @@ func (e *Engine) blockToolCall(emit func(RuntimeEvent), toolCall LLMToolCall, ad
 	errorCode := "approval_required"
 	if admission.Kind == tools.AdmissionDeny {
 		errorCode = "approval_denied"
+	}
+	if admission.Code != "" {
+		errorCode = admission.Code
 	}
 	encoded, err := json.Marshal(map[string]interface{}{
 		"ok":         false,

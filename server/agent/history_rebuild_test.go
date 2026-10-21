@@ -50,7 +50,7 @@ func itoa(n int) string {
 
 func rebuild(t *testing.T, log *messageLog) []ConversationItem {
 	t.Helper()
-	items, _, err := RebuildHistoryFromMessages(log.messages)
+	items, _, _, err := RebuildHistoryFromMessages(log.messages)
 	if err != nil {
 		t.Fatalf("RebuildHistoryFromMessages: %v", err)
 	}
@@ -59,11 +59,11 @@ func rebuild(t *testing.T, log *messageLog) []ConversationItem {
 
 func TestRebuildHistoryEmptyLog(t *testing.T) {
 	t.Parallel()
-	items, omitted, err := RebuildHistoryFromMessages(nil)
+	items, omitted, summary, err := RebuildHistoryFromMessages(nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(items) != 0 || omitted != 0 {
+	if len(items) != 0 || omitted != 0 || summary != "" {
 		t.Fatalf("expected empty history, got %d items (omitted=%d)", len(items), omitted)
 	}
 }
@@ -220,7 +220,11 @@ func TestRebuildHistoryKeepsStatusTextWithSuspension(t *testing.T) {
 	}
 }
 
-func TestRebuildHistoryUnansweredSuspensionIsRepaired(t *testing.T) {
+// A trailing unanswered suspension is the question the user is about to
+// answer, so the rebuild leaves it open. Pairing it here would make the answer
+// look like a duplicate; the engine repairs it at run start only if the
+// question was truly abandoned.
+func TestRebuildHistoryKeepsUnansweredSuspensionOpen(t *testing.T) {
 	t.Parallel()
 
 	log := (&messageLog{}).
@@ -228,14 +232,25 @@ func TestRebuildHistoryUnansweredSuspensionIsRepaired(t *testing.T) {
 		add("r1", EventUserRequestInput, `{"question":"确认?","required":true,"selection_mode":"single","allow_custom":false,"tool_call_id":"call_ask"}`)
 
 	items := rebuild(t, log)
-	if len(items) != 3 {
-		t.Fatalf("expected user + assistant + synthesized result, got %d: %#v", len(items), items)
+	if len(items) != 2 {
+		t.Fatalf("expected user + assistant question with no synthesized result, got %d: %#v", len(items), items)
 	}
-	if items[2].Role != LLMRoleTool || items[2].ToolCallID != "call_ask" {
-		t.Fatalf("unanswered suspension must be paired: %#v", items[2])
+	if items[1].Role != LLMRoleAssistant || len(items[1].ToolCalls) != 1 {
+		t.Fatalf("expected the question to stay a pending tool call: %#v", items[1])
 	}
-	if !strings.Contains(items[2].Content, "tool_outcome_unknown") {
-		t.Fatalf("unexpected synthesized content: %q", items[2].Content)
+	if items[1].ToolCalls[0].ID != "call_ask" {
+		t.Fatalf("unexpected pending call id: %#v", items[1].ToolCalls[0])
+	}
+
+	// The engine reads this state at run start: an abandoned question is
+	// answered as unknown so the next request stays protocol-valid.
+	engine := &Engine{registry: askUserTestRegistry(), history: items}
+	engine.clearAbandonedSuspension()
+	if len(engine.history) != 3 || engine.history[2].Role != LLMRoleTool {
+		t.Fatalf("expected the abandoned question to be repaired at run start: %#v", engine.history)
+	}
+	if !strings.Contains(engine.history[2].Content, "tool_outcome_unknown") {
+		t.Fatalf("unexpected synthesized content: %q", engine.history[2].Content)
 	}
 }
 
@@ -316,32 +331,38 @@ func TestRebuildHistoryAppliesSummaryCheckpoint(t *testing.T) {
 		add("r1", EventRunCompleted, "第一轮答案").
 		add("r1", "user", "第二轮").
 		add("r1", EventRunCompleted, "第二轮答案").
-		add("r1", EventHistoryCompacted, `{"summary":"用户先问了第一轮，得到答案后追问第二轮。","shadowed_items":3,"method":"summary"}`).
+		add("r1", EventHistoryCompacted, `{"summary":"用户先问了第一轮，得到答案后追问第二轮。","shadowed_items":2,"pinned_items":1,"method":"summary"}`).
 		add("r1", "user", "第三轮").
 		add("r1", EventRunCompleted, "第三轮答案")
 
-	items, omitted, err := RebuildHistoryFromMessages(log.messages)
+	items, omitted, summary, err := RebuildHistoryFromMessages(log.messages)
 	if err != nil {
 		t.Fatalf("RebuildHistoryFromMessages: %v", err)
 	}
 	if omitted != 0 {
 		t.Fatalf("a summary carries the facts, so nothing is merely omitted, got %d", omitted)
 	}
-	// summary + the item the checkpoint did not shadow + the third turn.
+	if !strings.Contains(summary, "第一轮") {
+		t.Fatalf("expected the digest to be returned beside history, got %q", summary)
+	}
+	// The digest is not a history item: pinned task + the retained tail + the
+	// third turn.
 	if len(items) != 4 {
 		t.Fatalf("expected 4 items, got %d: %#v", len(items), items)
 	}
-	if !strings.Contains(items[0].Content, "<compacted-summary>") {
-		t.Fatalf("expected the summary item first, got %q", items[0].Content)
-	}
-	if !strings.Contains(items[0].Content, "第一轮") {
-		t.Fatalf("expected the summary text to survive, got %q", items[0].Content)
+	if items[0].Content != "第一轮" {
+		t.Fatalf("expected the pinned task to survive, got %q", items[0].Content)
 	}
 	if items[1].Content != "第二轮答案" {
-		t.Fatalf("expected the retained tail to follow the summary, got %q", items[1].Content)
+		t.Fatalf("expected the retained tail to follow the pinned task, got %q", items[1].Content)
 	}
 	if items[3].Content != "第三轮答案" {
 		t.Fatalf("expected later turns to append after the checkpoint, got %#v", items[3])
+	}
+	for _, item := range items {
+		if strings.Contains(item.Content, "<compacted-summary>") {
+			t.Fatalf("the digest must not be replayed as a conversation turn: %#v", item)
+		}
 	}
 }
 
@@ -351,11 +372,11 @@ func TestRebuildHistoryAppliesTrimCheckpoint(t *testing.T) {
 	log := (&messageLog{}).
 		add("r1", "user", "第一轮").
 		add("r1", EventRunCompleted, "第一轮答案").
-		add("r1", EventHistoryCompacted, `{"shadowed_items":2,"method":"trim"}`).
-		add("r1", "user", "第二轮").
-		add("r1", EventRunCompleted, "第二轮答案")
+		add("r1", "user", "中间追问").
+		add("r1", EventRunCompleted, "中间答案").
+		add("r1", EventHistoryCompacted, `{"shadowed_items":2,"pinned_items":1,"method":"trim"}`)
 
-	items, omitted, err := RebuildHistoryFromMessages(log.messages)
+	items, omitted, _, err := RebuildHistoryFromMessages(log.messages)
 	if err != nil {
 		t.Fatalf("RebuildHistoryFromMessages: %v", err)
 	}
@@ -365,8 +386,11 @@ func TestRebuildHistoryAppliesTrimCheckpoint(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("expected the shadowed items to be dropped, got %d: %#v", len(items), items)
 	}
-	if items[0].Content != "第二轮" {
-		t.Fatalf("unexpected first surviving item: %#v", items[0])
+	if items[0].Content != "第一轮" {
+		t.Fatalf("expected the pinned task to survive the trim, got %#v", items[0])
+	}
+	if items[1].Content != "中间答案" {
+		t.Fatalf("unexpected first surviving item: %#v", items[1])
 	}
 }
 
@@ -381,7 +405,7 @@ func TestRebuildHistoryKeepsContextWhenCheckpointCountExceedsLog(t *testing.T) {
 		add("r1", EventRunCompleted, "答案").
 		add("r1", EventHistoryCompacted, `{"shadowed_items":9,"method":"trim"}`)
 
-	items, omitted, err := RebuildHistoryFromMessages(log.messages)
+	items, omitted, _, err := RebuildHistoryFromMessages(log.messages)
 	if err != nil {
 		t.Fatalf("RebuildHistoryFromMessages: %v", err)
 	}

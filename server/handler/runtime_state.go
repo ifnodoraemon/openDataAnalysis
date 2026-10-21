@@ -101,6 +101,35 @@ func collectSessionMessages(ctx context.Context, sessionID string) ([]domain.Run
 	return messages, nil
 }
 
+// countTruncatedSessionMessages reports how many persisted events a bounded
+// read left behind. History rebuild reads a capped window per run, and dropping
+// the oldest events silently would make the rebuilt conversation look complete
+// when it is not. The count is surfaced as an omission fact instead.
+func countTruncatedSessionMessages(ctx context.Context, sessionID string, messages []domain.RunMessage) (int, error) {
+	if messageRepo == nil || runRepo == nil {
+		return 0, fmt.Errorf("runtime state repositories are not configured")
+	}
+	returned := make(map[string]int, len(messages))
+	for _, msg := range messages {
+		returned[msg.RunID]++
+	}
+	runs, err := runRepo.ListBySession(ctx, sessionID, -1)
+	if err != nil {
+		return 0, fmt.Errorf("failed to list session tasks: %w", err)
+	}
+	truncated := 0
+	for _, run := range runs {
+		total, err := messageRepo.CountByRun(ctx, run.ID)
+		if err != nil {
+			return 0, fmt.Errorf("failed to count messages for task %s: %w", run.ID, err)
+		}
+		if total > returned[run.ID] {
+			truncated += total - returned[run.ID]
+		}
+	}
+	return truncated, nil
+}
+
 func collectRunTreeMessages(ctx context.Context, runID string) ([]domain.RunMessage, error) {
 	if messageRepo == nil || runRepo == nil {
 		return nil, fmt.Errorf("runtime state repositories are not configured")

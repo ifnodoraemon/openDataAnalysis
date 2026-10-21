@@ -180,6 +180,18 @@ func TestEventCodecRoundTripsEveryEventType(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "system feedback",
+			event: agent.RuntimeEvent{Type: agent.EventSystemFeedback, Data: agent.SystemFeedbackData{
+				Content: "[system_feedback] restate cleanly", Reason: "invalid_final_output",
+			}},
+			check: func(t *testing.T, ev agent.RuntimeEvent) {
+				data := ev.Data.(agent.SystemFeedbackData)
+				if data.Content != "[system_feedback] restate cleanly" || data.Reason != "invalid_final_output" {
+					t.Fatalf("feedback lost: %#v", data)
+				}
+			},
+		},
 	}
 
 	for _, tc := range cases {

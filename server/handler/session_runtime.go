@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/ifnodoraemon/openDataAnalysis/agent"
@@ -69,12 +70,21 @@ func hydrateSessionFromPersistence(ctx context.Context, sess *session.Session) e
 	} else {
 		sess.ClearEditState()
 	}
-	history, omitted, err := agent.RebuildHistoryFromMessages(messages)
+	history, omitted, summary, err := agent.RebuildHistoryFromMessages(messages)
 	if err != nil {
 		return fmt.Errorf("failed to rebuild conversation history: %w", err)
 	}
+	truncated, truncErr := countTruncatedSessionMessages(ctx, sess.ID, messages)
+	if truncErr != nil {
+		return fmt.Errorf("failed to measure truncated session events: %w", truncErr)
+	}
+	if truncated > 0 {
+		log.Printf("hydrate: session_id=%s rebuilt history from a bounded window; %d older events are not in the model history", sess.ID, truncated)
+		omitted += truncated
+	}
 	if sess.Engine != nil {
 		sess.Engine.SetHistory(history, omitted)
+		sess.Engine.SetHistorySummary(summary)
 	}
 	return nil
 }

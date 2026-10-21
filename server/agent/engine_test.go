@@ -424,6 +424,7 @@ func TestApplyCompactionReplacesSpanWithSummary(t *testing.T) {
 	t.Parallel()
 
 	engine := &Engine{policy: "system", history: []ConversationItem{}}
+	engine.history = append(engine.history, ConversationItem{Role: LLMRoleUser, Content: "原始任务：分析销售数据"})
 	for i := 0; i < 16; i++ {
 		engine.history = append(engine.history,
 			ConversationItem{Role: LLMRoleUser, Content: strings.Repeat("a", 40000)},
@@ -432,24 +433,74 @@ func TestApplyCompactionReplacesSpanWithSummary(t *testing.T) {
 	}
 
 	before := len(engine.history)
-	span, count := engine.selectCompactionSpan()
+	span, count, pinned := engine.selectCompactionSpan()
 	if count == 0 || len(span) != count {
 		t.Fatalf("expected a non-empty compaction span, got count=%d span=%d", count, len(span))
 	}
-
-	engine.applyCompaction(count, "用户在反复追问同一件事。")
-
-	if len(engine.history) != before-count+1 {
-		t.Fatalf("expected the span to be replaced by one summary item, got %d items", len(engine.history))
+	if pinned != 1 {
+		t.Fatalf("expected the opening user task to be pinned, got %d", pinned)
 	}
-	if !strings.HasPrefix(engine.history[0].Content, "Earlier conversation in this session was compacted") {
-		t.Fatalf("expected the summary item first, got %q", engine.history[0].Content)
+
+	engine.applyCompaction(count, pinned, "用户在反复追问同一件事。")
+
+	if len(engine.history) != before-count {
+		t.Fatalf("expected the span to be dropped, got %d items", len(engine.history))
 	}
-	if !strings.Contains(engine.history[0].Content, "<compacted-summary>") {
-		t.Fatalf("expected the summary marker, got %q", engine.history[0].Content)
+	// The digest is a runtime fact, not a fake user turn: history keeps the
+	// original task as its first item.
+	if engine.history[0].Content != "原始任务：分析销售数据" {
+		t.Fatalf("expected the pinned task first, got %q", engine.history[0].Content)
+	}
+	if engine.historySummary != "用户在反复追问同一件事。" {
+		t.Fatalf("expected the digest to be carried beside history, got %q", engine.historySummary)
 	}
 	if engine.omittedHistoryMessages != 0 {
 		t.Fatalf("a summary carries the facts, so nothing should be reported as omitted, got %d", engine.omittedHistoryMessages)
+	}
+
+	bundle := engine.buildBundle("", nil, nil)
+	found := false
+	for _, block := range bundle.RuntimeContext {
+		if block.Name == "history_summary" {
+			found = true
+			if !strings.Contains(block.Content, "<compacted-summary>") {
+				t.Fatalf("expected the summary marker in the runtime block, got %q", block.Content)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a history_summary runtime block, got %#v", bundle.RuntimeContext)
+	}
+}
+
+func TestCompactionPinsOriginalTaskEvenWhenSummarizationFails(t *testing.T) {
+	t.Parallel()
+
+	engine := &Engine{policy: "system", history: []ConversationItem{
+		{Role: LLMRoleUser, Content: "原始任务"},
+	}}
+	for i := 0; i < 30; i++ {
+		engine.history = append(engine.history, ConversationItem{Role: LLMRoleUser, Content: "m"})
+	}
+
+	span, count, pinned := engine.selectCompactionSpan()
+	if len(span) == 0 || count == 0 {
+		t.Fatalf("expected a compaction span")
+	}
+	for _, item := range span {
+		if item.Content == "原始任务" {
+			t.Fatalf("the original task must never be part of the compaction span")
+		}
+	}
+
+	// Trim fallback: summarization failed, so the span is dropped outright.
+	engine.applyCompaction(count, pinned, "")
+
+	if engine.history[0].Content != "原始任务" {
+		t.Fatalf("the original task must survive a trim fallback, got %q", engine.history[0].Content)
+	}
+	if engine.omittedHistoryMessages != count {
+		t.Fatalf("expected %d dropped items to be reported, got %d", count, engine.omittedHistoryMessages)
 	}
 }
 
@@ -465,7 +516,7 @@ func TestApplyCompactionWithoutSummaryCountsOmittedItems(t *testing.T) {
 		},
 	}
 
-	engine.applyCompaction(2, "")
+	engine.applyCompaction(2, 0, "")
 
 	if len(engine.history) != 1 {
 		t.Fatalf("expected two items to be dropped, got %d", len(engine.history))
@@ -483,13 +534,13 @@ func TestSelectCompactionSpanKeepsRecentWindow(t *testing.T) {
 		engine.history = append(engine.history, ConversationItem{Role: LLMRoleUser, Content: "m"})
 	}
 
-	_, count := engine.selectCompactionSpan()
-	if count != 30-recentContextWindow {
-		t.Fatalf("expected the recent window to be retained, got boundary %d", count)
+	_, count, pinned := engine.selectCompactionSpan()
+	if count != 30-recentContextWindow-pinned {
+		t.Fatalf("expected the recent window and the pinned task to be retained, got boundary %d", count)
 	}
 
 	short := &Engine{policy: "system", history: []ConversationItem{{Role: LLMRoleUser, Content: "only"}}}
-	if _, count := short.selectCompactionSpan(); count != 0 {
+	if _, count, _ := short.selectCompactionSpan(); count != 0 {
 		t.Fatalf("expected no compaction for a short history, got %d", count)
 	}
 }
@@ -498,7 +549,7 @@ func TestApplyCompactionIgnoresOutOfRangeCount(t *testing.T) {
 	t.Parallel()
 
 	engine := &Engine{policy: "system", history: []ConversationItem{{Role: LLMRoleUser, Content: "a"}}}
-	engine.applyCompaction(5, "summary")
+	engine.applyCompaction(5, 0, "summary")
 	if len(engine.history) != 1 || engine.history[0].Content != "a" {
 		t.Fatalf("out-of-range compaction must be a no-op, got %#v", engine.history)
 	}

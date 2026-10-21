@@ -300,6 +300,24 @@ func SubmitUserInputHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// This endpoint may be the first contact after a restart. The waiting mark
+	// and the model history live in memory, so both are restored from the
+	// persisted log before the answer is applied. Stale-run recovery marks runs
+	// failed, so it is deliberately not run here: the run being answered is
+	// exactly the one it would have killed.
+	if shouldHydrate, hydrateErr := shouldHydrateSessionFromPersistence(r.Context(), identity.WorkspaceID, identity.UserID, run.SessionID); hydrateErr != nil {
+		writeHandlerError(w, http.StatusInternalServerError, "检查会话状态失败", hydrateErr)
+		return
+	} else if shouldHydrate {
+		if err := hydrateSessionFromPersistence(r.Context(), sess); err != nil {
+			writeHandlerError(w, http.StatusInternalServerError, "恢复会话状态失败", err)
+			return
+		}
+		if run.Status == domain.RunStatusWaitingUserInput {
+			sess.RestoreWaitingRun(runID)
+		}
+	}
+
 	var req userInputResponseRequest
 	if err := decodeRequestJSON(r, &req); err != nil {
 		writeHandlerError(w, http.StatusBadRequest, "请求体无效", err)
