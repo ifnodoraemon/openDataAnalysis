@@ -103,7 +103,7 @@ Working memory、goal tree、report block tree 可以提升可观察性和恢复
 3. `runtime`：当前轮客观事实，例如编辑范围或活跃目标。
 4. `history`：仍在窗口内的原始对话和工具结果。
 
-窗口裁剪只在 `runtime` 层暴露省略消息数量，运行时自己不编写语义摘要。需要压缩历史时，替换内容是由模型撰写、并作为 `history_compacted` checkpoint 写入 session 日志的摘要，因此回放和重建会复现同一份压缩后对话。摘要生成失败时，运行时退化为丢弃最旧的消息，报告省略数量，并由 checkpoint 记录这些事实是被丢弃而不是被总结。需要跨窗口保留的判断由模型显式写入工作记忆。临时事实、历史状态和用户偏好不能提升到 `system` 层。子代理额外约束使用 `policy_appendix`，不能用它倾倒背景事实。
+窗口裁剪只在 `runtime` 层暴露省略消息数量，运行时自己不编写语义摘要。需要压缩历史时，由模型撰写摘要，作为 `history_compacted` checkpoint 写入 session 日志：checkpoint 记录被遮蔽的条目数、被 pin 的条数和摘要文本，因此回放和重建会复现同一份压缩后对话。摘要本身作为 `history_summary` 这个 runtime context 块下发，而不是伪装成一条 user 历史消息——history 因此始终只是"确实说过的话"的记录。摘要生成失败时，运行时退化为丢弃最旧的消息，报告省略数量，并由 checkpoint 记录这些事实是被丢弃而不是被总结。原始用户任务在任何压缩下都被 pin，不会被丢弃。需要跨窗口保留的判断由模型显式写入工作记忆。临时事实、历史状态和用户偏好不能提升到 `system` 层。子代理额外约束使用 `policy_appendix`，不能用它倾倒背景事实。
 
 ## 当前反模式
 

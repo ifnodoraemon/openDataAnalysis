@@ -276,3 +276,42 @@ DSH 的对应做法是构建期静态、无缺口、不可运行时改动的格�
 | 根 run 无 token 记账 | `server/agent/llm.go:338-340,730-732`、`server/handler/runtime_events.go:214-222` |
 | 单进程存活判定 | `server/session/manager.go:277-282` |
 | worker 结果未剥离 ui_summary / 重复 history_window | `server/agent/worker.go:570-575`、`engine.go:128-131` |
+
+---
+
+## 9. 复核修复（2026-10-21）
+
+对第 7 节之后的状态做了一次逐条复核：上面标注"已落地"的条目大部分成立，但复核发现四处偏差与一个高危缺陷，均已修复。
+
+### 9.1 高危：`user_request_input` 挂起后无法恢复
+
+- **同进程**：`Run` 退出时 `defer e.repairDanglingToolCalls()` 会给"故意挂起"的调用补一条 `tool_outcome_unknown`，用户回答时 `ProvideAskUserResult` 判定"已有结果"而拒绝。
+- **重启后**：`SubmitUserInputHandler` 不做 hydration，waiting 状态只存在于内存；且重建出的 ask 工具调用参数携带了 runtime 注入的 `tool_call_id`，严格解码直接失败。
+- **评测盲区**：`scripts/run_scenario.js` 把 `user_request_input` 当作终态，从不回传答案，因此这条路径始终没有被跑过。
+
+修法：`repairToolPairing` 增加 `skipCallID`，引擎记录 `pendingSuspensionID` 并在 `ProvideAskUserResult` 命中时清除；重建时剥掉 runtime 字段并保留"最后一个未回答提问"的开放状态，改由 `Run` 入口的 `clearAbandonedSuspension` 兜底修复真正被放弃的提问；`SubmitUserInputHandler` 冷启动时先 hydrate 并从持久化 run 状态恢复 waiting 标记（`Session.RestoreWaitingRun`）。场景 runner 新增 `answers` 与 `resume_required` / `resume_if_asked` 断言。
+
+### 9.2 其余修复
+
+| 问题 | 修法 |
+|---|---|
+| run token 跨轮累加（Engine 是会话级） | `Run` 入口把 `promptTokens`/`completionTokens` 归零 |
+| 首轮 LLM 失败导致 live 与重建历史分叉 | 用户消息在请求发出前进入 history |
+| markup 纠错消息只进 history 不入日志 | 新增 `system_feedback` 事件，编解码双向一致并进入重建 |
+| 原始任务没有 pin，trim 回退会丢任务 | `selectCompactionSpan` 返回 `pinned`，checkpoint 记录 `pinned_items` |
+| 压缩摘要伪装成 user 历史消息 | 改为 `history_summary` runtime context 块，history 只保留真实对话 |
+| 无按工具超时 | 新增 `TOOL_CALL_TIMEOUT_SECONDS`（默认 300s）；只约束观测类工具，action 工具不中途放弃 |
+| 派发时不校验可用性 | `planToolCalls` 复用同一可用性判定，失败返回 `tool_unavailable` |
+| 超大结果中段永久丢失 | spill 落盘（内容寻址 id）+ `state_tool_result_inspect` 回读 |
+| 5000 条静默截断 | `CountByRun` 统计差额，折算进 `omitted_message_count` 事实并记录日志 |
+| repeat notice 在 runtime 层给建议 | 只保留 `tool` 与 `identical_calls` 事实 |
+| 工具描述写死调用顺序 | 改为能力陈述（`source_file` 能读什么、什么可被导入） |
+| 裁剪提示与 admission reason 指路 | 改为事实陈述 |
+| `SelectionText` 无上限且逐轮重发 | 4000 rune 上限 + 截断标记 |
+| Google 路径 Task 在 history 之前、缺 appendix header | 统一为 `system → runtime → history → task`，补齐 header |
+| 审计字段缺口 | 新增 `policy_appendix_chars`、`history_reasoning_chars`，token 估算计入 reasoning |
+
+### 9.3 仍是已知边界
+
+- `run_messages` 的有界读取保留最新事件，因此极长会话重建会丢掉最早的 checkpoint；现在至少是显式事实，而非静默。
+- P3 能力（后台任务、可续子代理、skills、流式输出、多实例）未做，属于产品排期而非缺陷。
