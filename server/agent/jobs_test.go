@@ -1,0 +1,237 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/ifnodoraemon/openDataAnalysis/config"
+	"github.com/ifnodoraemon/openDataAnalysis/tools"
+)
+
+// jobTestTool stands in for a long analysis tool. It is named after a real
+// tool because the job allowlist is by name.
+type jobTestTool struct {
+	name  string
+	delay time.Duration
+	body  string
+}
+
+func (t *jobTestTool) Name() string        { return t.name }
+func (t *jobTestTool) Description() string { return "job test tool" }
+func (t *jobTestTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object"}`)
+}
+
+func (t *jobTestTool) Capability() tools.ToolCapability {
+	return tools.ToolCapability{Mode: "observe"}
+}
+
+func (t *jobTestTool) Execute(args json.RawMessage) (string, error) {
+	time.Sleep(t.delay)
+	return `{"ok":true,"tool":"` + t.name + `","body":"` + t.body + `"}`, nil
+}
+
+func newJobTestManager(t *testing.T, tool tools.Tool) *JobManager {
+	t.Helper()
+	previous := config.Cfg
+	config.Cfg = &config.Config{TempDir: t.TempDir()}
+	t.Cleanup(func() { config.Cfg = previous })
+
+	registry := tools.NewRegistry()
+	registry.Register(tool)
+	manager := NewJobManager()
+	manager.SetRegistry(registry)
+	return manager
+}
+
+// waitForJobStatus polls until the job reaches a terminal state.
+func waitForJobStatus(t *testing.T, manager *JobManager, jobID, want string) Job {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		job, err := manager.Status(jobID)
+		if err != nil {
+			t.Fatalf("Status(%s): %v", jobID, err)
+		}
+		if job.Status == want {
+			return job
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("job %s never reached %q", jobID, want)
+	return Job{}
+}
+
+func TestJobRunsInBackgroundAndResultIsReadable(t *testing.T) {
+
+	body := strings.Repeat("分析结果", 200)
+	manager := newJobTestManager(t, &jobTestTool{name: "code_run_python", delay: 80 * time.Millisecond, body: body})
+
+	job, err := manager.Submit(context.Background(), "code_run_python", json.RawMessage(`{"code":"pass"}`))
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if job.Status != JobStatusRunning {
+		t.Fatalf("submit must return immediately while the job runs, got %q", job.Status)
+	}
+	// Reading output before completion is a fact, not an empty success.
+	if _, _, _, err := manager.Output(job.ID, 0, 100); err == nil || !strings.Contains(err.Error(), "still running") {
+		t.Fatalf("expected a still-running error, got %v", err)
+	}
+
+	finished := waitForJobStatus(t, manager, job.ID, JobStatusSucceeded)
+	if finished.ResultID == "" || finished.ResultChars == 0 {
+		t.Fatalf("expected a retained result, got %#v", finished)
+	}
+
+	content, _, total, err := manager.Output(job.ID, 0, 100)
+	if err != nil {
+		t.Fatalf("Output: %v", err)
+	}
+	if !strings.HasPrefix(content, `{"ok":true`) {
+		t.Fatalf("unexpected content prefix %q", content)
+	}
+	if total != finished.ResultChars {
+		t.Fatalf("expected total %d, got %d", finished.ResultChars, total)
+	}
+
+	// Paging walks the whole payload.
+	var assembled strings.Builder
+	offset := 0
+	for {
+		page, _, pageTotal, pageErr := manager.Output(job.ID, offset, 500)
+		if pageErr != nil {
+			t.Fatalf("Output page at %d: %v", offset, pageErr)
+		}
+		assembled.WriteString(page)
+		offset += len([]rune(page))
+		if offset >= pageTotal {
+			break
+		}
+	}
+	if got, want := len([]rune(assembled.String())), len([]rune(`{"ok":true,"tool":"code_run_python","body":"`+body+`"}`)); got != want {
+		t.Fatalf("paged read did not reassemble the payload: got %d runes, want %d", got, want)
+	}
+}
+
+func TestJobRejectsToolsOutsideTheAllowlist(t *testing.T) {
+
+	manager := newJobTestManager(t, &jobTestTool{name: "report_finalize"})
+	if _, err := manager.Submit(context.Background(), "report_finalize", json.RawMessage(`{}`)); err == nil {
+		t.Fatalf("a state-mutating tool must not run as a background job")
+	}
+}
+
+func TestUnknownJobReportsUnknownOutcome(t *testing.T) {
+
+	manager := newJobTestManager(t, &jobTestTool{name: "code_run_python"})
+	_, err := manager.Status("job_missing")
+	if err == nil {
+		t.Fatalf("expected an error for an unknown job")
+	}
+	if !strings.Contains(err.Error(), "unknown job") {
+		t.Fatalf("the error must state the outcome is unknown, got %v", err)
+	}
+}
+
+// Two submitted jobs must not share state or results.
+func TestConcurrentJobsStayIndependent(t *testing.T) {
+
+	previous := config.Cfg
+	config.Cfg = &config.Config{TempDir: t.TempDir()}
+	t.Cleanup(func() { config.Cfg = previous })
+
+	registry := tools.NewRegistry()
+	registry.Register(&jobTestTool{name: "code_run_python", delay: 50 * time.Millisecond, body: "first"})
+	manager := NewJobManager()
+	manager.SetRegistry(registry)
+
+	first, err := manager.Submit(context.Background(), "code_run_python", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Submit first: %v", err)
+	}
+	second, err := manager.Submit(context.Background(), "code_run_python", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Submit second: %v", err)
+	}
+	if first.ID == second.ID {
+		t.Fatalf("job ids must be distinct")
+	}
+	waitForJobStatus(t, manager, first.ID, JobStatusSucceeded)
+	waitForJobStatus(t, manager, second.ID, JobStatusSucceeded)
+
+	content, _, _, err := manager.Output(first.ID, 0, 500)
+	if err != nil {
+		t.Fatalf("Output first: %v", err)
+	}
+	if !strings.Contains(content, "first") {
+		t.Fatalf("unexpected first job content %q", content)
+	}
+}
+
+// A failed job reports the failure instead of pretending to have a result.
+func TestFailedJobReportsFailure(t *testing.T) {
+
+	previous := config.Cfg
+	config.Cfg = &config.Config{TempDir: t.TempDir()}
+	t.Cleanup(func() { config.Cfg = previous })
+
+	registry := tools.NewRegistry()
+	registry.Register(&failingJobTool{})
+	manager := NewJobManager()
+	manager.SetRegistry(registry)
+
+	job, err := manager.Submit(context.Background(), "data_query_sql", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	finished := waitForJobStatus(t, manager, job.ID, JobStatusFailed)
+	if finished.ErrorMessage == "" {
+		t.Fatalf("a failed job must carry its failure reason")
+	}
+	if _, _, _, err := manager.Output(job.ID, 0, 100); err == nil {
+		t.Fatalf("a failed job must not yield output")
+	}
+}
+
+type failingJobTool struct{ jobTestTool }
+
+func (t *failingJobTool) Name() string { return "data_query_sql" }
+func (t *failingJobTool) Execute(json.RawMessage) (string, error) {
+	return "", &testAlwaysError{}
+}
+
+type testAlwaysError struct{}
+
+func (e *testAlwaysError) Error() string { return "query timed out" }
+
+// The job tools must be registered for a session that has a job manager, and
+// their contracts must describe facts rather than prescribe a workflow.
+func TestJobToolsAreRegisteredAndContractShaped(t *testing.T) {
+
+	registry := tools.NewRegistry()
+	registry.LoadGlobalTools(tools.ToolContext{Jobs: NewJobManager()})
+
+	for _, name := range []string{"job_submit", "job_status", "job_output"} {
+		tool, err := registry.Get(name)
+		if err != nil {
+			t.Fatalf("expected %s to be registered: %v", name, err)
+		}
+		description := tool.Description()
+		for _, forbidden := range []string{"next_action", "you should", "first call"} {
+			if strings.Contains(strings.ToLower(description), forbidden) {
+				t.Fatalf("%s description prescribes a path: %q", name, description)
+			}
+		}
+	}
+
+	// A session without a job manager must not advertise job tools.
+	plainRegistry := tools.NewRegistry()
+	plainRegistry.LoadGlobalTools(tools.ToolContext{})
+	if _, err := plainRegistry.Get("job_submit"); err == nil {
+		t.Fatalf("job tools must not be registered without a job manager")
+	}
+}

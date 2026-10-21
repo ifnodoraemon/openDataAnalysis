@@ -134,6 +134,7 @@ type ToolContext struct {
 	ReportState                *ReportState
 	EditState                  *ReportEditState
 	Memory                     any            // Type: *agent.WorkingMemory
+	Jobs                       any            // Type: *agent.JobManager
 	Subgoals                   SubgoalChecker // Instead of any, we use an interface to avoid circular imports
 	DelegateRegistryFactory    RegistryFactory
 	EmitFunc                   func(any) // Type: func(agent.RuntimeEvent)

@@ -200,7 +200,7 @@ DSH 的对应做法是构建期静态、无缺口、不可运行时改动的格�
 
 | 能力 | DSH 形态 | 我们的现状 | 备注 |
 |---|---|---|---|
-| 后台任务 | `dsh-jobs`：稳定 `<kind>-N` id、owner fencing、环形输出缓冲 + spill、结算通知 | 无；长 SQL/Python 阻塞在工具调用里 | 对"跑一个大查询"体验提升明显 |
+| 后台任务 | `dsh-jobs`：稳定 `<kind>-N` id、owner fencing、环形输出缓冲 + spill、结算通知 | 已实现工具内异步 jobs（见 10 节）；长 SQL/Python 不再阻塞整轮 | 采用"工具句柄 + 轮询"，不做结算通知 |
 | 子代理 | `spawn`（全新上下文）vs `fork`（复制到最后一个 `turn/end`）、continuable、`list_agents`/`send_message`/`interrupt_agent`、`maxActiveSubagents` 默认 8 | 只有 `task_delegate`（全新上下文、一次性） | 我们已有 delegate 骨架；`fork` 语义值得补 |
 | Goal 持久化 | `goal/change` 事件 + `{id, revision}` CAS + 默认 256 轮 + `blockedAfterConsecutiveRounds` 默认 3 | goal tree 在内存，随会话丢失 | 与 P0-1 同源问题 |
 | 技能/命令 | `dsh-skill` + `dsh-commands`，文件系统多根发现、按需加载、`/` 命令 | 无 | 对"可复用分析套路"有价值 |
@@ -322,4 +322,35 @@ DSH 的对应做法是构建期静态、无缺口、不可运行时改动的格�
 ### 9.4 仍是已知边界
 
 - 落在中间缺口里的事件不属于模型历史，跨缺口的 tool call/result 会被配对修复为 `tool_outcome_unknown`。这是有意取舍：运行时确实不知道那次调用的结果。
-- P3 能力（后台任务、可续子代理、skills、流式输出、多实例）未做，属于产品排期而非缺陷。
+- P3 其余能力（可续子代理、skills、流式输出、多实例）未做；后台任务已落地，见第 10 节。
+
+---
+
+## 10. 后台任务（jobs）
+
+长查询和长 Python 计算原先会阻塞整轮：工具调用同步等待，模型这一步什么也做不了。现在提供工具内异步执行。
+
+### 10.1 形态
+
+| 工具 | 作用 |
+|---|---|
+| `job_submit` | 提交 `code_run_python` 或 `data_query_sql`，立即返回 `job_id` |
+| `job_status` | 读取状态（running/succeeded/failed）、耗时、结果大小、失败原因 |
+| `job_output` | 分页读取已完成 job 的结果（每次最多 6000 rune） |
+
+设计取向是**不预设路径**：runtime 不替模型决定"提交后要等还是先做别的"，也不在 job 完成时主动打断当前轮次。模型自己决定何时查。
+
+### 10.2 边界与取舍
+
+- **只允许分析类工具**：`code_run_python`、`data_query_sql`。报告变更与导入必须在当轮完成——模型下一步要读它们的效果，后台写入会让报告状态产生竞态。
+- **job 属于会话，不属于 run**：提交它的那一轮结束、甚至下一轮开始后仍然可以读结果。执行上下文取提交时的上下文，但用 `context.WithoutCancel` 派生——job 不该因为那一轮被取消而中断。
+- **串行执行**：工具实例是会话级共享的，执行上下文存在字段上，两个 job 并行会互相覆盖上下文，因此 job 执行串行。这是工具实现方式的约束，不是产品限制。
+- **不落库，重启即失**：job 记录只在进程内存。重启后旧 id 返回 `unknown job`，并明确说明"结果未知"，而不是假装仍在运行或失败。这是显式事实，不是静默丢失。
+- **结果复用 spill**：job 结果走与超大工具结果相同的内容寻址存储，`job_output` 分页读回，因此不受上下文窗口限制。
+- **保留上限**：每个会话保留最近 32 个 job，超出的先淘汰已完成的最旧 job，运行中的不淘汰。
+
+### 10.3 未做
+
+- 完成通知（DSH 的 settlement notice）。模型需要主动轮询，多花轮次。
+- 持久化与跨进程恢复。job 不像 run 那样有事件日志，重启后无法续读。
+- owner fencing 与多实例：job 归属单进程，与 `docs/maas-production-architecture.md` 的单进程假设一致。

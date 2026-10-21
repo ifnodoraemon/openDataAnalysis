@@ -43,9 +43,12 @@ type Session struct {
 	EditState     *tools.ReportEditState
 	Memory        *agent.WorkingMemory
 	Subgoals      *agent.SubgoalManager
-	ActiveRun     *RunState
-	CreatedAt     time.Time
-	LastSeenAt    time.Time
+	// Jobs holds background tool executions. They belong to the session, so a
+	// later turn can read a result started by an earlier one.
+	Jobs       *agent.JobManager
+	ActiveRun  *RunState
+	CreatedAt  time.Time
+	LastSeenAt time.Time
 	// detached marks a session removed from the manager map (TTL cleanup or
 	// explicit delete). Late StartRun calls on stale pointers must fail
 	// instead of writing into deleted resources.
@@ -62,6 +65,7 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 
 	memory := agent.NewWorkingMemory()
 	subgoals := agent.NewSubgoalManager()
+	jobs := agent.NewJobManager()
 
 	s := &Session{
 		ID:            id,
@@ -75,6 +79,7 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 		EditState:     &tools.ReportEditState{},
 		Memory:        memory,
 		Subgoals:      subgoals,
+		Jobs:          jobs,
 		CreatedAt:     time.Now(),
 		LastSeenAt:    time.Now(),
 	}
@@ -85,6 +90,7 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 		ReportState:  s.ReportState,
 		EditState:    s.EditState,
 		Memory:       memory,
+		Jobs:         jobs,
 		Subgoals:     subgoals,
 		SessionID:    id,
 		WorkspaceID:  workspaceID,
@@ -275,6 +281,9 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 	runtimeRegistry := masterReg.CloneFiltered(runtimeAllowed)
 
 	s.Registry = runtimeRegistry
+	// Background jobs execute through the same session registry, so they see
+	// exactly the tools this session exposes.
+	jobs.SetRegistry(runtimeRegistry)
 
 	s.Engine = agent.NewEngine(runtimeRegistry)
 	s.Engine.SetReportState(s.ReportState)
