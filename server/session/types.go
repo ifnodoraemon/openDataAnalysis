@@ -66,6 +66,7 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 	memory := agent.NewWorkingMemory()
 	subgoals := agent.NewSubgoalManager()
 	jobs := agent.NewJobManager()
+	subagents := agent.NewChildAgentRegistry()
 
 	s := &Session{
 		ID:            id,
@@ -91,6 +92,7 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 		EditState:    s.EditState,
 		Memory:       memory,
 		Jobs:         jobs,
+		Subagents:    subagents,
 		Subgoals:     subgoals,
 		SessionID:    id,
 		WorkspaceID:  workspaceID,

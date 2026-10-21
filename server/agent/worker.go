@@ -59,11 +59,20 @@ func init() {
 				panic("tool context subgoals has an invalid type")
 			}
 		}
+		var children *ChildAgentRegistry
+		if ctx.Subagents != nil {
+			var ok bool
+			children, ok = ctx.Subagents.(*ChildAgentRegistry)
+			if !ok {
+				panic("tool context subagents has an invalid type")
+			}
+		}
 		return &DelegateTaskTool{
 			RegistryFactory: ctx.DelegateRegistryFactory,
 			EmitFunc:        toolEventEmitterFromContext(ctx),
 			Memory:          memory,
 			Subgoals:        subgoals,
+			Children:        children,
 		}
 	})
 }
@@ -238,6 +247,9 @@ type DelegateTaskTool struct {
 	ParentContext   context.Context
 	Memory          *WorkingMemory
 	Subgoals        *SubgoalManager
+	// Children holds delegated conversations, so a follow-up instruction can
+	// continue one instead of starting over.
+	Children *ChildAgentRegistry
 }
 
 type delegateTraceItem struct {
@@ -261,7 +273,7 @@ func (t *DelegateTaskTool) Capability() tools.ToolCapability {
 }
 
 func (t *DelegateTaskTool) Description() string {
-	return "Create a constrained sub-agent and execute a specified task. allowed_tools is intersected with tools whose capability contract declares delegable=true. Returns child status plus structured result IDs, artifact IDs, and tool failures collected during execution; detailed trace remains persisted for UI/debug."
+	return "Create or continue a constrained sub-agent. action=start creates one and runs task_instruction in a fresh context; action=continue runs a follow-up instruction in an existing sub-agent's conversation, which already holds what it inspected. allowed_tools is intersected with tools whose capability contract declares delegable=true. Returns subagent_id, child status, structured result IDs, artifact IDs, and tool failures collected during execution; detailed trace remains persisted for UI/debug."
 }
 
 func (t *DelegateTaskTool) Parameters() json.RawMessage {
@@ -269,9 +281,18 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 		"type": "object",
 		"additionalProperties": false,
 		"properties": {
+			"action": {
+				"type": "string",
+				"enum": ["start", "continue"],
+				"description": "start (default) creates a sub-agent; continue runs this instruction inside an existing one."
+			},
+			"subagent_id": {
+				"type": "string",
+				"description": "Required for action=continue. The id returned by an earlier call."
+			},
 			"role_name": {
 				"type": "string",
-				"description": "Label for the sub-agent, used to distinguish different instances."
+				"description": "Required for action=start. Label for the sub-agent, used to distinguish different instances."
 			},
 			"policy_appendix": {
 				"type": "string",
@@ -291,7 +312,7 @@ func (t *DelegateTaskTool) Parameters() json.RawMessage {
 				"description": "Optional. Associated goal ID."
 			}
 		},
-		"required": ["role_name", "task_instruction", "allowed_tools"]
+		"required": ["task_instruction"]
 	}`)
 }
 
@@ -301,6 +322,8 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	var payload struct {
+		Action          string   `json:"action"`
+		SubagentID      string   `json:"subagent_id"`
 		RoleName        string   `json:"role_name"`
 		PolicyAppendix  string   `json:"policy_appendix"`
 		TaskInstruction string   `json:"task_instruction"`
@@ -310,6 +333,34 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 	if err := jsoncontract.Decode(args, &payload); err != nil {
 		return delegateToolFailure("", "", "", nil, "", "invalid_arguments", fmt.Sprintf("invalid arguments: %v", err), nil)
 	}
+	if payload.Action == "" {
+		payload.Action = "start"
+	}
+
+	// continue reuses an existing conversation: the child already holds what it
+	// inspected, so the follow-up does not have to restate it. Its role,
+	// constraints and tool grant stay as they were when it was created.
+	var resumed *ChildAgent
+	if payload.Action == "continue" {
+		if t.Children == nil {
+			return delegateToolFailure("", "", payload.TaskInstruction, nil, "", "subagent_store_missing", "delegated conversations are not available in this session", nil)
+		}
+		if strings.TrimSpace(payload.SubagentID) == "" {
+			return delegateToolFailure("", "", payload.TaskInstruction, nil, "", "missing_subagent_id", "subagent_id is required for action=continue", nil)
+		}
+		child, err := t.Children.Get(payload.SubagentID)
+		if err != nil {
+			return delegateToolFailure("", "", payload.TaskInstruction, nil, "", "unknown_subagent", err.Error(), nil)
+		}
+		resumed = &child
+		payload.RoleName = child.RoleName
+		payload.PolicyAppendix = child.PolicyAppendix
+		payload.AllowedTools = child.AllowedTools
+		payload.GoalID = child.GoalID
+	} else if payload.Action != "start" {
+		return delegateToolFailure("", "", payload.TaskInstruction, nil, "", "invalid_action", fmt.Sprintf("unsupported action %q", payload.Action), nil)
+	}
+
 	if strings.TrimSpace(payload.RoleName) == "" {
 		return delegateToolFailure("", "", payload.TaskInstruction, payload.AllowedTools, payload.GoalID, "missing_role_name", "role_name is required", nil)
 	}
@@ -426,12 +477,38 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 	}
 	prepareRegistryRuntimeTools(subReg, childCtx, childEmit)
 
+	// The conversation of a continued child is its accumulated state: seeding it
+	// here is what makes the follow-up cheap instead of a restart.
+	var child *ChildAgent
+	if resumed != nil {
+		child = resumed
+	} else if t.Children != nil {
+		child = t.Children.Create(payload.RoleName, payload.PolicyAppendix, payload.AllowedTools, payload.GoalID)
+	}
+	var priorHistory []ConversationItem
+	if child != nil {
+		priorHistory = child.History
+	}
+
 	childPrompt := BuildPolicyPrompt()
 	llmClient := NewLLMClient()
 	bundle := &PromptBundle{
 		Policy:         childPrompt,
 		PolicyAppendix: payload.PolicyAppendix,
 		Task:           payload.TaskInstruction,
+		History: append(append([]ConversationItem(nil), priorHistory...), ConversationItem{
+			Role:    LLMRoleUser,
+			Content: payload.TaskInstruction,
+		}),
+	}
+	// The instruction now travels in history, so it is not sent twice.
+	bundle.Task = ""
+	if child != nil {
+		// Whatever the child managed to do is kept, including a failed or partial
+		// turn, so a later continue sees the same state it left behind.
+		defer func(childID string) {
+			t.Children.Save(childID, bundle.History, "")
+		}(child.ID)
 	}
 	toolSpecs := subReg.GetToolSpecs()
 	trace := make([]delegateTraceItem, 0, 12)
@@ -512,6 +589,12 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 
 		if choice.FinishReason == LLMFinishReasonStop && len(choice.Message.ToolCalls) == 0 {
 			result := choice.Message.Content
+			// Record the answer, so a later continue sees the same conversation
+			// the parent saw in the result.
+			bundle.History = append(bundle.History, ConversationItem{
+				Role:    LLMRoleAssistant,
+				Content: result,
+			})
 			if persistence != nil && childRunID != "" {
 				stateErrors := persistDelegateCompletion(persistence, childCtx, childRunID, result, totalPromptTokens, totalCompletionTokens)
 				if len(stateErrors) > 0 {
@@ -523,7 +606,11 @@ func (t *DelegateTaskTool) Execute(args json.RawMessage) (string, error) {
 				}
 			}
 			childEmit(RuntimeEvent{Type: EventRunCompleted, RunID: childRunID, Data: CompleteData{Summary: result}})
-			return delegateToolSuccess(childRunID, payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, result, trace, evidence)
+			subagentID := ""
+			if child != nil {
+				subagentID = child.ID
+			}
+			return delegateToolSuccess(childRunID, subagentID, payload.RoleName, payload.TaskInstruction, payload.AllowedTools, payload.GoalID, result, trace, evidence)
 		}
 
 		if len(choice.Message.ToolCalls) == 0 {
@@ -665,7 +752,7 @@ type delegateEvidence struct {
 	ToolFailures []map[string]string
 }
 
-func delegateToolSuccess(childRunID, roleName, taskInstruction string, allowedTools []string, goalID, summary string, trace []delegateTraceItem, evidence delegateEvidence) (string, error) {
+func delegateToolSuccess(childRunID, subagentID, roleName, taskInstruction string, allowedTools []string, goalID, summary string, trace []delegateTraceItem, evidence delegateEvidence) (string, error) {
 	payload := map[string]interface{}{
 		"ok":               true,
 		"tool":             "task_delegate",
@@ -680,6 +767,11 @@ func delegateToolSuccess(childRunID, roleName, taskInstruction string, allowedTo
 		"result_ids":       evidence.ResultIDs,
 		"artifact_ids":     evidence.ArtifactIDs,
 		"tool_failures":    evidence.ToolFailures,
+	}
+	if subagentID != "" {
+		// The id is what makes a follow-up possible: without it the conversation
+		// cannot be named, and the parent would have to delegate from scratch.
+		payload["subagent_id"] = subagentID
 	}
 	if goalID != "" {
 		payload["goal_id"] = goalID

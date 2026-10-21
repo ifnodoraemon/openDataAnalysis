@@ -201,7 +201,7 @@ DSH 的对应做法是构建期静态、无缺口、不可运行时改动的格�
 | 能力 | DSH 形态 | 我们的现状 | 备注 |
 |---|---|---|---|
 | 后台任务 | `dsh-jobs`：稳定 `<kind>-N` id、owner fencing、环形输出缓冲 + spill、结算通知 | 已实现工具内异步 jobs（见 10 节）；长 SQL/Python 不再阻塞整轮 | 采用"工具句柄 + 轮询"，不做结算通知 |
-| 子代理 | `spawn`（全新上下文）vs `fork`（复制到最后一个 `turn/end`）、continuable、`list_agents`/`send_message`/`interrupt_agent`、`maxActiveSubagents` 默认 8 | 只有 `task_delegate`（全新上下文、一次性） | 我们已有 delegate 骨架；`fork` 语义值得补 |
+| 子代理 | `spawn`（全新上下文）vs `fork`、continuable、`list_agents`/`send_message`/`interrupt_agent` | 已有可续子代理：`task_delegate` 的 `action=continue` 复用子代理已有对话（见 11 节）；`fork` 未做 | 折叠进现有工具，不新增工具 |
 | Goal 持久化 | `goal/change` 事件 + `{id, revision}` CAS + 默认 256 轮 + `blockedAfterConsecutiveRounds` 默认 3 | goal tree 在内存，随会话丢失 | 与 P0-1 同源问题 |
 | 技能/命令 | `dsh-skill` + `dsh-commands`，文件系统多根发现、按需加载、`/` 命令 | 无 | 对"可复用分析套路"有价值 |
 | 插件/扩展 | 一切皆插件（289 个包），profile/bundle/patch 分层 | 单体 Go + 已有 MCP 目录 | **不建议照搬**，见下节 |
@@ -356,3 +356,33 @@ DSH 的对应做法是构建期静态、无缺口、不可运行时改动的格�
 
 - 持久化与跨进程恢复。job 不像 run 那样有事件日志，重启后无法续读。
 - owner fencing 与多实例：job 归属单进程，与 `docs/maas-production-architecture.md` 的单进程假设一致。
+
+---
+
+## 11. 可续子代理
+
+`task_delegate` 原先是一次性的：子代理跑完，它的对话随调用结束一起丢弃。父级若要追问，只能新建一个子代理，把上下文再讲一遍。
+
+### 11.1 形态
+
+没有新增工具。按 `AGENTS.md` 的工具准入规则第 4 条，续聊是"同一能力的另一个动作"，因此折叠成参数：
+
+| 参数 | 含义 |
+|---|---|
+| `action` | `start`（默认）新建；`continue` 在已有子代理里继续 |
+| `subagent_id` | `continue` 必填，取自上次返回 |
+
+`continue` 时子代理的角色、`policy_appendix`、`allowed_tools`、`goal_id` 沿用创建时的值——续聊不该悄悄扩大它的权限。
+
+### 11.2 实现要点
+
+- 子代理对话存在会话级 `ChildAgentRegistry`，上限 16 个，超出淘汰最旧。
+- 子代理循环现在把**本轮指令**与**最终回答**都写进自己的历史。此前两者都没有落进历史，导致续聊等于失忆。
+- 转写发生在每次退出（含失败/取消），因此后续 `continue` 看到的是子代理真实留下的状态。
+- 与 job 一致：只在进程内存，重启后未知 id 返回 `unknown_subagent` 并说明对话不可用，而不是静默新建一个看起来像续聊的新对话。
+
+### 11.3 未做
+
+- `fork` 语义（复制父级上下文到子代理）。当前 `start` 仍是全新上下文。
+- 并行子代理与 `maxActiveSubagents`。子代理调用是同步的，父级等待其返回。
+- 跨进程续聊：对话不落库，重启即失。
