@@ -1,17 +1,16 @@
 id: delegate_failure_recovery
 industry: marketing
 task_length: medium
-prompt: 请先故意调用一次 `task_delegate` 来验证恢复能力：`role_name` 用 `precheck`，`task_instruction` 写“检查这两张表能否做 ROI 分析”，并把 `allowed_tools` 严格设为 `["missing_tool"]`，不要自行修正。如果这次委派失败，不要中断，也不要让我重试；请改为你自己继续完成各渠道 ROI、收入贡献和趋势变化分析，生成图表，并输出最终报告。
+prompt: 请分析各渠道 ROI、收入贡献和趋势变化，生成图表并输出最终报告。子任务边界清晰时可以把其中一部分委派给子代理，是否委派由你判断。
 files:
   - marketing_spend_by_channel_month.csv
   - attributed_revenue_by_channel_month.csv
 acceptance:
-  terminal_types: [run_completed]
+  terminal_types: [run_completed, user_request_input]
   report_finalized: true
   no_error: true
-  required_tool_calls:
-    - task_delegate
-  required_tool_result_codes:
-    - task_delegate:no_allowed_tools_resolved
+  failures_must_be_structured: true
 manual_review:
-  - 委派失败被当作事实处理，主运行仍完成用户要求的分析。
+  - 委派与否是模型自己的判断，不因未委派而判失败。
+  - 若发生委派失败，失败以结构化事实返回，主运行继续完成分析而不是中断。
+  - 最终报告仍覆盖 ROI、收入贡献与趋势。

@@ -387,6 +387,30 @@ function evaluateScenario(scenario, events, summary) {
   }
   // The lenient form: the run may finish without asking, but if it did ask and
   // an answer was supplied, it must continue to completion.
+  // Tool failures must arrive as facts with a machine-readable code. A raw
+  // error string cannot be acted on, and asserting that a specific tool MUST
+  // fail makes a scenario depend on the model deliberately misbehaving.
+  if (acceptance.failures_must_be_structured === true) {
+    const failures = events
+      .filter((event) => event.type === "tool_result")
+      .filter((event) => event.data?.success === false);
+    let unstructured = 0;
+    for (const failure of failures) {
+      let code = "";
+      try {
+        code = JSON.parse(String(failure.data?.result ?? "")).error_code || "";
+      } catch (error) {
+        code = "";
+      }
+      if (!code) unstructured += 1;
+    }
+    addCheck(
+      "failures_must_be_structured",
+      unstructured === 0,
+      `unstructured=${unstructured} of ${failures.length} failures`,
+    );
+  }
+
   if (acceptance.resume_if_asked === true) {
     const askedIndex = events.findIndex(
       (event) => event.type === "user_request_input",

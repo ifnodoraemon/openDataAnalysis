@@ -92,15 +92,44 @@ print_failure_output() {
     echo "  --- 输出结束 ---"
 }
 
+# scenario_timeout 按场景声明的长度给时间预算。
+#
+# 一个"长"场景在 300 秒里常常还在正常产出报告块，默认超时会把正常工作判成失败
+# （实测 19/24 在 300s 被截断、600s 全部通过）。场景可用 timeout_seconds 显式
+# 覆盖；--timeout 只在场景没有声明长度时作为兜底。
+scenario_timeout() {
+    local scenario_id="$1"
+    local yaml="$ROOT_DIR/samples/coverage_scenarios/$scenario_id/scenario.yaml"
+    if [ ! -f "$yaml" ]; then
+        echo "$TIMEOUT"
+        return
+    fi
+    local explicit
+    explicit=$(sed -n 's/^timeout_seconds: *//p' "$yaml" | head -1)
+    if [ -n "$explicit" ]; then
+        echo "$explicit"
+        return
+    fi
+    local declared
+    declared=$(sed -n 's/^task_length: *//p' "$yaml" | head -1)
+    case "$declared" in
+        long) echo 600 ;;
+        medium) echo 420 ;;
+        short) echo 300 ;;
+        *) echo "$TIMEOUT" ;;
+    esac
+}
+
 for scenario_id in "${SCENARIOS[@]}"; do
     total=$((total + 1))
-    echo "--- [$total] 正在运行：$scenario_id ---"
+    scenario_budget=$(scenario_timeout "$scenario_id")
+    echo "--- [$total] 正在运行：$scenario_id（超时 ${scenario_budget}s）---"
 
     set +e
     output=$(node "$SCRIPT_DIR/run_scenario.js" \
         --id "$scenario_id" \
         --base-url "$BASE_URL" \
-        --timeout "$TIMEOUT" 2>&1)
+        --timeout "$scenario_budget" 2>&1)
     exit_code=$?
     set -e
 

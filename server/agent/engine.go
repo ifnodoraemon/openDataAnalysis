@@ -77,8 +77,7 @@ type ConfirmationReceipt struct {
 const (
 	// recentContextWindow is the number of most recent history items kept
 	// verbatim when older conversation is compacted.
-	recentContextWindow   = 12
-	maxMainLoopIterations = 50
+	recentContextWindow = 12
 	// confirmationReceiptTTL bounds how long a user approval stays usable. An
 	// expired receipt fails closed: the model must ask again.
 	confirmationReceiptTTL = 30 * time.Minute
@@ -112,6 +111,17 @@ func emitEngineError(emit func(RuntimeEvent), code, message string, err error) {
 func isRetryableToolError(err error) bool {
 	return isTransientTransportError(err)
 }
+
+// maxMainLoopIterations bounds one agent turn. A configured zero means "use the
+// default"; the value belongs to the deployment, not to the code.
+func maxMainLoopIterations() int {
+	if config.Cfg != nil && config.Cfg.MaxMainLoopIterations > 0 {
+		return config.Cfg.MaxMainLoopIterations
+	}
+	return defaultMaxMainLoopIterations
+}
+
+const defaultMaxMainLoopIterations = 50
 
 // toolCallTimeout is the budget for one observation call. A configured zero
 // means "use the default".
@@ -573,8 +583,8 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 		default:
 		}
 
-		if i > maxMainLoopIterations {
-			emitEngineError(emit, "iteration_limit_exceeded", fmt.Sprintf("任务超过运行轮次上限（%d）", maxMainLoopIterations), nil)
+		if limit := maxMainLoopIterations(); i > limit {
+			emitEngineError(emit, "iteration_limit_exceeded", fmt.Sprintf("任务超过运行轮次上限（%d）", limit), nil)
 			return
 		}
 
