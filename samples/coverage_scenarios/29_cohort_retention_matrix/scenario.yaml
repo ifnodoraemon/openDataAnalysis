@@ -1,0 +1,14 @@
+id: cohort_retention_matrix
+industry: saas
+task_length: medium
+prompt: 请分析这份用户队列留存矩阵，覆盖留存曲线、队列间差异与收入贡献。
+files:
+  - user_cohort_retention.csv
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
+manual_review:
+  - 留存按队列与期数组合解释，没有混用不同期数。
+  - 留存率分母为队列初始用户数，口径明确。
+  - 收入贡献与留存指标的关系有数据支撑。

@@ -5,9 +5,13 @@ prompt: 请综合分析投放 ROI，并解释不同渠道带来的收入表现�
 files:
   - campaign_spend_daily.csv
   - crm_bookings_monthly.csv
+answers:
+  - 两者按渠道和自然月关联；无法对齐的日期不做插值，按相机口径说明差异。
 acceptance:
-  terminal_types: [user_request_input]
+  terminal_types: [run_completed, user_request_input]
   no_error: true
+  resume_if_asked: true
 manual_review:
-  - 提问准确呈现关联键和时间粒度的不确定性。
+  - 关联键和时间粒度的不确定性被明确呈现，无论通过提问还是显式假设说明。
   - 未经确认不把 CRM bookings 直接归因到 campaign spend。
+  - 若选择显式假设继续，报告中必须写明该假设及其对结论的影响。

@@ -1,0 +1,14 @@
+id: daily_retail_large
+industry: retail
+task_length: long
+prompt: 请对这份门店交易明细做综合分析，覆盖趋势、区域与渠道差异、品类结构与转化效率。
+files:
+  - daily_retail_transactions.csv
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
+manual_review:
+  - 分析基于实际导入的行数，若被截断或采样必须说明。
+  - 转化率一类比率指标写明分子分母。
+  - 区域与渠道对比使用同一时间范围。

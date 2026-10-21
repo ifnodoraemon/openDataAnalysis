@@ -1,0 +1,14 @@
+id: sales_pivot_matrix
+industry: retail
+task_length: medium
+prompt: 请分析这份按月、区域与品类组织的数据，覆盖收入结构、增长贡献与毛利表现。
+files:
+  - sales_product_region_monthly.csv
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
+manual_review:
+  - 区域与品类两个维度的贡献分解口径一致。
+  - 增长贡献加总可与总体增长对上，或被明确说明为近似。
+  - 毛利率的使用方式与字段定义一致。

@@ -1,0 +1,13 @@
+id: server_metrics_large
+industry: it_operations
+task_length: long
+prompt: 请分析这份服务运行指标数据，覆盖资源使用、错误率与延迟表现，并定位主要瓶颈集群与时段。
+files:
+  - server_metrics_hourly.csv
+acceptance:
+  terminal_types: [run_completed, user_request_input]
+  no_error: true
+manual_review:
+  - 明确说明分析基于原始全量还是有界快照或采样，并给出行数事实。
+  - 延迟指标使用 p95 或 p99 而不只报均值。
+  - 瓶颈结论能定位到具体集群、服务或时段。

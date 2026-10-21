@@ -67,6 +67,23 @@ test("ignores comments and blank lines", () => {
   assert.deepStrictEqual(parsed, { id: "x" });
 });
 
+// A scenario directory that holds data but no manifest is silently skipped by
+// the runner, which means part of the corpus is never evaluated. This asserts
+// the corpus has no such holes.
+test("every data directory has a scenario manifest", () => {
+  const missing = fs
+    .readdirSync(SCENARIO_ROOT, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(SCENARIO_ROOT, entry.name))
+    .filter((dir) =>
+      fs.readdirSync(dir).some((name) => name.endsWith(".csv")),
+    )
+    .filter((dir) => !fs.existsSync(path.join(dir, "scenario.yaml")))
+    .map((dir) => path.basename(dir));
+
+  assert.deepStrictEqual(missing, [], `scenario directories without a manifest: ${missing.join(", ")}`);
+});
+
 // The whole corpus must parse, and every array-shaped acceptance field must
 // actually be an array. This is the regression that made the benchmark unable
 // to produce a result.

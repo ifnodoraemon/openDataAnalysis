@@ -1,0 +1,14 @@
+id: employee_wide
+industry: hr
+task_length: medium
+prompt: 请分析这份员工主数据，覆盖部门与职级结构、薪酬分布、绩效与流失风险，并指出关键岗位集中度。
+files:
+  - employee_master.csv
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
+manual_review:
+  - 宽表中与问题无关的字段没有被强行解读。
+  - 薪酬分布使用分位数而不是只看均值。
+  - 流失风险指标被当作模型评分而非既定事实。

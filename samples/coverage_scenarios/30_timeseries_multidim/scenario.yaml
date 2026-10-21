@@ -1,0 +1,14 @@
+id: timeseries_multidim
+industry: marketing
+task_length: long
+prompt: 请分析这份多维日度指标数据，覆盖平台与渠道的趋势差异、转化效率与留存表现。
+files:
+  - daily_kpi_multidim.csv
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
+manual_review:
+  - 多个维度组合时避免样本过小导致的误判，或明确标注样本量。
+  - 转化率与留存指标的分母口径明确。
+  - 趋势结论的时间窗口一致。

@@ -5,10 +5,12 @@ prompt: 请分析这组数据中的渠道 ROI 趋势，并说明是否存在效�
 files:
   - channel_spend_daily.csv
   - channel_revenue_monthly.csv
+answers:
+  - 把日粒度投放汇总到自然月，再与月度收入比较，不做跨粒度直接混比。
 acceptance:
-  terminal_types: [run_completed]
-  report_finalized: true
+  terminal_types: [run_completed, user_request_input]
   no_error: true
+  resume_if_asked: true
 manual_review:
-  - 比较前的时间粒度转换可由查询结果验证。
+  - 时间粒度转换方式被明确说明，无论通过提问还是报告内的口径说明。
   - 不直接混比日粒度投放与月粒度收入。

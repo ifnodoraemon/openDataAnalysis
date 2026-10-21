@@ -1,0 +1,14 @@
+id: hr_crosstab
+industry: hr
+task_length: medium
+prompt: 请分析这份部门与办公地点交叉的人力数据，覆盖人头、成本与人效，并指出结构性差异。
+files:
+  - hr_dept_location_monthly.csv
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
+manual_review:
+  - 部门与地点的交叉口径明确，不把两个维度混为一谈。
+  - 人效指标写明分子分母与时间范围。
+  - 差异结论能定位到具体部门或地点组合。

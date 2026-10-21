@@ -1,0 +1,18 @@
+id: financial_pl
+industry: finance
+task_length: long
+prompt: 请分析这组财务数据，覆盖各事业部损益表现与资本开支执行情况，并指出预算偏差。
+files:
+  - fin_pl_by_dept_quarterly.csv
+  - fin_capex_monthly.csv
+answers:
+  - 损益按季度看，资本开支按月度看，两者不做粒度混算，分别说明后再合并结论。
+acceptance:
+  terminal_types: [run_completed, user_request_input]
+  report_finalized: true
+  no_error: true
+  resume_if_asked: true
+manual_review:
+  - 季度损益与月度资本开支的粒度差异被明确处理，没有直接混算。
+  - 经营利润与 OPEX 分项的关系可由数据复算。
+  - 资本开支偏差明确指出超额与结余的项目。

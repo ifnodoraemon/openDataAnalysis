@@ -1,0 +1,16 @@
+id: hr_payroll
+industry: hr
+task_length: long
+prompt: 请分析这组人力资源数据，覆盖人员规模、离职情况与薪酬预算执行，并说明主要风险。
+files:
+  - hr_headcount_monthly.csv
+  - hr_attrition_monthly.csv
+  - hr_salary_budget_monthly.csv
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
+manual_review:
+  - 三张表按月份与部门关联，关联口径有说明。
+  - 离职率的分母口径明确，并在部门之间保持一致。
+  - 预算差异不只描述数字，还指出发生在哪些部门。

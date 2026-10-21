@@ -1,0 +1,16 @@
+id: ecommerce_logistics
+industry: ecommerce
+task_length: long
+prompt: 请分析这组电商数据，覆盖订单增长、区域与平台表现、物流成本与时效，并评估用户获取效率。
+files:
+  - ecom_orders_monthly.csv
+  - ecom_logistics_cost.csv
+  - ecom_customer_cohorts.csv
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
+manual_review:
+  - GMV、订单量与物流成本分别有数据证据。
+  - LTV 与 CAC 的口径写明来源与时间范围。
+  - 不把物流时效与用户留存的相关性写成因果关系。

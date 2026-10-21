@@ -1,0 +1,17 @@
+id: financial_ledger_large
+industry: finance
+task_length: long
+prompt: 请分析这份总账明细，覆盖费用结构、部门成本分布与月度趋势，并说明数据完整性风险。
+files:
+  - general_ledger_daily.csv
+answers:
+  - 以 account_type 区分科目性质，借方与贷方分别汇总，不做相互抵消后的净额结论。
+acceptance:
+  terminal_types: [run_completed, user_request_input]
+  report_finalized: true
+  no_error: true
+  resume_if_asked: true
+manual_review:
+  - 借贷方向被显式处理，没有把两个方向直接相加。
+  - 多币种若存在，换算口径有说明。
+  - 若数据量导致采样或截断，报告中明确说明。

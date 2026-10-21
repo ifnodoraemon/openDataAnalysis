@@ -1,0 +1,14 @@
+id: product_hierarchy
+industry: retail
+task_length: medium
+prompt: 请分析这份商品主数据，覆盖三级类目结构、价格带分布、库存与补货风险。
+files:
+  - product_master_hierarchy.csv
+acceptance:
+  terminal_types: [run_completed]
+  report_finalized: true
+  no_error: true
+manual_review:
+  - 层级汇总不重复计数，上下级口径一致。
+  - 价格带划分规则被明确说明。
+  - 补货风险结论使用库存与再订货点等实际字段。
