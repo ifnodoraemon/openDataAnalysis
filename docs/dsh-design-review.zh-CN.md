@@ -303,7 +303,7 @@ DSH 的对应做法是构建期静态、无缺口、不可运行时改动的格�
 | 无按工具超时 | 新增 `TOOL_CALL_TIMEOUT_SECONDS`（默认 300s）；只约束观测类工具，action 工具不中途放弃 |
 | 派发时不校验可用性 | `planToolCalls` 复用同一可用性判定，失败返回 `tool_unavailable` |
 | 超大结果中段永久丢失 | spill 落盘（内容寻址 id）+ `state_tool_result_inspect` 回读 |
-| 5000 条静默截断 | `CountByRun` 统计差额，折算进 `omitted_message_count` 事实并记录日志 |
+| 5000 条静默截断 | `CountByRun` 统计差额，折算进 `omitted_message_count` 事实并记录日志；窗口裁剪改为头尾保留（见 9.3） |
 | repeat notice 在 runtime 层给建议 | 只保留 `tool` 与 `identical_calls` 事实 |
 | 工具描述写死调用顺序 | 改为能力陈述（`source_file` 能读什么、什么可被导入） |
 | 裁剪提示与 admission reason 指路 | 改为事实陈述 |
@@ -311,7 +311,15 @@ DSH 的对应做法是构建期静态、无缺口、不可运行时改动的格�
 | Google 路径 Task 在 history 之前、缺 appendix header | 统一为 `system → runtime → history → task`，补齐 header |
 | 审计字段缺口 | 新增 `policy_appendix_chars`、`history_reasoning_chars`，token 估算计入 reasoning |
 
-### 9.3 仍是已知边界
+### 9.3 有界读取改为头尾保留
 
-- `run_messages` 的有界读取保留最新事件，因此极长会话重建会丢掉最早的 checkpoint；现在至少是显式事实，而非静默。
+`run_messages` 原先保留最新 5000 条。超长 run 会丢掉最早的 `history_compacted` checkpoint 与会话首条任务，重建于是从中间状态开始折叠，压缩链断裂。
+
+现在 `ListByRun` / `ListByRunPath` 在超出窗口时读取**最早的 1500 条 + 最新的 3500 条**，中间缺口由 `CountByRun` 的差额折算成 `omitted_message_count` 事实。这保住了重建真正依赖的两端：起点（首条任务、首个 checkpoint）与当前轮次；中间缺失造成的工具调用不配对由 `repairToolPairing` 兜底。
+
+窗口仍然有界：一次读取最多 5000 条，上限不变，变的是**保留哪 5000 条**。
+
+### 9.4 仍是已知边界
+
+- 落在中间缺口里的事件不属于模型历史，跨缺口的 tool call/result 会被配对修复为 `tool_outcome_unknown`。这是有意取舍：运行时确实不知道那次调用的结果。
 - P3 能力（后台任务、可续子代理、skills、流式输出、多实例）未做，属于产品排期而非缺陷。
