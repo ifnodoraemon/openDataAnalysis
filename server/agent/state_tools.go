@@ -25,7 +25,7 @@ func init() {
 		if ctx.ReportState == nil {
 			return nil
 		}
-		return &InspectReportStateTool{ReportState: ctx.ReportState}
+		return &InspectReportStateTool{ReportState: ctx.ReportState, Subgoals: ctx.Subgoals}
 	})
 	tools.RegisterGlobalTool(func(ctx tools.ToolContext) tools.Tool {
 		if ctx.EditState == nil {
@@ -134,6 +134,10 @@ func (t *InspectGoalsTool) Execute(args json.RawMessage) (string, error) {
 
 type InspectReportStateTool struct {
 	ReportState *tools.ReportState
+	// Subgoals is the same checker report_finalize consults. Exposing its
+	// verdict here means the observation surface states the precondition the
+	// action enforces, instead of the model discovering it by failing.
+	Subgoals tools.SubgoalChecker
 }
 
 type InspectReportEditStateTool struct {
@@ -236,9 +240,19 @@ func (t *InspectReportStateTool) Execute(args json.RawMessage) (string, error) {
 
 	t.ReportState.RUnlock()
 
+	// What report_finalize would refuse on must be visible before the attempt.
+	canFinalize := true
+	var activeGoalBlockers []string
+	if t.Subgoals != nil {
+		canFinalize, activeGoalBlockers = t.Subgoals.CanFinalize()
+	}
+	finalizeIssueCount := len(finalizeIssues)
+
 	payload := map[string]interface{}{
 		"ok":                       true,
 		"tool":                     "state_report_inspect",
+		"can_finalize":             canFinalize && finalizeIssueCount == 0,
+		"active_goal_blockers":     activeGoalBlockers,
 		"block_count":              blockCount,
 		"renderable_block_count":   renderableBlockCount,
 		"chart_count":              len(chartIDs),

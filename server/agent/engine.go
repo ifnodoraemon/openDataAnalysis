@@ -461,6 +461,14 @@ func probeToolAvailability(ctx context.Context, checker tools.AvailabilityTool) 
 
 	select {
 	case err := <-done:
+		// A check that fails because this probe's own deadline fired is
+		// inconclusive, not a negative: the backend may simply be slower than
+		// the probe budget. Denying the call there would report a healthy tool
+		// as unavailable.
+		if err != nil && probeCtx.Err() != nil && ctx.Err() == nil {
+			log.Printf("engine: availability probe hit its %s budget; keeping the tool advertised", availabilityProbeTimeout)
+			return nil
+		}
 		return err
 	case <-probeCtx.Done():
 		if ctx.Err() != nil {

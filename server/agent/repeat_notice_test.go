@@ -201,3 +201,27 @@ func TestFilterUnavailableToolSpecsDropsOnlyDefiniteFailures(t *testing.T) {
 		}
 	}
 }
+
+// deadlineAvailabilityTool reports failure only because the probe's own budget
+// expired. That is inconclusive: denying the call would report a healthy but
+// slow backend as unavailable.
+type deadlineAvailabilityTool struct{ plainTool }
+
+func (t *deadlineAvailabilityTool) Name() string { return "deadline_availability_tool" }
+
+func (t *deadlineAvailabilityTool) CheckAvailability(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestProbeTreatsItsOwnDeadlineAsInconclusive(t *testing.T) {
+	t.Parallel()
+
+	start := time.Now()
+	if err := probeToolAvailability(context.Background(), &deadlineAvailabilityTool{}); err != nil {
+		t.Fatalf("a probe that only hit its own deadline must stay inconclusive, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("the probe must be bounded, took %s", elapsed)
+	}
+}

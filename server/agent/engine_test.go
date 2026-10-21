@@ -588,3 +588,51 @@ func TestAskUserSuspensionEventRequiresCompleteArguments(t *testing.T) {
 		t.Fatalf("expected error containing 'question is required', got: %v", err)
 	}
 }
+
+// blockedSubgoals reports one active blocking branch.
+type blockedSubgoals struct{}
+
+func (blockedSubgoals) CanFinalize() (bool, []string) {
+	return false, []string{"goal_abc"}
+}
+
+// The observation surface must state the precondition report_finalize enforces,
+// so the model sees the blocker instead of discovering it by a failed delivery.
+func TestInspectReportStateToolExposesFinalizeBlockers(t *testing.T) {
+	t.Parallel()
+
+	state := &tools.ReportState{
+		Blocks: []tools.ReportBlock{{ID: "intro", Kind: "markdown", Title: "T", Content: "## 分析"}},
+	}
+
+	blocked := &InspectReportStateTool{ReportState: state, Subgoals: blockedSubgoals{}}
+	result, err := blocked.Execute(json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(result), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload["can_finalize"] != false {
+		t.Fatalf("expected can_finalize=false, got %#v", payload["can_finalize"])
+	}
+	blockers, ok := payload["active_goal_blockers"].([]interface{})
+	if !ok || len(blockers) != 1 || blockers[0] != "goal_abc" {
+		t.Fatalf("expected the active branch to be reported, got %#v", payload["active_goal_blockers"])
+	}
+
+	// With no blocking branches and a valid report, the same surface says so.
+	clear := &InspectReportStateTool{ReportState: state}
+	result, err = clear.Execute(json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	payload = map[string]interface{}{}
+	if err := json.Unmarshal([]byte(result), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload["can_finalize"] != true {
+		t.Fatalf("expected can_finalize=true for an unblocked report, got %#v", payload["can_finalize"])
+	}
+}
