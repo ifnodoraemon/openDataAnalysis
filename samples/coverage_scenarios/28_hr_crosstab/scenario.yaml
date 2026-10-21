@@ -1,6 +1,6 @@
 id: hr_crosstab
 industry: hr
-task_length: medium
+task_length: long
 prompt: 请分析这份部门与办公地点交叉的人力数据，覆盖人头、成本与人效，并指出结构性差异。
 files:
   - hr_dept_location_monthly.csv

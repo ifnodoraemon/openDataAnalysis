@@ -6,10 +6,13 @@ files:
   - factory_cost_cny.csv
   - factory_revenue_10k_cny.csv
   - factory_output_units.csv
+answers:
+  - 按字段声明做单位换算后再比较，万元与元不直接混用。
 acceptance:
-  terminal_types: [run_completed]
+  terminal_types: [run_completed, user_request_input]
   report_finalized: true
   no_error: true
+  resume_if_asked: true
 manual_review:
   - 单位换算由显式字段信息支持且在比较前完成。
   - 不直接比较万元收入与元成本。

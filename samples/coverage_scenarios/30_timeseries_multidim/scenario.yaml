@@ -4,10 +4,13 @@ task_length: long
 prompt: 请分析这份多维日度指标数据，覆盖平台与渠道的趋势差异、转化效率与留存表现。
 files:
   - daily_kpi_multidim.csv
+answers:
+  - 以自然日为主窗口，平台与渠道分开比较，样本过小的组合不单独下结论。
 acceptance:
-  terminal_types: [run_completed]
+  terminal_types: [run_completed, user_request_input]
   report_finalized: true
   no_error: true
+  resume_if_asked: true
 manual_review:
   - 多个维度组合时避免样本过小导致的误判，或明确标注样本量。
   - 转化率与留存指标的分母口径明确。
