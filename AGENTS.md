@@ -42,6 +42,22 @@ This repository follows an agentic runtime model.
 - Prefer pull-based state access through `state_*` tools over automatic prompt injection of large runtime state.
 - If a tool needs a human-readable display summary, return it in `ui_summary` and keep model-relevant facts in separate structured fields.
 
+### Tool admission and convergence
+
+Every tool costs context on every request and adds one more choice the model can get wrong. A new tool is not the default answer to a new capability.
+
+Before adding a tool, it must pass all of these:
+
+1. **A question no existing tool answers.** Reusing or extending an existing tool is preferred. Two tools that read the same resource through different views belong in one tool, not two.
+2. **One resource, one reader.** Payloads are read through the shared reader for their storage kind (`state_tool_result_inspect` for spilled payloads, `state_analysis_ledger_inspect` for the analysis ledger). A capability that produces a payload returns its id; it does not add another reader.
+3. **Observation and action stay separate.** `state_*_inspect` reads and never mutates; an action tool mutates. Do not merge the two: the mode is what drives concurrency safety and admission.
+4. **Its input cannot be folded into an existing enum.** If the new tool is "same thing with a flag", add the flag instead.
+
+Naming follows the mode: observations are `state_<resource>_inspect`, actions are verb-first (`job_submit`, `data_query_sql`, `report_finalize`). A new observation tool with a different name shape is a defect.
+
+When the tool surface grows, prefer convergence over addition: merge duplicate readers, collapse status/output views of one resource into one tool, and delete tools that no scenario or product flow needs. Current surface: 26 tools, roughly 9.5k characters of descriptions on every request.
+
+
 ## Report Constraints
 
 - Reports may be organized freely by the model.

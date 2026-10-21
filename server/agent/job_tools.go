@@ -30,16 +30,6 @@ func init() {
 		}
 		return &InspectJobStatusTool{Jobs: manager}
 	})
-	tools.RegisterGlobalTool(func(ctx tools.ToolContext) tools.Tool {
-		if ctx.Jobs == nil {
-			return nil
-		}
-		manager, ok := ctx.Jobs.(*JobManager)
-		if !ok {
-			panic("tool context jobs has an invalid type")
-		}
-		return &ReadJobOutputTool{Jobs: manager}
-	})
 }
 
 // SubmitJobTool starts a long analysis tool in the background.
@@ -60,7 +50,7 @@ func (t *SubmitJobTool) Capability() tools.ToolCapability {
 }
 
 func (t *SubmitJobTool) Description() string {
-	return "Start a long-running analysis tool in the background and return its job id immediately. The job keeps running after the current turn ends; its status is a fact readable with job_status and its result is readable in pages with job_output. Jobs do not survive a process restart, so an id from an earlier process reports an unknown outcome. Returns job_id, status, and the start time."
+	return "Start a long-running analysis tool in the background and return its job id immediately. The job keeps running after the current turn ends. Its state is read with state_job_inspect; the id of its retained result payload is readable in pages with state_tool_result_inspect. Jobs do not survive a process restart, so an id from an earlier process reports an unknown outcome. Returns job_id, status, and the start time."
 }
 
 func (t *SubmitJobTool) Parameters() json.RawMessage {
@@ -115,14 +105,14 @@ func (t *SubmitJobTool) Execute(args json.RawMessage) (string, error) {
 // InspectJobStatusTool reports the state of one background job.
 type InspectJobStatusTool struct{ Jobs *JobManager }
 
-func (t *InspectJobStatusTool) Name() string { return "job_status" }
+func (t *InspectJobStatusTool) Name() string { return "state_job_inspect" }
 
 func (t *InspectJobStatusTool) Capability() tools.ToolCapability {
 	return tools.ToolCapability{Mode: "observe", RuntimeEnabled: true, Delegable: true}
 }
 
 func (t *InspectJobStatusTool) Description() string {
-	return "Read the fact state of one background job: status (running, succeeded, failed), elapsed duration, retained result size, and the failure message when it failed. Does not modify any state."
+	return "Read the fact state of one background job: status (running, succeeded, failed), elapsed duration, retained result size and its payload id, and the failure message when it failed. The payload id is readable in pages with state_tool_result_inspect. Does not modify any state."
 }
 
 func (t *InspectJobStatusTool) Parameters() json.RawMessage {
@@ -152,12 +142,13 @@ func (t *InspectJobStatusTool) Execute(args json.RawMessage) (string, error) {
 	}
 	result := map[string]interface{}{
 		"ok":            true,
-		"tool":          "job_status",
+		"tool":          "state_job_inspect",
 		"job_id":        job.ID,
 		"job_tool":      job.Tool,
 		"status":        job.Status,
 		"duration_ms":   job.Duration().Milliseconds(),
 		"result_chars":  job.ResultChars,
+		"result_id":     job.ResultID,
 		"has_result":    job.ResultID != "",
 		"error_message": job.ErrorMessage,
 	}
@@ -170,59 +161,4 @@ func (t *InspectJobStatusTool) Execute(args json.RawMessage) (string, error) {
 		result["ui_summary"] = fmt.Sprintf("后台任务 %s 失败。", job.ID)
 	}
 	return marshalToolPayload(result)
-}
-
-// ReadJobOutputTool pages through a finished job's retained result.
-type ReadJobOutputTool struct{ Jobs *JobManager }
-
-func (t *ReadJobOutputTool) Name() string { return "job_output" }
-
-func (t *ReadJobOutputTool) Capability() tools.ToolCapability {
-	return tools.ToolCapability{Mode: "observe", RuntimeEnabled: true, Delegable: true}
-}
-
-func (t *ReadJobOutputTool) Description() string {
-	return "Read a window of a finished background job's result. Returns at most 6000 runes per call, with the total length and whether more remains. A job that is still running, failed, or did not retain a result reports that instead of content. Does not modify any state."
-}
-
-func (t *ReadJobOutputTool) Parameters() json.RawMessage {
-	return json.RawMessage(`{
-		"type": "object",
-		"additionalProperties": false,
-		"properties": {
-			"job_id": {"type": "string", "description": "The job id returned by job_submit."},
-			"offset": {"type": "integer", "minimum": 0, "description": "Rune offset into the result. Defaults to 0."},
-			"limit": {"type": "integer", "minimum": 1, "maximum": 6000, "description": "Maximum runes to return. Defaults to 6000."}
-		},
-		"required": ["job_id"]
-	}`)
-}
-
-func (t *ReadJobOutputTool) Execute(args json.RawMessage) (string, error) {
-	if t.Jobs == nil {
-		return "", fmt.Errorf("background jobs are not initialized")
-	}
-	var payload struct {
-		JobID  string `json:"job_id"`
-		Offset int    `json:"offset"`
-		Limit  int    `json:"limit"`
-	}
-	if err := jsoncontract.Decode(args, &payload); err != nil {
-		return "", fmt.Errorf("invalid arguments: %v", err)
-	}
-	content, job, total, err := t.Jobs.Output(payload.JobID, payload.Offset, payload.Limit)
-	if err != nil {
-		return "", err
-	}
-	return marshalToolPayload(map[string]interface{}{
-		"ok":          true,
-		"tool":        "job_output",
-		"job_id":      job.ID,
-		"job_tool":    job.Tool,
-		"content":     content,
-		"total_chars": total,
-		"offset":      payload.Offset,
-		"has_more":    payload.Offset+len([]rune(content)) < total,
-		"ui_summary":  fmt.Sprintf("已读取后台任务 %s 的结果片段。", job.ID),
-	})
 }

@@ -236,28 +236,6 @@ func (m *JobManager) Status(jobID string) (Job, error) {
 	return *job, nil
 }
 
-// Output returns a rune window of a finished job's stored result.
-func (m *JobManager) Output(jobID string, offset, limit int) (string, Job, int, error) {
-	job, err := m.Status(jobID)
-	if err != nil {
-		return "", Job{}, 0, err
-	}
-	if job.Status == JobStatusRunning {
-		return "", job, 0, fmt.Errorf("job %q is still running", jobID)
-	}
-	if job.Status == JobStatusFailed {
-		return "", job, 0, fmt.Errorf("job %q failed: %s", jobID, job.ErrorMessage)
-	}
-	if job.ResultID == "" {
-		return "", job, 0, fmt.Errorf("job %q did not retain a result", jobID)
-	}
-	content, total, readErr := readSpilledToolResult(job.ResultID, offset, limit)
-	if readErr != nil {
-		return "", job, 0, readErr
-	}
-	return content, job, total, nil
-}
-
 // evictLocked drops the oldest finished jobs once the retention bound is
 // exceeded. Running jobs are never dropped. The caller holds m.mu.
 func (m *JobManager) evictLocked() {

@@ -77,9 +77,10 @@ func TestJobRunsInBackgroundAndResultIsReadable(t *testing.T) {
 	if job.Status != JobStatusRunning {
 		t.Fatalf("submit must return immediately while the job runs, got %q", job.Status)
 	}
-	// Reading output before completion is a fact, not an empty success.
-	if _, _, _, err := manager.Output(job.ID, 0, 100); err == nil || !strings.Contains(err.Error(), "still running") {
-		t.Fatalf("expected a still-running error, got %v", err)
+	// A running job has no retained payload yet, which is itself the fact the
+	// model sees: there is nothing to read until it finishes.
+	if job.ResultID != "" {
+		t.Fatalf("a running job must not expose a payload id, got %q", job.ResultID)
 	}
 
 	finished := waitForJobStatus(t, manager, job.ID, JobStatusSucceeded)
@@ -87,9 +88,11 @@ func TestJobRunsInBackgroundAndResultIsReadable(t *testing.T) {
 		t.Fatalf("expected a retained result, got %#v", finished)
 	}
 
-	content, _, total, err := manager.Output(job.ID, 0, 100)
+	// The model reads the payload through the shared reader, by the id the
+	// status tool reports.
+	content, total, err := readSpilledToolResult(finished.ResultID, 0, 100)
 	if err != nil {
-		t.Fatalf("Output: %v", err)
+		t.Fatalf("read job payload: %v", err)
 	}
 	if !strings.HasPrefix(content, `{"ok":true`) {
 		t.Fatalf("unexpected content prefix %q", content)
@@ -102,9 +105,9 @@ func TestJobRunsInBackgroundAndResultIsReadable(t *testing.T) {
 	var assembled strings.Builder
 	offset := 0
 	for {
-		page, _, pageTotal, pageErr := manager.Output(job.ID, offset, 500)
+		page, pageTotal, pageErr := readSpilledToolResult(finished.ResultID, offset, 500)
 		if pageErr != nil {
-			t.Fatalf("Output page at %d: %v", offset, pageErr)
+			t.Fatalf("read job payload page at %d: %v", offset, pageErr)
 		}
 		assembled.WriteString(page)
 		offset += len([]rune(page))
@@ -163,9 +166,10 @@ func TestConcurrentJobsStayIndependent(t *testing.T) {
 	waitForJobStatus(t, manager, first.ID, JobStatusSucceeded)
 	waitForJobStatus(t, manager, second.ID, JobStatusSucceeded)
 
-	content, _, _, err := manager.Output(first.ID, 0, 500)
+	firstJob := waitForJobStatus(t, manager, first.ID, JobStatusSucceeded)
+	content, _, err := readSpilledToolResult(firstJob.ResultID, 0, 500)
 	if err != nil {
-		t.Fatalf("Output first: %v", err)
+		t.Fatalf("read first job payload: %v", err)
 	}
 	if !strings.Contains(content, "first") {
 		t.Fatalf("unexpected first job content %q", content)
@@ -192,8 +196,8 @@ func TestFailedJobReportsFailure(t *testing.T) {
 	if finished.ErrorMessage == "" {
 		t.Fatalf("a failed job must carry its failure reason")
 	}
-	if _, _, _, err := manager.Output(job.ID, 0, 100); err == nil {
-		t.Fatalf("a failed job must not yield output")
+	if finished.ResultID != "" {
+		t.Fatalf("a failed job must not retain a payload, got %q", finished.ResultID)
 	}
 }
 
@@ -215,7 +219,7 @@ func TestJobToolsAreRegisteredAndContractShaped(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.LoadGlobalTools(tools.ToolContext{Jobs: NewJobManager()})
 
-	for _, name := range []string{"job_submit", "job_status", "job_output"} {
+	for _, name := range []string{"job_submit", "state_job_inspect"} {
 		tool, err := registry.Get(name)
 		if err != nil {
 			t.Fatalf("expected %s to be registered: %v", name, err)
@@ -264,7 +268,7 @@ func TestCompletedJobIsAnnouncedOnceAsRuntimeFact(t *testing.T) {
 }
 
 // The engine carries the notice on the request it builds, so the model sees the
-// completion without calling job_status.
+// completion without polling for it.
 func TestEngineInjectsJobCompletionIntoRuntimeContext(t *testing.T) {
 	manager := newJobTestManager(t, &jobTestTool{name: "code_run_python", delay: 10 * time.Millisecond, body: "done"})
 
