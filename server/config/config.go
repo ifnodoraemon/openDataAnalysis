@@ -51,19 +51,23 @@ type Config struct {
 	LLMDebugDir           string
 
 	// 服务配置
-	ServerPort                 string
-	DeploymentMode             string
-	AllowedOrigins             []string
-	MetadataStore              string
-	StorageProvider            string
-	RunBackend                 string
-	AnalysisStore              string
-	PythonArtifactStore        string
-	StorageRoot                string
-	CacheRoot                  string
-	MetadataDBPath             string
-	TempDir                    string
-	PythonMCPURL               string
+	ServerPort          string
+	DeploymentMode      string
+	AllowedOrigins      []string
+	MetadataStore       string
+	StorageProvider     string
+	RunBackend          string
+	AnalysisStore       string
+	PythonArtifactStore string
+	StorageRoot         string
+	CacheRoot           string
+	MetadataDBPath      string
+	TempDir             string
+	PythonMCPURL        string
+	// RenderExecutorURL points at the headless capture service, and
+	// RenderAssetBaseURL is the origin its report assets resolve against.
+	RenderExecutorURL          string
+	RenderAssetBaseURL         string
 	PythonMaxTimeoutSec        int
 	ProxyToken                 string
 	PublicAPIBaseURL           string
@@ -153,6 +157,8 @@ func Load() {
 		MetadataDBPath:             getEnv("METADATA_DB_PATH", "./data/metadata/app.db"),
 		TempDir:                    getEnv("TEMP_DIR", "./data/tmp"),
 		PythonMCPURL:               getEnv("PYTHON_MCP_URL", "http://python-executor:8081"),
+		RenderExecutorURL:          getEnv("RENDER_EXECUTOR_URL", "http://render-executor:8082"),
+		RenderAssetBaseURL:         getEnv("RENDER_ASSET_BASE_URL", ""),
 		PythonMaxTimeoutSec:        getEnvInt("PYTHON_MAX_TIMEOUT_SECONDS", 120),
 		ProxyToken:                 getEnv("PROXY_TOKEN", ""),
 		PublicAPIBaseURL:           getEnv("PUBLIC_API_BASE_URL", ""),
@@ -243,12 +249,14 @@ func (c *Config) ValidateProductionReadiness() error {
 		}
 	}
 	for field, value := range map[string]string{
-		"LLM_REASONING_EFFORT": c.LLMReasoningEffort,
-		"LLM_TEXT_VERBOSITY":   c.LLMTextVerbosity,
-		"PYTHON_MCP_URL":       c.PythonMCPURL,
-		"PROXY_TOKEN":          c.ProxyToken,
-		"PUBLIC_API_BASE_URL":  c.PublicAPIBaseURL,
-		"REPORT_ECHARTS_URL":   c.ReportEchartsUrl,
+		"LLM_REASONING_EFFORT":  c.LLMReasoningEffort,
+		"LLM_TEXT_VERBOSITY":    c.LLMTextVerbosity,
+		"PYTHON_MCP_URL":        c.PythonMCPURL,
+		"RENDER_EXECUTOR_URL":   c.RenderExecutorURL,
+		"RENDER_ASSET_BASE_URL": c.RenderAssetBaseURL,
+		"PROXY_TOKEN":           c.ProxyToken,
+		"PUBLIC_API_BASE_URL":   c.PublicAPIBaseURL,
+		"REPORT_ECHARTS_URL":    c.ReportEchartsUrl,
 	} {
 		if err := validateExactConfigValue(field, value, false); err != nil {
 			return err

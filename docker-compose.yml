@@ -64,6 +64,11 @@ services:
       # PROXY_TOKEN must match the python-executor; set it once in the root .env
       # so both services share the same value.
       PROXY_TOKEN: ${PROXY_TOKEN:?set PROXY_TOKEN in .env at the repo root (see .env.example)}
+      # Headless capture service for report views. The asset origin is what the
+      # captured page loads ECharts and KaTeX from; it must be reachable from the
+      # render-executor container, which is why the client joins its network.
+      RENDER_EXECUTOR_URL: http://render-executor:8082
+      RENDER_ASSET_BASE_URL: ${RENDER_ASSET_BASE_URL:-http://client:8080/}
       # The nginx proxy lives inside the compose bridge network below; trusting
       # that subnet makes per-client rate limiting work behind the proxy.
       TRUSTED_PROXY_CIDRS: 172.28.0.0/16
@@ -77,6 +82,8 @@ services:
       - executor-network
     depends_on:
       python-executor:
+        condition: service_healthy
+      render-executor:
         condition: service_healthy
       postgres:
         condition: service_healthy
@@ -132,6 +139,39 @@ services:
       - /app/.local
       - /app/.cache
 
+  render-executor:
+    build: ./render-executor
+    container_name: data-analysis-render
+    restart: unless-stopped
+    environment:
+      PROXY_TOKEN: ${PROXY_TOKEN:?set PROXY_TOKEN in .env at the repo root (see .env.example)}
+      PORT: 8082
+      MAX_CONCURRENT_CAPTURES: ${RENDER_MAX_CONCURRENT:-2}
+      CAPTURE_TIMEOUT_MS: ${RENDER_CAPTURE_TIMEOUT_MS:-8000}
+    # Only the capture service sits on executor-network. It needs no route to
+    # postgres, minio, or the internet: the report HTML is handed to it in the
+    # request, and it is allowed to load subresources from the asset origin only.
+    networks:
+      - executor-network
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 256
+    cpus: 2.0
+    shm_size: 512m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8082/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+
   client:
     build: ./client
     container_name: data-analysis-client
@@ -140,6 +180,10 @@ services:
       - "80:8080"
     networks:
       - app-network
+      # Also on the executor network so the capture service can fetch /assets from
+      # this origin. nginx stays a static/proxy front end; the data stores do not
+      # join this network.
+      - executor-network
     depends_on:
       server:
         condition: service_healthy

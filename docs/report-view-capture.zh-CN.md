@@ -252,11 +252,16 @@ POST /capture
     "atomic": [{"tag": "div", "y": 9303, "h": 450}]
   },
   "render_facts": {
-    "fonts": "loaded",
-    "charts": [{"id": "cht_demand", "mounted": true, "canvas_w": 720, "canvas_h": 448, "pixels_settled": true}],
+    "scroll": {"w": 1200, "h": 23276},
+    "overflow_x": false,
+    "charts": [{"id": "cht_demand", "mounted": true, "canvas_w": 724, "canvas_h": 450}],
+    "charts_missing": [],
     "katex_errors": 0,
     "images_failed": [],
-    "overflow_x": false
+    "blocked_requests": [],
+    "page_errors": [],
+    "scroll_settled": true,
+    "readiness_samples": 9
   },
   "settle_ms": 823,
   "capture_ms": 3486
@@ -573,3 +578,68 @@ testdata/report-sanitize-cases.json        ← 单一事实来源
   正确做法是自托管 woff2 并在两侧同时放行同源 `url()`，而不是重新加回 CDN `@import`。
 - `config.ReportEchartsUrl` 若被配置成 CDN 地址，净化会把该脚本剥掉（只允许同源相对路径）。
   部署时需要保持同源，否则图表不会渲染。
+
+## 13. 捕获服务与 Go 侧接入（P2b-2，已落地）
+
+### 服务形态
+
+`render-executor/` 是一个 Node 服务，直接复用 §10 探针验证过的捕获逻辑
+（就绪判定、整页截图、矩形提取），不重写最难的那部分。
+镜像基于 `zenika/alpine-chrome:with-puppeteer`，Chromium 版本与探针一致。
+
+Go 侧新增 `server/render/`：客户端（HTTP + `PROXY_TOKEN`）、切片规划器、
+裁剪器、切片缓存、视图构建器。
+
+### 关键取舍
+
+- **整页一次截图 + Go 裁剪**，不是逐块 clip。§10 已证明两者逐像素等价，
+  而逐块慢约 7 倍。
+- **`render_facts` 不含矩形**。矩形走 `rects`，事实里只放"渲染得对不对"。
+  实测一开始把 62 条 atomic 矩形塞进了 facts，每轮 prompt 白多 4KB 文本；
+  修掉后 facts 从约 4KB 降到 **660 字节**。
+- **裁剪用 `draw.Draw` 而不是类型断言**。`png.Decode` 对截图返回 NRGBA，
+  断言 `*image.RGBA` 会 panic。
+- **裁剪结果按切片身份对齐，不按下标**。`CropSlices` 会跳过退化切片，
+  按下标取会把图错配到别的块（写测试时抓到的真实 bug）。
+- **缓存键 = 版本 + 块 id + 分片 + 高度 + 视口 + 块内容 hash**。
+  只有块内容 hash 能让"只重截脏块"成立；版本号单独做键会让每次修改整份失效。
+
+### 安全
+
+- 请求拦截：页面只允许加载 `data:` / `blob:` / 资产源，其余一律 abort 并记入
+  `blocked_requests`。实测外部脚本与像素被阻断，同源缺失资源记为 `images_failed`。
+- 容器只挂 `executor-network` 且无互联网出口；`cap_drop: ALL`、只读根文件系统、
+  `no-new-privileges`、`PROXY_TOKEN` 常量时间比较。
+- 输入是服务端已净化的 HTML（§12），执行器仍按不可信内容对待。
+
+### 实测（真实报告，1200 宽，960 切片）
+
+| 指标 | 数值 |
+| --- | --- |
+| 整页截图 | 1200×23276，4.1MB PNG |
+| 切片 | 29 张，合计 3.5MB |
+| 捕获耗时 | 4.5–5.3s（其中稳定 1.9s、截图 2.8s） |
+| 裁剪耗时 | 约 0.7s（第二次命中缓存后省掉） |
+| facts 体积 | 660 字节 |
+| 图表 | 6/6 mounted，`charts_missing` 空 |
+| 视图产物 | 2 个 runtime block、29 张图 |
+
+**捕获本身是主导成本，裁剪和缓存只是零头。** 所以异步 job 是必需的（§5.4），
+缓存的作用是省掉解码重编码，不是省掉等待。
+
+### 降级
+
+| 情况 | 行为 |
+| --- | --- |
+| 未配置执行器 | `facts={"ok":false,"reason":"capture_not_configured"}` |
+| 捕获失败/超时 | `facts={"ok":false,"reason":"capture_failed",...}`，无图 |
+| 裁剪失败 | `facts={"ok":false,"reason":"crop_failed",...}`，无图 |
+| 某个切片无法产出 | 记入 `not_captured`，其余照常发送 |
+
+任何情况下 run 都不会因为捕获失败而中断，模型拿到的是"这次没有视图，原因是什么"。
+
+### 仍未接线
+
+`Engine.SetReportViewProvider` 还没有接上真实数据源。接线需要会话生命周期配合：
+异步 job 触发捕获、按 `MutationVersion` 去重、finalize 前强制全量、缓存句柄随 run 存活。
+这是下一步（P3 的一部分）。

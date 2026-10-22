@@ -87,7 +87,9 @@ func (v *ReportView) RuntimeContextBlocks() []RuntimeContextBlock {
 		return nil
 	}
 	slices := v.usableSlices()
-	if len(slices) == 0 && len(v.NotCaptured) == 0 {
+	// Facts-only views are legitimate: a capture that failed still has something
+	// worth telling the model, which is the point of the facts channel.
+	if len(slices) == 0 && len(v.NotCaptured) == 0 && len(v.Facts) == 0 {
 		return nil
 	}
 
