@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"math"
 	"unicode/utf8"
 
 	"github.com/ifnodoraemon/openDataAnalysis/config"
@@ -16,7 +17,50 @@ const (
 	// promptMessageOverheadTokens approximates the per-message framing cost that
 	// providers add on top of the message text.
 	promptMessageOverheadTokens = 4
+	// Vision encoders resize input before charging for it: a long edge above
+	// 1568px is scaled down, and a per-image pixel budget applies on top. Pricing
+	// an image by its raw area overstates the cost of anything above those caps,
+	// which would make compaction fire early and lose history for nothing.
+	// These are the Anthropic-style defaults; they belong to the deployed model
+	// and can become configuration alongside contextWindowTokens.
+	providerImageLongEdge  = 1568.0
+	providerImageMaxPixels = 1150000.0
+	imageTokensPerPixel    = 750.0
 )
+
+// estimateImageTokens approximates what one image costs after the provider's
+// resize step, not its raw pixel count.
+func estimateImageTokens(width, height int) int {
+	if width <= 0 || height <= 0 {
+		return 0
+	}
+	w, h := float64(width), float64(height)
+	if scale := providerImageLongEdge / math.Max(w, h); scale < 1 {
+		w *= scale
+		h *= scale
+	}
+	if area := w * h; area > providerImageMaxPixels {
+		scale := math.Sqrt(providerImageMaxPixels / area)
+		w *= scale
+		h *= scale
+	}
+	return int(math.Ceil(w * h / imageTokensPerPixel))
+}
+
+// estimatePartsTokens prices a multimodal payload. Text parts go through the
+// text estimator; image parts are priced after provider resize.
+func estimatePartsTokens(parts []MessagePart) int {
+	total := 0
+	for _, part := range parts {
+		switch part.Kind {
+		case MessagePartImage:
+			total += estimateImageTokens(part.W, part.H)
+		default:
+			total += estimateTextTokens(part.Text)
+		}
+	}
+	return total
+}
 
 // contextWindowTokens returns the configured model context window. The window
 // belongs to the deployed model, not to the runtime, so it is configuration
@@ -66,9 +110,13 @@ func EstimatePromptTokens(bundle *PromptBundle, toolSpecs []tools.ToolSpec) int 
 	total := estimateTextTokens(bundle.Policy) + estimateTextTokens(bundle.PolicyAppendix) + estimateTextTokens(bundle.Task)
 	for _, block := range bundle.RuntimeContext {
 		total += promptMessageOverheadTokens + estimateTextTokens(block.Name) + estimateTextTokens(block.Content)
+		// Images ride the same block; pricing them here is what keeps compaction
+		// honest once report views start entering the prompt.
+		total += estimatePartsTokens(block.Parts)
 	}
 	for _, item := range bundle.History {
 		total += promptMessageOverheadTokens + estimateTextTokens(item.Content)
+		total += estimatePartsTokens(item.Parts)
 		// Reasoning text is replayed to providers that accept it, so it is part
 		// of the prompt footprint.
 		total += estimateTextTokens(item.ReasoningContent)

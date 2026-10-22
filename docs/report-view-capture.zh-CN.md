@@ -180,42 +180,46 @@ sha256( block_html ‖ chart_option ‖ layout_css ‖ body_class
 
 ## 5. 接口
 
-### 5.1 agent 侧类型
+### 5.1 agent 侧类型（已落地）
 
 ```go
 type MessagePart struct {
-    Kind string // "text" | "image"
+    Kind string // MessagePartText | MessagePartImage
     Text string
-    MIME string // "image/png"
+    MIME string // image/png | image/jpeg | image/webp
     Data []byte // 仅图片
     W, H int
 }
-
-type ConversationItem struct {
-    // ... 既有字段保持不变
-    Parts []MessagePart
-}
-
-type RuntimeContextBlock struct {
-    Name    string
-    Role    string
-    Content string
-    Parts   []MessagePart // 与 Content 互斥：Parts 非空时以 Parts 为准
-}
 ```
 
-约束：`Content` 保持存在，通道不变；`Parts` 是叠加能力，避免一次性改动全链路。
+`ConversationItem` 与 `RuntimeContextBlock` 各加 `Parts []MessagePart`。
 
-### 5.2 LLM adapter 映射
+语义要点：**`Parts` 是叠加，不是替换**。`payloadParts(text, parts)` 把 `Content`
+作为首个 text part 放在图片之前，模型先读到"这是什么"，再看到图。
+`Parts` 为空时序列化结果与改造前逐字节一致，由
+`TestTextOnlyRequestsKeepTheirWireFormat` 守住——否则等于悄悄改掉所有历史请求。
+
+载荷上限（防止生产端 bug 变成网关拒绝的巨额账单）：单条 32 个 part、24 张图、
+单图 5MiB、单边 4096px。非法 MIME/尺寸在 `validatePromptBundle` 阶段就被拒绝，
+不会等整个 prompt 发完才失败。
+
+### 5.2 LLM adapter 映射（已落地）
 
 | adapter | 位置 | 映射 |
 | --- | --- | --- |
-| OpenAI responses | `llm.go` chatOpenAI | `{"type":"input_image","image_url":"data:image/png;base64,..."}` |
-| OpenAI chat_completions | `llm.go:646` | `{"type":"image_url","image_url":{"url":"data:..."}}` |
-| Anthropic | `llm.go:1073` buildAnthropicMessages | `anthropic.NewImageMessageContent(base64, "png")` |
-| Gemini | `llm_google.go:31` geminiPart | `inlineData{mimeType, data}` |
+| OpenAI responses | `llm.go` `responsesContent` | `{"type":"input_image","image_url":"data:image/png;base64,..."}` |
+| OpenAI chat_completions | `llm.go` `chatCompletionMessage.MarshalJSON` | `{"type":"image_url","image_url":{"url":"data:..."}}` |
+| Anthropic | `llm.go` `anthropicParts` | `{"type":"image","source":{"type":"base64","media_type":"image/png",...}}` |
+| Gemini | `llm_google.go` `geminiParts` | `{"inlineData":{"mimeType":"image/png","data":"..."}}` |
 
-四个适配点都要有单测；无图片时序列化结果必须与现在逐字节一致，避免回归。
+两个实现细节值得记下来：
+
+- chat_completions 的 `content` 纯文本时是字符串、带图时是数组。用自定义
+  `MarshalJSON` 切换，而不是把字段改成 `any`——后者会让 `omitempty` 失效，
+  空字符串被序列化成 `"content":""`，改动所有无图请求。
+- 四个适配点都有单测，断言的是**精确 wire JSON**（例如
+  `{"role":"user","content":[{"type":"text","text":"view"},{"type":"image_url",...}]}`），
+  不是"包含某字段"。多模态映射最容易错在结构层次，而不是字段存在性。
 
 ### 5.3 render-executor HTTP
 
@@ -281,10 +285,10 @@ provider 画像重新规划切片，不需要重启浏览器。
 | `server/tools/report_sanitize.go`（已落地，§12） | 文档级输出净化 + `RenderSafeReportHTML` 唯一出口 | 中 |
 | `testdata/report-sanitize-cases.json`（已落地，§12） | Go / JS 共用的净化断言语料 | 低 |
 | `server/handler/{runtime_events,run}.go`（已落地，§12） | 三处输出边界改走 `RenderSafeReportHTML` | 低 |
-| `server/agent/prompt_bundle.go` | 新增 `MessagePart`，扩展两个类型，更新 `validatePromptBundle` | 中 |
-| `server/agent/tokens.go` | `EstimatePromptTokens` 计入图片 | 中，影响压缩触发点 |
-| `server/agent/llm.go` | 三处 adapter 图片映射 | 中 |
-| `server/agent/llm_google.go` | geminiPart inlineData | 低 |
+| `server/agent/prompt_bundle.go`（已落地） | `MessagePart` + `Parts` 字段 + 载荷上限校验 | 中 |
+| `server/agent/tokens.go`（已落地） | 按 provider 降采样后像素计价 | 中，影响压缩触发点 |
+| `server/agent/llm.go`（已落地） | responses / chat_completions / anthropic 三处映射 | 中 |
+| `server/agent/llm_google.go`（已落地） | `geminiPart.InlineData` | 低 |
 | `server/agent/compaction.go` | 视图槽位追加到 bundle 末尾 | 低 |
 | `server/agent/bundle` 调用方 | 注入 `report_view` block | 中 |
 | `server/render/`（新增） | 捕获客户端、缓存、脏块判定、降级 | 中高 |
@@ -317,10 +321,21 @@ provider 画像重新规划切片，不需要重启浏览器。
 - 捕获页必须带报告页 CSP 与 sanitizer（§11 安全发现），否则不予上线。
 
 
-### P2：注入链路（a 生效）
+### P2a：类型与 adapter（已落地）
 
-- `MessagePart` + 四个 adapter + 视图槽位 + 缓存 + token 计价。
-- 验收：单测覆盖"无图时序列化不变"；一次报告 run 中模型能引用截图中可见的版式问题；
+- `MessagePart` + 两个类型的 `Parts` 字段 + 载荷上限校验。
+- 四个 adapter 映射 + 精确 wire JSON 断言 + 无图序列化逐字节回归。
+- `EstimatePromptTokens` 按 provider 降采样后的像素计价。
+
+验收（已达成）：无图请求 wire 格式不变（`TestTextOnlyRequestsKeepTheirWireFormat`）；
+1200×960 切片计价 1534 token（不是原始面积的 1536/2400）；
+非法载荷在 bundle 校验阶段被拒。
+
+### P2b：注入链路（待做）
+
+- 捕获结果作为 `report_view` runtime context block 注入（§4），带版本戳。
+- 缓存 + 脏块增量 + 异步 job（§5.4）。
+- 验收：一次报告 run 中模型能引用截图中可见的版式问题；
   图片 token 计入后压缩触发点符合预期。
 
 ### P3：增量与手动 b

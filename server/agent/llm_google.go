@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,9 +31,15 @@ type geminiContent struct {
 
 type geminiPart struct {
 	Text             string                  `json:"text,omitempty"`
+	InlineData       *geminiInlineData       `json:"inlineData,omitempty"`
 	FunctionCall     *geminiFunctionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *geminiFunctionResponse `json:"functionResponse,omitempty"`
 	ThoughtSignature string                  `json:"thoughtSignature,omitempty"`
+}
+
+type geminiInlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
 }
 
 type geminiFunctionCall struct {
@@ -92,13 +99,16 @@ func (l *LLMClient) chatGoogle(ctx context.Context, bundle *PromptBundle, toolSp
 	// the OpenAI/Anthropic providers, so continuation turns cannot produce
 	// consecutive user-role contents.
 	for _, c := range bundle.RuntimeContext {
-		req.Contents = append(req.Contents, geminiContent{Role: "user", Parts: []geminiPart{{Text: fmt.Sprintf("[runtime_context role=%s name=%s]\n%s", runtimeContextTransportRole(c), c.Name, c.Content)}}})
+		req.Contents = append(req.Contents, geminiContent{
+			Role:  "user",
+			Parts: geminiParts(fmt.Sprintf("[runtime_context role=%s name=%s]\n%s", runtimeContextTransportRole(c), c.Name, c.Content), c.Parts),
+		})
 	}
 	for _, h := range bundle.History {
 		if h.Role == LLMRoleUser {
 			req.Contents = append(req.Contents, geminiContent{
 				Role:  "user",
-				Parts: []geminiPart{{Text: h.Content}},
+				Parts: geminiParts(h.Content, h.Parts),
 			})
 		} else if h.Role == LLMRoleAssistant {
 			parts := make([]geminiPart, 0, len(h.ToolCalls)+1)
@@ -279,4 +289,22 @@ func googleGenerateContentEndpoint(model string) (string, error) {
 		return "", fmt.Errorf("LLM_API_ENDPOINT must not carry the API key in a query parameter; use the LLM_API_KEY config instead")
 	}
 	return parsed.String(), nil
+}
+
+// geminiParts renders one payload unit as Gemini parts. Images travel inline so
+// the request stays a single round trip.
+func geminiParts(text string, parts []MessagePart) []geminiPart {
+	payload := payloadParts(text, parts)
+	out := make([]geminiPart, 0, len(payload))
+	for _, part := range payload {
+		if part.Kind == MessagePartImage {
+			out = append(out, geminiPart{InlineData: &geminiInlineData{
+				MimeType: part.MIME,
+				Data:     base64.StdEncoding.EncodeToString(part.Data),
+			}})
+			continue
+		}
+		out = append(out, geminiPart{Text: part.Text})
+	}
+	return out
 }

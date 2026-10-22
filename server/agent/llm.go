@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -400,6 +401,46 @@ type chatCompletionMessage struct {
 	ReasoningContent string                   `json:"reasoning_content,omitempty"`
 	ToolCalls        []chatCompletionToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string                   `json:"tool_call_id,omitempty"`
+	Parts            []MessagePart            `json:"-"`
+}
+
+// chatCompletionContentPart is the array form of a message body, used only when
+// images travel with the text. The string form stays the default so every
+// text-only request serializes exactly as before.
+type chatCompletionContentPart struct {
+	Type     string                     `json:"type"`
+	Text     string                     `json:"text,omitempty"`
+	ImageURL *chatCompletionImageURLRef `json:"image_url,omitempty"`
+}
+
+type chatCompletionImageURLRef struct {
+	URL string `json:"url"`
+}
+
+func (m chatCompletionMessage) MarshalJSON() ([]byte, error) {
+	if len(m.Parts) == 0 {
+		type plain chatCompletionMessage
+		return json.Marshal(plain(m))
+	}
+	payload := payloadParts(m.Content, m.Parts)
+	content := make([]chatCompletionContentPart, 0, len(payload))
+	for _, part := range payload {
+		if part.Kind == MessagePartImage {
+			content = append(content, chatCompletionContentPart{
+				Type:     "image_url",
+				ImageURL: &chatCompletionImageURLRef{URL: imageDataURI(part)},
+			})
+			continue
+		}
+		content = append(content, chatCompletionContentPart{Type: "text", Text: part.Text})
+	}
+	return json.Marshal(struct {
+		Role             string                      `json:"role"`
+		Content          []chatCompletionContentPart `json:"content"`
+		ReasoningContent string                      `json:"reasoning_content,omitempty"`
+		ToolCalls        []chatCompletionToolCall    `json:"tool_calls,omitempty"`
+		ToolCallID       string                      `json:"tool_call_id,omitempty"`
+	}{m.Role, content, m.ReasoningContent, m.ToolCalls, m.ToolCallID})
 }
 
 type chatCompletionToolCall struct {
@@ -585,7 +626,7 @@ func (l *LLMClient) buildResponsesRequest(bundle *PromptBundle, toolSpecs []tool
 	for _, block := range bundle.RuntimeContext {
 		req.Input = append(req.Input, responsesInput{
 			"role":    responsesRuntimeContextRole(block),
-			"content": fmt.Sprintf("[runtime_context role=%s name=%s]\n%s", runtimeContextTransportRole(block), block.Name, block.Content),
+			"content": responsesContent(fmt.Sprintf("[runtime_context role=%s name=%s]\n%s", runtimeContextTransportRole(block), block.Name, block.Content), block.Parts),
 		})
 	}
 
@@ -594,7 +635,7 @@ func (l *LLMClient) buildResponsesRequest(bundle *PromptBundle, toolSpecs []tool
 		case LLMRoleUser:
 			req.Input = append(req.Input, responsesInput{
 				"role":    "user",
-				"content": msg.Content,
+				"content": responsesContent(msg.Content, msg.Parts),
 			})
 		case LLMRoleAssistant:
 			if strings.TrimSpace(msg.Content) != "" {
@@ -824,6 +865,7 @@ func (l *LLMClient) buildChatCompletionsRequest(bundle *PromptBundle, toolSpecs 
 		req.Messages = append(req.Messages, chatCompletionMessage{
 			Role:    LLMRoleUser,
 			Content: fmt.Sprintf("[runtime_context role=%s name=%s]\n%s", runtimeContextTransportRole(block), block.Name, block.Content),
+			Parts:   block.Parts,
 		})
 	}
 	for _, msg := range bundle.History {
@@ -832,6 +874,7 @@ func (l *LLMClient) buildChatCompletionsRequest(bundle *PromptBundle, toolSpecs 
 			req.Messages = append(req.Messages, chatCompletionMessage{
 				Role:    LLMRoleUser,
 				Content: msg.Content,
+				Parts:   msg.Parts,
 			})
 		case LLMRoleAssistant:
 			assistantMsg := chatCompletionMessage{
@@ -1085,15 +1128,16 @@ func buildAnthropicMessages(bundle *PromptBundle) []anthropic.Message {
 	}
 
 	for _, block := range bundle.RuntimeContext {
-		currentUserContent = append(currentUserContent, anthropic.NewTextMessageContent(
+		currentUserContent = append(currentUserContent, anthropicParts(
 			fmt.Sprintf("[runtime_context role=%s name=%s]\n%s", LLMRoleUser, block.Name, block.Content),
-		))
+			block.Parts,
+		)...)
 	}
 
 	for _, msg := range bundle.History {
 		switch msg.Role {
 		case LLMRoleUser:
-			currentUserContent = append(currentUserContent, anthropic.NewTextMessageContent(msg.Content))
+			currentUserContent = append(currentUserContent, anthropicParts(msg.Content, msg.Parts)...)
 		case LLMRoleAssistant:
 			flushUserContent()
 			var content []anthropic.MessageContent
@@ -1274,4 +1318,46 @@ func (l *LLMClient) convertAnthropicResponse(resp *anthropic.MessagesResponse) (
 			TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
 		},
 	}, nil
+}
+
+// responsesContent renders one payload unit: a plain string when the unit is
+// text-only, or the Responses API content array when images are attached.
+func responsesContent(text string, parts []MessagePart) interface{} {
+	if len(parts) == 0 {
+		return text
+	}
+	payload := payloadParts(text, parts)
+	content := make([]responsesInput, 0, len(payload))
+	for _, part := range payload {
+		if part.Kind == MessagePartImage {
+			content = append(content, responsesInput{"type": "input_image", "image_url": imageDataURI(part)})
+			continue
+		}
+		content = append(content, responsesInput{"type": "input_text", "text": part.Text})
+	}
+	return content
+}
+
+// anthropicParts renders one payload unit as Anthropic content blocks.
+func anthropicParts(text string, parts []MessagePart) []anthropic.MessageContent {
+	payload := payloadParts(text, parts)
+	content := make([]anthropic.MessageContent, 0, len(payload))
+	for _, part := range payload {
+		if part.Kind == MessagePartImage {
+			source := anthropic.NewMessageContentSource(
+				anthropic.MessagesContentSourceTypeBase64,
+				part.MIME,
+				base64.StdEncoding.EncodeToString(part.Data),
+			)
+			content = append(content, anthropic.NewImageMessageContent(source))
+			continue
+		}
+		content = append(content, anthropic.NewTextMessageContent(part.Text))
+	}
+	return content
+}
+
+// imageDataURI is the inline form every provider accepts without a second fetch.
+func imageDataURI(part MessagePart) string {
+	return "data:" + part.MIME + ";base64," + base64.StdEncoding.EncodeToString(part.Data)
 }
