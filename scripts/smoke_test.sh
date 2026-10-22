@@ -177,7 +177,15 @@ export -f run_one scenario_timeout
 export ROOT_DIR SCRIPT_DIR BASE_URL TIMEOUT RUNS_DIR
 
 echo "并行度：$JOBS，每个场景重复 $REPEAT 次，共 $(( ${#SCENARIOS[@]} * REPEAT )) 次运行"
-echo ""
+if [ "$JOBS" -gt 1 ]; then
+    cat <<'WARN'
+⚠️ 并行运行共享同一个 workspace：上传文件是 workspace 级状态，并行时每个场景都会
+   看到其它场景刚上传的文件（实测出现过"450 个待导入的上传文件"）。这会让场景互相
+   污染，不稳定率显著上升（串行 11/30 → 并行 19/30）。
+   并行只适合做快速冒烟；**正式基线请用 --jobs 1**，除非已实现按 run 隔离工作区。
+WARN
+    echo ""
+fi
 
 if [ "$JOBS" -le 1 ]; then
     while read -r sid attempt; do run_one "$sid" "$attempt"; done < <(printf "$task_args")
