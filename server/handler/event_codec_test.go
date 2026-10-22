@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -221,5 +222,56 @@ func TestRunMessageToRuntimeEventRejectsMalformedJSONPayload(t *testing.T) {
 	_, err := runMessageToRuntimeEvent(domain.RunMessage{Type: string(agent.EventUserRequestInput), Content: "not-json"})
 	if err == nil {
 		t.Fatalf("expected a malformed payload to be rejected")
+	}
+}
+
+// A tool call whose arguments the model emitted malformed is still a real
+// event: the call happened and was answered with a structured failure. Logging
+// it must not fail — a json.RawMessage holding invalid JSON cannot be
+// marshalled, so the encoder stores a placeholder instead.
+func TestEventPersistsMalformedToolCallArguments(t *testing.T) {
+	store, err := metadata.Open(filepath.Join(t.TempDir(), "metadata.db"))
+	if err != nil {
+		t.Fatalf("open metadata: %v", err)
+	}
+	t.Cleanup(func() { _ = store.DB.Close() })
+
+	previousRepo := messageRepo
+	t.Cleanup(func() { messageRepo = previousRepo })
+	messageRepo = sqliterepo.NewMessageRepository(store.DB)
+
+	now := time.Now()
+	for _, stmt := range []struct {
+		q    string
+		args []interface{}
+	}{
+		{`INSERT INTO users (id, email, password_hash, name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			[]interface{}{"u_1", "u@example.com", "h", "U", "active", now, now}},
+		{`INSERT INTO workspaces (id, name, slug, owner_user_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			[]interface{}{"ws_1", "WS", "ws", "u_1", "active", now, now}},
+		{`INSERT INTO sessions (id, workspace_id, user_id, title, status, created_at, updated_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			[]interface{}{"s_1", "ws_1", "u_1", "S", "active", now, now, now}},
+		{`INSERT INTO analysis_runs (id, session_id, workspace_id, user_id, run_kind, status, input_message, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			[]interface{}{"r_1", "s_1", "ws_1", "u_1", "root", "running", "t", now, now}},
+	} {
+		if _, err := store.DB.Exec(stmt.q, stmt.args...); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	event := agent.RuntimeEvent{
+		Type: agent.EventToolCall,
+		Data: agent.ToolCallData{
+			ID:        "call_bad",
+			Name:      "data_query_sql",
+			Arguments: json.RawMessage(`{"sql":"select 1" "extra":}`),
+		},
+	}
+	row, err := saveEventToDBSync("ws_1", "s_1", "r_1", event, time.Now())
+	if err != nil {
+		t.Fatalf("persisting a malformed call must not fail the run: %v", err)
+	}
+	if !strings.Contains(row.Content, "invalid_arguments") {
+		t.Fatalf("expected the raw arguments to be recorded as a placeholder, got %q", row.Content)
 	}
 }

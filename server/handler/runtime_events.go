@@ -533,9 +533,24 @@ func saveEventToDBSync(workspaceID, sessionID, runID string, ev agent.RuntimeEve
 			id := data.ID
 			msg.ToolCallID = &id
 		}
+		// Arguments the model emitted malformed are kept as a placeholder. The
+		// call itself is already answered with a structured failure, so the log
+		// must record what happened instead of failing the whole run — a
+		// json.RawMessage holding invalid JSON cannot be marshalled.
 		argsBytes, err := json.Marshal(data.Arguments)
 		if err != nil {
-			return nil, fmt.Errorf("encode tool-call arguments: %w", err)
+			raw := fmt.Sprintf("%v", data.Arguments)
+			if rawMsg, ok := data.Arguments.(json.RawMessage); ok {
+				raw = string(rawMsg)
+			}
+			placeholder, marshalErr := json.Marshal(map[string]string{
+				"invalid_arguments": raw,
+				"encode_error":      err.Error(),
+			})
+			if marshalErr != nil {
+				return nil, fmt.Errorf("encode invalid tool-call arguments: %w", marshalErr)
+			}
+			argsBytes = placeholder
 		}
 		msg.Content = string(argsBytes)
 	case agent.ToolResultData:
