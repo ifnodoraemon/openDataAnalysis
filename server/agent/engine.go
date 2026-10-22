@@ -115,16 +115,19 @@ func isRetryableToolError(err error) bool {
 	return isTransientTransportError(err)
 }
 
-// maxMainLoopIterations bounds one agent turn. A configured zero means "use the
-// default"; the value belongs to the deployment, not to the code.
-func maxMainLoopIterations() int {
+// maxMainLoopIterations bounds one agent turn, or reports that it is unlimited.
+//
+// The bound belongs to the deployment, not to the code: a research task and a
+// quick lookup do not deserve the same budget. Zero (the default) means "no
+// limit". Deterministic loops are still stopped by the repeated-failure guard;
+// a model that keeps making different ineffective calls is the deployer's
+// problem to bound, because only they know what a turn costs.
+func maxMainLoopIterations() (int, bool) {
 	if config.Cfg != nil && config.Cfg.MaxMainLoopIterations > 0 {
-		return config.Cfg.MaxMainLoopIterations
+		return config.Cfg.MaxMainLoopIterations, true
 	}
-	return defaultMaxMainLoopIterations
+	return 0, false
 }
-
-const defaultMaxMainLoopIterations = 50
 
 // toolCallTimeout is the budget for one observation call. A configured zero
 // means "use the default".
@@ -586,8 +589,8 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 		default:
 		}
 
-		if limit := maxMainLoopIterations(); i > limit {
-			emitEngineError(emit, "iteration_limit_exceeded", fmt.Sprintf("任务超过运行轮次上限（%d）", limit), nil)
+		if limit, limited := maxMainLoopIterations(); limited && i > limit {
+			emitEngineError(emit, "iteration_limit_exceeded", fmt.Sprintf("任务超过运行轮次上限（%d），该上限由部署配置", limit), nil)
 			return
 		}
 

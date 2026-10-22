@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ifnodoraemon/openDataAnalysis/config"
 	"github.com/ifnodoraemon/openDataAnalysis/tools"
 )
 
@@ -634,5 +635,23 @@ func TestInspectReportStateToolExposesFinalizeBlockers(t *testing.T) {
 	}
 	if payload["can_finalize"] != true {
 		t.Fatalf("expected can_finalize=true for an unblocked report, got %#v", payload["can_finalize"])
+	}
+}
+
+// The turn budget belongs to the deployment. Unset means unlimited; a positive
+// value bounds it.
+func TestMaxMainLoopIterationsDefaultsToUnlimited(t *testing.T) {
+	previous := config.Cfg
+	t.Cleanup(func() { config.Cfg = previous })
+
+	config.Cfg = &config.Config{}
+	if limit, limited := maxMainLoopIterations(); limited {
+		t.Fatalf("expected unlimited by default, got limit %d", limit)
+	}
+
+	config.Cfg = &config.Config{MaxMainLoopIterations: 40}
+	limit, limited := maxMainLoopIterations()
+	if !limited || limit != 40 {
+		t.Fatalf("expected a configured limit of 40, got limited=%v limit=%d", limited, limit)
 	}
 }

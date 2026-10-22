@@ -41,10 +41,11 @@ type Config struct {
 	// failures one tool may produce per run before the runtime stops letting it
 	// be called. A repeated contract failure is a dead loop, not progress.
 	MaxRepeatedToolFailures int
-	// MaxMainLoopIterations bounds one agent turn. A run that exceeds it is a
-	// runaway, not a long task: the limit exists so a looping model cannot burn
-	// an unbounded budget. It is configurable because "long enough" depends on
-	// the deployed model and the task mix.
+	// MaxMainLoopIterations bounds one agent turn. Zero means unlimited, which
+	// is the default: how long a turn may run is the deployer's call, not the
+	// code's. The runtime still stops deterministic loops (repeated identical
+	// failures), but a model that keeps making different无效 calls will spend
+	// until it finishes — set a limit when runs are unattended.
 	MaxMainLoopIterations int
 	LLMDebug              bool
 	LLMDebugDir           string
@@ -135,7 +136,7 @@ func Load() {
 		LLMRetryBudgetSec:          getEnvInt("LLM_RETRY_BUDGET_SECONDS", 360),
 		LLMContextWindowTokens:     getEnvInt("LLM_CONTEXT_WINDOW_TOKENS", 128000),
 		ToolCallTimeoutSeconds:     getEnvInt("TOOL_CALL_TIMEOUT_SECONDS", 300),
-		MaxMainLoopIterations:      getEnvInt("MAX_MAIN_LOOP_ITERATIONS", 50),
+		MaxMainLoopIterations:      getEnvInt("MAX_MAIN_LOOP_ITERATIONS", 0),
 		MaxRepeatedToolFailures:    getEnvInt("MAX_REPEATED_TOOL_FAILURES", 3),
 		LLMDebug:                   getEnvBool("LLM_DEBUG", false),
 		LLMDebugDir:                getEnv("LLM_DEBUG_DIR", "./data/llm-debug"),
