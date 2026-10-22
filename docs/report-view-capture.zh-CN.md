@@ -100,9 +100,15 @@ blocks/charts/layout (模型写)
 
 - `document.fonts.status === "loaded"`
 - 所有 `<img>` `complete === true`
-- **每个 ECharts canvas 的 `toDataURL()` 长度连续两次采样一致**，且长度 > 4000
+- **每个 ECharts canvas 的 `toDataURL()` 长度连续两次采样一致**（不设长度阈值）
+- `scrollWidth` / `scrollHeight` 连续两次采样一致
 - `document.querySelectorAll(".katex-error").length === 0`
 - 页面无 `pageerror` / `requestfailed`
+
+就绪只表示"**页面不再变化**"，不表示"页面是对的"。因此：
+**不要要求必须有 canvas，也不要要求 canvas 像素数超过阈值**——纯文字报告、
+以及被渲染器拒绝的图表都不会有 canvas，这两条会让合法报告一直等到超时（§11 实测）。
+"没有 canvas" 是合法终态，写进 `charts_missing` 事实即可。
 
 注意：**不要用 `echarts.getInstanceByDom(el).isFinished()`**。探针验证该实例上
 没有这个方法，任何基于它的就绪判定都会永久返回 false，导致每次捕获都白等到超时。
@@ -296,6 +302,10 @@ provider 画像重新规划切片，不需要重启浏览器。
   - 整页裁剪结果与逐块 clip **逐像素一致**（19/19）
   - ECharts 图表渲染非空、KaTeX 零错误、无 `pageerror`
   - 切片避让原子元素：跨切片图表数为 0
+- 异常态验收（见 §11）：空 series / 删 series / block 重叠 / 表格超宽 / 注入脚本 /
+  图表被拒 / 纯文字报告，8 个变体全部在 125–871ms 内就绪，且 `render_facts`
+  分别给出 `charts_missing`、`overflow_x`、`script_ran`、`imgs_failed`。
+- 捕获页必须带报告页 CSP 与 sanitizer（§11 安全发现），否则不予上线。
 
 
 ### P2：注入链路（a 生效）
@@ -389,3 +399,56 @@ provider 画像重新规划切片，不需要重启浏览器。
 - 异常态渲染：空数据图表、`custom_css` 把版式打崩、sanitizer 剥节点后的画面。
 - 超长报告（> 32k px）下 Chrome 的纹理/内存上限；本样本 23.7k px 正常。
 - 与客户端 sanitizer 的一致性：探针用的是直接 HTML，尚未走 sanitize 路径。
+
+## 11. 异常态实测（P1 第二部分）
+
+happy path 只能证明"能截"，不能证明"截了有用"。这一节用 8 个故意弄坏的变体回答：
+**报告渲染出问题时，截图和结构化事实各自能发现什么。**
+样本由 `scripts/report-view-spike/make_anomaly_samples.py` 从真实报告生成。
+
+| 变体 | 制造的症状 | 结构化事实能否发现 | 截图能否发现 |
+| --- | --- | --- | --- |
+| v0 原始 | 正常 | — | — |
+| v1 空 series | 图表有坐标系和图例，但没有数据 | 只能看到 canvas 像素数变化（60066→38062），**无基线则不可判** | **一眼可见** |
+| v2 删掉 series | 图表只剩部分元素 | 同上（30202） | 可见 |
+| v3 block 绝对定位 | 8 个 block 全部堆在 `y=0` 互相覆盖 | **直接暴露**：scroll 高度 23731→3941，8 个 block 同 y | **反而看不出来**（只显示最后绘制的一块，画面本身"正常"） |
+| v4 表格超宽 | 内容宽 3239px，被视口裁掉 | **直接暴露**：`overflow_x=true`、scroll w=3239 | 可见右侧被裁 |
+| v5 注入脚本 + 坏图 | `<script>` 执行、图片 404 | **直接暴露**：`script_ran=true`、`imgs_failed=[...]` | 看不出脚本执行 |
+| v6 图表 option 被拒 | runtime 报 "Chart data is empty"，不创建 canvas | **精确定位**：`charts_missing=["cht_demand_capacity"]` | 可见空白 |
+| v7 纯文字报告 | 完全合法，没有图表 | 需要一个图表都没有也能就绪 | 正常 |
+
+空数据图表在截图里的样子——有坐标系、有图例、有刻度，就是没有数据：
+
+![空数据图表](images/report-view-anomaly-blank-chart.png)
+
+### 关键结论：事实与像素是互补，不是替代
+
+- **像素赢**：需要"看起来对不对"的判断——空图表、被裁掉的表、字号/行距/遮挡。
+- **事实赢**：需要精确断言的问题——block 重叠、横向溢出、图表根本没建出来、
+  资源 404、脚本被执行。其中 v3 尤其说明问题：**只看截图会漏掉 7 个 block 消失**，
+  因为可见的那一块内容本身完全正常。
+
+因此注入时**始终带 `render_facts`**，图片按脏块给。不要让模型只靠肉眼判断可断言的问题。
+
+### 必须修掉的两个就绪判定缺陷
+
+探针暴露出原方案的就绪条件（"每个 chart 都有 canvas 且像素数 > 阈值"）有两处硬伤，
+两处都会让合法的报告等到超时：
+
+1. **纯文字报告**（v7）：一个 canvas 都没有，`canvases.length > 0` 永不成立。
+2. **图表被渲染器拒绝**（v6）：该图没有 canvas，`every(len > 4000)` 永不成立。
+
+修正后的判定只要求"**什么都不再变化**"：字体已加载、图片 complete、
+canvas 序列化长度连续两次一致、`scrollWidth/scrollHeight` 连续两次一致。
+"没有 canvas" 是合法终态，写进 `charts_missing` 事实而不是等待条件。
+修正后 8 个变体的就绪耗时降到 125–871ms，无一超时。
+
+### 安全发现
+
+v5 的 `<script>` 在**没有 CSP 的捕获页**里真实执行了（`script_ran=true`）。
+这意味着捕获页必须满足两个条件，否则既不安全也不可信：
+
+1. 带与报告页相同的 CSP（`script-src 'self'`，见 `server/handler/run.go`），
+   否则捕获页就是模型生成 HTML 的执行沙箱逃逸面。
+2. 走与用户相同的 sanitizer 路径，否则模型看到的是用户根本不会看到的画面。
+   这正是 §1 约束 2 指出的两条渲染路径不一致问题——P2 之前必须解决。
