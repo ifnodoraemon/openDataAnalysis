@@ -53,8 +53,10 @@ type Session struct {
 	// explicit delete). Late StartRun calls on stale pointers must fail
 	// instead of writing into deleted resources.
 	detached bool
-	mu       sync.Mutex
-	uploadMu sync.RWMutex
+	// reportView owns the current rendered view, when capture is configured.
+	reportView *ReportViewCoordinator
+	mu         sync.Mutex
+	uploadMu   sync.RWMutex
 }
 
 func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileService, sourceService *service.SourceService) (*Session, error) {
@@ -291,6 +293,12 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 	s.Engine.SetReportState(s.ReportState)
 	// Completed jobs are reported to the model on the next request.
 	s.Engine.SetJobManager(jobs)
+	// The report view is optional infrastructure: without a configured capture
+	// service the session behaves exactly as before, with no images anywhere.
+	if coordinator := newSessionReportViewCoordinator(); coordinator != nil {
+		s.reportView = coordinator
+		s.Engine.SetReportViewProvider(coordinator.Current)
+	}
 
 	return s, nil
 }

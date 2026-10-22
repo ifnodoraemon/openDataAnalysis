@@ -62,6 +62,7 @@ func (m *Manager) CleanupExpiredSessions(ttlHours int) (int, error) {
 			// 不会把新 run 写进正在删除的资源。
 			sess.detached = true
 			sess.mu.Unlock()
+			sess.CloseReportView()
 			delete(m.sessions, id)
 		}
 		m.mu.Unlock()

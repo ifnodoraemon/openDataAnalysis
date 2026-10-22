@@ -99,11 +99,17 @@ func newRuntimeEventDispatcher(ctx context.Context, sess *session.Session, ident
 			if err := emitReportPreviewUpdate(ctx, sess.ID, sess.WorkspaceID, runID, sess.ReportState); err != nil {
 				handlePersistenceFailure(runID, err)
 			}
+			// The preview reaching the user is also the moment the model's view of
+			// the report goes stale. Schedule a capture; the coordinator coalesces.
+			triggerReportCapture(sess, "dirty_blocks")
 		},
 		emitEditState: func(data agent.EditStateUpdatedData) {
 			deliverToRun(runID, agent.RuntimeEvent{Type: agent.EventStateReportEditUpdated, Data: data})
 		},
 		finalizeReport: func() error {
+			// Requested before finalizing so a capture that started earlier this turn
+			// can still land; it is never awaited.
+			triggerReportCapture(sess, "finalize_precheck")
 			return finalizeAndPersistReport(ctx, sess, identity, runID)
 		},
 		setRunStatus: func(status domain.RunStatus, errMsg *string) {

@@ -638,8 +638,30 @@ Go 侧新增 `server/render/`：客户端（HTTP + `PROXY_TOKEN`）、切片规�
 
 任何情况下 run 都不会因为捕获失败而中断，模型拿到的是"这次没有视图，原因是什么"。
 
-### 仍未接线
+### 会话接线（已落地）
 
-`Engine.SetReportViewProvider` 还没有接上真实数据源。接线需要会话生命周期配合：
-异步 job 触发捕获、按 `MutationVersion` 去重、finalize 前强制全量、缓存句柄随 run 存活。
-这是下一步（P3 的一部分）。
+`Engine.SetReportViewProvider` 现在接的是 `session.ReportViewCoordinator`：
+
+- **配置网关**：只有 `RENDER_EXECUTOR_URL` + `RENDER_ASSET_BASE_URL` + `PROXY_TOKEN`
+  都齐了才创建协调器。否则不挂 provider —— 未配置部署必须与纯文本运行时逐字节一致，
+  而不是每轮注入一条"捕获失败"的无用事实。
+- **触发点**：报告变更（`emitReportPreview`）后请求一次（`dirty_blocks`）；
+  `finalize` 前请求一次（`finalize_precheck`）。
+- **单飞 + 最新优先**：同一时刻只跑一次捕获；期间到达的请求只保留最新版本，
+  更早的直接丢弃（旧版本视图本来就没人要）。
+- **按版本去重**：`readyVersion` 大于等于请求版本时不再捕获。
+- **不阻塞**：`Current()` 只读一个指针；捕获在后台 goroutine，自带 20s 超时。
+- **随会话销毁**：`detach` 时 `CloseReportView()` 停止调度并等待在飞捕获。
+
+块级缓存键来自 `tools.ReportState.BlockContentHashes()`：块字段 + 引用到的 chart
+option + 报告 layout。只改无关块时，其他块的哈希不变，切片复用。
+（用版本号当键则每次修改整份失效，等于没有缓存。）
+
+实测（真实 executor + 真实报告）：连发版本 1/2/3，请求立即返回；版本 1 在飞，
+版本 2 被版本 3 取代而未执行；最终发布版本 3 的视图（29 张切片、2 个 block、facts 660B）。
+
+### 下一步
+
+- 脏块增量（只发变化的切片，而不是整份视图）
+- 手动"看我这一屏"
+- finalize 前的同步自检（当前是异步请求，定稿那一刻图未必已就绪）

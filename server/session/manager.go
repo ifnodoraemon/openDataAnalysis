@@ -245,6 +245,7 @@ func (m *Manager) Delete(sessionID, workspaceID, userID string) error {
 		sess.mu.Lock()
 		sess.detached = true
 		sess.mu.Unlock()
+		sess.CloseReportView()
 		delete(m.sessions, sessionID)
 	}
 	m.mu.Unlock()
