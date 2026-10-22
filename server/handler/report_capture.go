@@ -108,6 +108,29 @@ func CaptureReportViewHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// GetOrCreate restores nothing: a session first touched by this request has an
+	// empty report state, and capturing it would render a blank page. Hydrate from
+	// the persisted runtime state first, exactly like a chat turn would.
+	sess.ReportState.RLock()
+	blockCount := len(sess.ReportState.Blocks)
+	sess.ReportState.RUnlock()
+	if blockCount == 0 {
+		if err := hydrateSessionFromPersistence(r.Context(), sess); err != nil {
+			writeHandlerError(w, http.StatusInternalServerError, "恢复会话报告状态失败", err)
+			return
+		}
+		sess.ReportState.RLock()
+		blockCount = len(sess.ReportState.Blocks)
+		sess.ReportState.RUnlock()
+	}
+	if blockCount == 0 {
+		writeJSON(w, http.StatusConflict, map[string]interface{}{
+			"error":  "会话还没有可预览的报告",
+			"detail": "先让模型生成报告，再请求查看渲染结果",
+		})
+		return
+	}
+
 	sess.ReportState.RLock()
 	version := int(sess.ReportState.MutationVersion)
 	html := tools.RenderSafeReportHTML(sess.ReportState.FinalTitle, sess.ReportState.FinalAuthor, sess.ReportState)

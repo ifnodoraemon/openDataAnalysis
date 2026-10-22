@@ -78,8 +78,10 @@ func TestCoordinatorDoesNotBlockAndPublishesView(t *testing.T) {
 		t.Fatalf("Request blocked for %s", elapsed)
 	}
 	waitFor(t, "the first view", func() bool { return coordinator.Current() != nil })
-	if version := coordinator.Current().ReportVersion; version != 3 {
-		t.Fatalf("expected view version 3, got %d", version)
+	// The stamp is a monotonic capture generation; the request carried report
+	// version 3, which is what the builder (and its slice cache) keys on.
+	if version := coordinator.Current().ReportVersion; version != 1 {
+		t.Fatalf("expected the first capture generation to be 1, got %d", version)
 	}
 }
 
@@ -203,6 +205,10 @@ func publish(coordinator *ReportViewCoordinator, view *agent.ReportView) {
 	defer coordinator.mu.Unlock()
 	coordinator.view = view
 	coordinator.readyVersion = view.ReportVersion
+	// A real capture also advances the publish sequence and the "last requested
+	// report version" marker; without that the next request looks stale.
+	coordinator.publishSequence = view.ReportVersion
+	coordinator.lastRequestedReportVersion = view.ReportVersion
 }
 
 func viewWithHashes(t *testing.T, version int, hashes map[string]string) *agent.ReportView {
@@ -411,10 +417,10 @@ func TestCaptureNowPublishesAndForcesDelivery(t *testing.T) {
 	defer coordinator.Close()
 
 	view := coordinator.CaptureNow(context.Background(), 4, "finalize_precheck", "<html></html>", map[string]string{"b1": "h4"})
-	if view == nil || view.ReportVersion != 4 {
-		t.Fatalf("expected a version 4 view, got %+v", view)
+	if view == nil || view.ReportVersion <= 0 {
+		t.Fatalf("expected a published view, got %+v", view)
 	}
-	if current := coordinator.Current(); current == nil || current.ReportVersion != 4 {
+	if current := coordinator.Current(); current == nil || current.ReportVersion != view.ReportVersion {
 		t.Fatalf("the capture should have been published, got %+v", current)
 	}
 	delivered := coordinator.ForRequest()

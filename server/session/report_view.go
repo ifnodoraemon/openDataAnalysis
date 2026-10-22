@@ -32,6 +32,13 @@ type ReportViewCoordinator struct {
 	view         *agent.ReportView
 	readyVersion int
 
+	// report versions are per-process counters: a session restored from a
+	// snapshot has MutationVersion 0 until something mutates it. So the version
+	// used to skip duplicate work and the version stamped on the view are kept
+	// apart, and the published one is always a monotonic capture generation.
+	lastRequestedReportVersion int
+	publishSequence            int
+
 	// deliveredVersion and deliveredHashes describe what the model has already
 	// been shown. The view never enters history, so "already shown" is the only
 	// way to avoid re-sending unchanged images on every single turn.
@@ -51,34 +58,55 @@ type ReportViewBuilder interface {
 }
 
 type reportViewRequest struct {
-	version    int
-	capturedAt string
-	html       string
-	hashes     map[string]string
+	// reportVersion is the report's own version, used only to skip work that is
+	// already done. It may be 0 for a restored session.
+	reportVersion int
+	// publishVersion is the monotonic capture generation stamped on the view.
+	publishVersion int
+	capturedAt     string
+	html           string
+	hashes         map[string]string
 }
 
 func NewReportViewCoordinator(builder ReportViewBuilder, assetBaseURL string, timeout time.Duration) *ReportViewCoordinator {
 	if timeout <= 0 {
 		timeout = 20 * time.Second
 	}
-	return &ReportViewCoordinator{builder: builder, assetBaseURL: assetBaseURL, timeout: timeout}
+	return &ReportViewCoordinator{
+		builder:                    builder,
+		assetBaseURL:               assetBaseURL,
+		timeout:                    timeout,
+		lastRequestedReportVersion: -1,
+	}
 }
 
 // Request schedules a capture for the given report version. It never blocks.
+//
+// A report version of 0 means the session has not mutated since it was restored
+// from a snapshot; that is a normal state and must still be capturable.
 func (c *ReportViewCoordinator) Request(version int, capturedAt, html string, hashes map[string]string) {
 	if c == nil || c.builder == nil {
 		return
 	}
-	if version <= 0 {
-		return
-	}
-	request := reportViewRequest{version: version, capturedAt: capturedAt, html: html, hashes: hashes}
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// A view at or beyond this version is already available; nothing to do.
-	if c.closed || version <= c.readyVersion {
+	if c.closed {
 		return
+	}
+	// Same report version means the pixels cannot have changed; skip the work.
+	// A report version of 0 is a normal state (restored session, no mutation yet)
+	// and is capturable once, which is why the sentinel starts at -1.
+	if version <= c.lastRequestedReportVersion {
+		return
+	}
+	c.lastRequestedReportVersion = version
+	c.publishSequence++
+	request := reportViewRequest{
+		reportVersion:  version,
+		publishVersion: c.publishSequence,
+		capturedAt:     capturedAt,
+		html:           html,
+		hashes:         hashes,
 	}
 	if c.running {
 		c.pending = &request
@@ -204,9 +232,9 @@ func (c *ReportViewCoordinator) drain() {
 		view := c.capture(*request)
 
 		c.mu.Lock()
-		if view != nil && !c.closed && request.version > c.readyVersion {
+		if view != nil && !c.closed && request.publishVersion > c.readyVersion {
 			c.view = view
-			c.readyVersion = request.version
+			c.readyVersion = request.publishVersion
 		}
 		c.mu.Unlock()
 	}
@@ -217,13 +245,22 @@ func (c *ReportViewCoordinator) drain() {
 func (c *ReportViewCoordinator) capture(request reportViewRequest) *agent.ReportView {
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
-	return c.builder.BuildView(ctx, render.BuildRequest{
-		HTML:          request.html,
-		AssetBaseURL:  c.assetBaseURL,
-		ReportVersion: request.version,
+	view := c.builder.BuildView(ctx, render.BuildRequest{
+		HTML:         request.html,
+		AssetBaseURL: c.assetBaseURL,
+		// The builder keys its slice cache on this, so it must be the report
+		// version: a per-capture sequence would miss the cache every single time.
+		ReportVersion: request.reportVersion,
 		CapturedAt:    request.capturedAt,
 		BlockHashes:   request.hashes,
 	})
+	if view == nil {
+		return nil
+	}
+	// Publish under a monotonic generation: the model needs a stamp that always
+	// moves forward, while the report version can sit at 0 for a restored session.
+	view.ReportVersion = request.publishVersion
+	return view
 }
 
 // newSessionReportViewCoordinator builds a coordinator from configuration, or
@@ -288,11 +325,15 @@ func (c *ReportViewCoordinator) RequestManual(version int, html string, hashes m
 	c.deliveredVersion = 0
 	c.deliveredHashes = nil
 	current := c.view
-	c.mu.Unlock()
 
-	if current == nil || current.ReportVersion < version {
+	// Capture only when the report moved on since the last capture; otherwise the
+	// forced re-delivery above is enough.
+	needsCapture := current == nil || version > c.lastRequestedReportVersion
+	c.mu.Unlock()
+	if needsCapture {
 		c.Request(version, "manual_screen", html, hashes)
 	}
+	return
 }
 
 // CaptureNow runs one capture and waits for it.
@@ -302,9 +343,20 @@ func (c *ReportViewCoordinator) RequestManual(version int, html string, hashes m
 // answer, and by then nothing else will trigger a capture. Everywhere else stays
 // asynchronous. The caller bounds it with its own context.
 func (c *ReportViewCoordinator) CaptureNow(ctx context.Context, version int, capturedAt, html string, hashes map[string]string) *agent.ReportView {
-	if c == nil || c.builder == nil || version <= 0 {
+	if c == nil || c.builder == nil {
 		return nil
 	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	if version > c.lastRequestedReportVersion {
+		c.lastRequestedReportVersion = version
+	}
+	c.publishSequence++
+	publishVersion := c.publishSequence
+	c.mu.Unlock()
 	view := c.builder.BuildView(ctx, render.BuildRequest{
 		HTML:          html,
 		AssetBaseURL:  c.assetBaseURL,
@@ -315,6 +367,7 @@ func (c *ReportViewCoordinator) CaptureNow(ctx context.Context, version int, cap
 	if view == nil {
 		return nil
 	}
+	view.ReportVersion = publishVersion
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
