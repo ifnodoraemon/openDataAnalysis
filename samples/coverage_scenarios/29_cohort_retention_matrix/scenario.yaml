@@ -4,11 +4,15 @@ task_length: medium
 prompt: 请分析这份用户队列留存矩阵，覆盖留存曲线、队列间差异与收入贡献。
 files:
   - user_cohort_retention.csv
+answers:
+  - 留存按 cohort_month 分组，period 为观察期，分母固定为该队列 initial_users。
 acceptance:
-  terminal_types: [run_completed]
+  terminal_types: [run_completed, user_request_input]
   report_finalized: true
   no_error: true
+  resume_if_asked: true
 manual_review:
   - 留存按队列与期数组合解释，没有混用不同期数。
   - 留存率分母为队列初始用户数，口径明确。
   - 收入贡献与留存指标的关系有数据支撑。
+  - 队列与期数的口径是可暴露的歧义，提问或显式假设都合法。
