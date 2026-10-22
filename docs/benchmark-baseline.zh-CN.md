@@ -1,11 +1,15 @@
-# 场景基线（2026-10-21）
+# 场景基线（2026-10-21 首轮 / 10-22 复测）
 
 模型：`deepseek-v4.1-flash`（airoute 网关，`LLM_API_PROTOCOL=chat_completions`）。
 语料：30 个场景。执行：`scripts/smoke_test.sh`，超时按 `task_length` 分配。
 
 ## 结果
 
-**23 通过 / 7 失败（76.7%）**，全程 0 次超时。
+首轮 **23 通过 / 7 失败（76.7%）**，全程 0 次超时。
+
+修复后增量复测：**5/5 通过**，其中 `23_financial_ledger_large` 需要把
+`MAX_MAIN_LOOP_ITERATIONS` 从 50 提到 80（见下）。据此预期基线为 **28/30（93.3%）**，
+仅剩 17/18 两个"完成但未 finalize"的行为问题。
 
 | 失败场景 | 现象 | 归类 |
 |---|---|---|
@@ -43,6 +47,16 @@ invalid Chat Completions response: choice[0].tool_calls[0] arguments: duplicate 
 - 派发阶段校验参数，非法时返回 `error_code=invalid_tool_arguments` 的结构化失败，不执行该调用，模型可自行修正后重试。
 - 同一类问题一并处理：模型编造不存在的工具名现在返回 `unknown_tool` 失败，而不是终止整轮。
 - Google 路径重建请求时对非法参数退化为空对象，避免下一轮因历史里的坏参数再次失败。
+
+### 复测后新暴露：50 轮上限对长场景不够
+
+`23_financial_ledger_large` 在修复后不再死于解析，转而撞上 50 轮上限。日志显示模型反复用
+`status=observed` 写工作记忆但没给 `source_result_ids`，被契约挡回后重试，消耗轮次。
+
+把 `MAX_MAIN_LOOP_ITERATIONS` 提到 80 后该场景通过。这说明：
+- 轮次上限做成可配是对的（这条改动正是为此）；
+- 但模型反复违反同一个工具契约时，仅靠 repeat notice 提醒不足以止损，
+  需要一个"同一错误码连续 N 次即终止或强制换路"的机制（尚未实现）。
 
 ### 未修：17/18 从未尝试 finalize
 
