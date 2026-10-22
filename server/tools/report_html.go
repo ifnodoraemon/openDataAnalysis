@@ -111,8 +111,6 @@ func RenderReportHTML(title, author string, state *ReportState) string {
 %s
 %s
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;900&display=swap');
-
 :root {
   --primary: #2563eb;
   --primary-light: #3b82f6;

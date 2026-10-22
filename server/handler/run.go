@@ -191,7 +191,7 @@ func renderReportHTMLFromSnapshotData(snapshot *domain.ReportSnapshot) (string, 
 	if err := restored.LoadReportSnapshot(snapshot); err != nil {
 		return "", fmt.Errorf("invalid report snapshot state: %w", err)
 	}
-	return tools.RenderReportHTML(snapshot.Title, snapshot.Author, restored.ReportState), nil
+	return tools.RenderSafeReportHTML(snapshot.Title, snapshot.Author, restored.ReportState), nil
 }
 
 func serializeRuns(ctx context.Context, runs []domain.AnalysisRun) ([]map[string]interface{}, error) {

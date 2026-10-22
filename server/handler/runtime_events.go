@@ -287,7 +287,7 @@ func emitReportPreviewUpdate(ctx context.Context, sessID, workspaceID, runID str
 		state.RUnlock()
 		return err
 	}
-	html := tools.RenderReportHTML("", "", state)
+	html := tools.RenderSafeReportHTML("", "", state)
 	state.RUnlock()
 	updateEv := agent.RuntimeEvent{
 		Type: agent.EventReportUpdate,
@@ -307,7 +307,7 @@ func emitReportPreviewUpdate(ctx context.Context, sessID, workspaceID, runID str
 
 func finalizeAndPersistReport(ctx context.Context, sess *session.Session, identity auth.Identity, runID string) error {
 	sess.ReportState.RLock()
-	finalHTML := tools.RenderReportHTML(sess.ReportState.FinalTitle, sess.ReportState.FinalAuthor, sess.ReportState)
+	finalHTML := tools.RenderSafeReportHTML(sess.ReportState.FinalTitle, sess.ReportState.FinalAuthor, sess.ReportState)
 	snapshot, snapshotErr := buildReportSnapshotLocked(sess.ReportState)
 	sess.ReportState.RUnlock()
 	if snapshotErr != nil {

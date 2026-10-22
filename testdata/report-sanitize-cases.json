@@ -1,0 +1,102 @@
+{
+  "_comment": [
+    "Shared sanitizer corpus. Asserted by both implementations so the Go output",
+    "boundary and the client sanitizer cannot drift:",
+    "  Go:  server/tools/report_sanitize_test.go",
+    "  JS:  client/src/utils/sanitize.spec.js",
+    "Assertions are properties (must_contain / must_not_contain), not exact bytes:",
+    "both parsers re-serialize and their byte output legitimately differs."
+  ],
+  "cases": [
+    {
+      "name": "inline script is removed",
+      "input": "<html><body><p>keep</p><script>alert(1)</script></body></html>",
+      "must_contain": ["<p>keep</p>"],
+      "must_not_contain": ["alert(1)", "<script"]
+    },
+    {
+      "name": "allowlisted echarts loader survives",
+      "input": "<html><head><script id=\"oda-echarts-loader\" src=\"/assets/echarts.min.js\"></script></head><body></body></html>",
+      "must_contain": ["id=\"oda-echarts-loader\"", "/assets/echarts.min.js"],
+      "must_not_contain": []
+    },
+    {
+      "name": "allowlisted id with a foreign src is removed",
+      "input": "<html><head><script id=\"oda-echarts-loader\" src=\"/evil.js\"></script></head><body></body></html>",
+      "must_contain": [],
+      "must_not_contain": ["/evil.js"]
+    },
+    {
+      "name": "event handler attributes are removed",
+      "input": "<html><body><div onclick=\"steal()\">x</div></body></html>",
+      "must_contain": ["x"],
+      "must_not_contain": ["onclick", "steal()"]
+    },
+    {
+      "name": "javascript: urls are removed",
+      "input": "<html><body><a href=\"javascript:alert(1)\">x</a></body></html>",
+      "must_contain": ["<a"],
+      "must_not_contain": ["javascript:"]
+    },
+    {
+      "name": "iframes are removed but siblings survive",
+      "input": "<html><body><iframe src=\"/x\"></iframe><p>t</p></body></html>",
+      "must_contain": ["<p>t</p>"],
+      "must_not_contain": ["<iframe"]
+    },
+    {
+      "name": "unknown tags are unwrapped, not dropped",
+      "input": "<html><body><marquee><p>t</p></marquee></body></html>",
+      "must_contain": ["<p>t</p>"],
+      "must_not_contain": ["marquee"]
+    },
+    {
+      "name": "chart facts survive",
+      "input": "<html><body><div class=\"chart-box\" data-chart-id=\"c1\" data-chart-option=\"{}\"></div></body></html>",
+      "must_contain": ["chart-box", "data-chart-id", "data-chart-option"],
+      "must_not_contain": []
+    },
+    {
+      "name": "block ids survive",
+      "input": "<html><body><div data-block-id=\"b1\" data-block-kind=\"markdown\">x</div></body></html>",
+      "must_contain": ["data-block-id=\"b1\""],
+      "must_not_contain": []
+    },
+    {
+      "name": "style imports and remote fetches are stripped",
+      "input": "<html><head><style>@import url('https://fonts.example/x.css'); .a{color:red}</style></head><body></body></html>",
+      "must_contain": [".a"],
+      "must_not_contain": ["@import", "fonts.example"]
+    },
+    {
+      "name": "external stylesheet links are dropped",
+      "input": "<html><head><link rel=\"stylesheet\" href=\"https://cdn.example/x.css\"></head><body></body></html>",
+      "must_contain": [],
+      "must_not_contain": ["cdn.example"]
+    },
+    {
+      "name": "inline style cannot trigger a load",
+      "input": "<html><body><div style=\"background:url(https://x.example/y.png)\">x</div></body></html>",
+      "must_contain": ["x"],
+      "must_not_contain": ["url(", "x.example"]
+    },
+    {
+      "name": "forms and inputs are removed",
+      "input": "<html><body><form action=\"/steal\"><input name=\"a\"></form><p>t</p></body></html>",
+      "must_contain": ["<p>t</p>"],
+      "must_not_contain": ["<form", "<input", "steal"]
+    },
+    {
+      "name": "external anchors get rel and target",
+      "input": "<html><body><a href=\"/report/x\">l</a></body></html>",
+      "must_contain": ["rel=\"noopener noreferrer\"", "target=\"_blank\""],
+      "must_not_contain": []
+    },
+    {
+      "name": "base tag cannot rewrite relative urls",
+      "input": "<html><head><base href=\"https://evil.example/\"></head><body><p>t</p></body></html>",
+      "must_contain": ["<p>t</p>"],
+      "must_not_contain": ["evil.example"]
+    }
+  ]
+}

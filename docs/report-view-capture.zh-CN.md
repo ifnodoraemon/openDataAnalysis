@@ -23,10 +23,15 @@
 ```
 blocks/charts/layout (模型写)
   → tools.RenderReportHTML            server/tools/report_html.go:35
-  → report update 事件                 server/handler/runtime_events.go:283
-  → sanitizeReportHTML (客户端)        client/src/utils/sanitize.js
+  → tools.SanitizeReportHTML (服务端)  server/tools/report_sanitize.go
+  → report update 事件 / 落盘产物 / 独立端点
+  → sanitizeReportHTML (客户端, 第二层) client/src/utils/sanitize.js
   → iframe srcdoc 渲染                 client/src/components/report/ReportPreview.vue:89
 ```
+
+模型全程只看得到自己写入的结构，看不到渲染结果。
+服务端净化这一环见 §12：它让预览、下载产物、独立端点、以及后续的截图输入
+拿到的是同一份字节。
 
 模型全程只看得到自己写入的结构，看不到渲染结果。
 
@@ -34,8 +39,9 @@ blocks/charts/layout (模型写)
 
 1. **LLM 链路是纯文本**。`LLMMessage.Content` 与 `ConversationItem.Content` 都是 `string`，
    全仓无 `image_url` / `inline_data`。多模态能力存在于模型侧，harness 侧未接线。
-2. **两条渲染路径不一致**。应用内 iframe 走 sanitizer；独立报告 HTML 端点
-   （`server/handler/run.go:167`）只靠 CSP。截图必须走用户实际看到的那条路。
+2. **两条渲染路径不一致**（**已解决，见 §12**）。此前应用内 iframe 走 sanitizer；
+   独立报告 HTML 端点（`server/handler/run.go`）和落盘产物只靠 CSP，导致模型/用户/
+   截图看到的不是同一份内容。现在三者统一由 `tools.SanitizeReportHTML` 产出。
 3. **provider 视觉编码有硬上限**，超出即隐式降采样。量级如下，落地前需按实际部署模型复核：
 
    | provider | 行为 | 单图 token 量级 |
@@ -271,7 +277,10 @@ provider 画像重新规划切片，不需要重启浏览器。
 | 文件 | 改动 | 风险 |
 | --- | --- | --- |
 | `server/tools/report_charts.go` | `resolveChartOption` 增加 series/axis/data 静态校验 | 低，纯增益 |
-| `server/tools/report_html.go` | KaTeX 基址参数化；输出可切片标记 | 低 |
+| `server/tools/report_html.go` | KaTeX 基址参数化；输出可切片标记；移除失效的外部字体 @import | 低 |
+| `server/tools/report_sanitize.go`（已落地，§12） | 文档级输出净化 + `RenderSafeReportHTML` 唯一出口 | 中 |
+| `testdata/report-sanitize-cases.json`（已落地，§12） | Go / JS 共用的净化断言语料 | 低 |
+| `server/handler/{runtime_events,run}.go`（已落地，§12） | 三处输出边界改走 `RenderSafeReportHTML` | 低 |
 | `server/agent/prompt_bundle.go` | 新增 `MessagePart`，扩展两个类型，更新 `validatePromptBundle` | 中 |
 | `server/agent/tokens.go` | `EstimatePromptTokens` 计入图片 | 中，影响压缩触发点 |
 | `server/agent/llm.go` | 三处 adapter 图片映射 | 中 |
@@ -283,7 +292,7 @@ provider 画像重新规划切片，不需要重启浏览器。
 | `docker-compose.yml` | 新服务，走 executor-network，无外网 | 中 |
 | `server/config/config.go` | `REPORT_VIEW_CAPTURE=off\|facts\|images`、资源基址 | 低 |
 | `client/src/components/report/ReportPreview.vue` | 手动 b 按钮 | 低 |
-| `client/src/utils/sanitize.js` | 与服务端对齐（若选择下沉方案） | 中 |
+| `client/src/utils/sanitize.js`（已落地，§12） | 保持为第二层；新增共用语料断言 | 低 |
 
 ## 7. 分阶段落地
 
@@ -450,5 +459,81 @@ v5 的 `<script>` 在**没有 CSP 的捕获页**里真实执行了（`script_ran
 
 1. 带与报告页相同的 CSP（`script-src 'self'`，见 `server/handler/run.go`），
    否则捕获页就是模型生成 HTML 的执行沙箱逃逸面。
-2. 走与用户相同的 sanitizer 路径，否则模型看到的是用户根本不会看到的画面。
-   这正是 §1 约束 2 指出的两条渲染路径不一致问题——P2 之前必须解决。
+2. 渲染的必须是服务端已净化的 HTML（§12 已让预览、落盘、独立端点统一走
+   `RenderSafeReportHTML`），否则模型看到的是用户根本不会看到的画面。
+   执行器侧仍必须自带报告 CSP：净化过不等于可以裸跑在无策略的页面上。
+
+## 12. 统一渲染路径（P2 前置，已落地）
+
+### 问题
+
+在动手接多模态之前，同一份报告有三条互不相同的出口：
+
+| 出口 | 净化 | 结果 |
+| --- | --- | --- |
+| 应用内 iframe 预览 | 客户端 `sanitizeReportHTML` | 安全，且 `@import` 被剥 → 回退字体 |
+| 独立报告 HTML 端点 | 只靠 CSP 响应头 | 模型写的标记原样保留 |
+| 落盘产物（用户下载） | 无 | 打开即执行模型写的 HTML，且无 CSP |
+
+这带来两个具体后果，第二个是这次排查才发现的：
+
+1. 下载/独立打开的 HTML 与预览不是同一份内容，截图也不能代表用户所见。
+2. **两条路径连字体都不同**。模板里有一行
+   `@import url('https://fonts.googleapis.com/css2?family=Inter...')`，
+   客户端的 `sanitizeStyleText` 会把 `@import` 整条剥掉，所以应用内一直在用系统回退字体；
+   而下载版会去拉 Inter/Noto。同一个报告，两种排版。
+
+### 做法
+
+- 新增 `server/tools/report_sanitize.go`：把客户端 `sanitizeReportHTML` 的规则
+  一比一实现在 Go 侧，作用于**整份文档**（报告脚本允许 5 组精确 (id, path) 白名单）。
+- 新增 `tools.RenderSafeReportHTML` 作为**唯一出口**，三处调用点全部改走它：
+  预览事件、落盘产物、独立报告端点。
+- `RenderReportHTML` 保持原样不净化：内部有 50 处测试按原始输出断言结构，
+  且调用方需要可再解析的树。出口与渲染器分离，职责更清楚。
+- 删除模板里那行已失效的 `@import`。字体栈本身是
+  `"Inter", "Noto Sans SC", -apple-system, ...`，删掉只是让所有路径一致地使用回退字体，
+  不再产生对外请求。
+- 客户端 `sanitizeReportHTML` **保留**，作为第二层防御（AGENTS.md 明确要求）。
+
+净化策略仍然是两层，但这个划分是有意的：
+
+- **输入侧** `sanitizeHTMLFragment`：严格，作用于模型写的 block 内容，连 `style`/`script`/`link` 都不放行；
+- **输出侧** `SanitizeReportHTML`：文档级白名单，需要放行渲染器自己生成的图表/数学资源。
+
+### 防止两套实现漂移
+
+跨语言重复实现 sanitizer 是维护风险，所以两侧断言同一份语料：
+
+```
+testdata/report-sanitize-cases.json        ← 单一事实来源
+  ├─ server/tools/report_sanitize_test.go  Go 侧断言
+  └─ client/src/utils/sanitize.spec.js     JS 侧断言
+```
+
+断言是**性质**而非字节：`must_contain` / `must_not_contain`。两种解析器重新序列化的
+字节本来就不同（属性顺序、自闭合、引号），比较字节没有意义。
+另有 Go 侧幂等测试：服务端净化后客户端会再净化一次，`sanitize(sanitize(x)) == sanitize(x)`。
+
+### 实测影响
+
+用仓库里那份真实报告过一遍净化，再用 §10 的探针复测：
+
+| 指标 | 净化前 | 净化后 |
+| --- | --- | --- |
+| 图表渲染 | 6/6 | **6/6**（canvas 像素量级一致） |
+| KaTeX 错误 | 0 | 0 |
+| 页面高度 | 23731 | 23276（字体回退导致 −2%） |
+| 加载耗时 | 2225ms | **574ms**（不再请求外部字体） |
+| 切片数（960 规格） | 29 | 29 |
+| 保留的报告脚本 | 5 | 5 |
+| 保留的 `data-chart-option` | 6 | 6 |
+
+结论：净化不破坏渲染，且让"用户所见 / 下载所得 / 未来截图输入"变成同一份字节。
+
+### 需要注意的行为变化
+
+- 用户下载的 HTML 从 Inter/Noto 变为系统字体（与应用内一致）。若要恢复品牌字体，
+  正确做法是自托管 woff2 并在两侧同时放行同源 `url()`，而不是重新加回 CDN `@import`。
+- `config.ReportEchartsUrl` 若被配置成 CDN 地址，净化会把该脚本剥掉（只允许同源相对路径）。
+  部署时需要保持同源，否则图表不会渲染。

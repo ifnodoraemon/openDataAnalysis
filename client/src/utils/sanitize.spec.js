@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
 import { sanitizeReportHTML } from "./sanitize";
 
@@ -167,5 +168,31 @@ describe("sanitizeReportHTML", () => {
     const sanitized = sanitizeReportHTML(html);
     expect(sanitized).not.toContain("url(");
     expect(sanitized).not.toContain("evil.example");
+  });
+  // The Go output boundary (server/tools/report_sanitize.go) asserts the same
+  // corpus. Both implementations must reject and preserve the same things, or
+  // the preview and the artifact users download drift apart.
+  it("matches the shared sanitizer corpus used by the Go output boundary", () => {
+    const corpusURL = new URL(
+      "../../../testdata/report-sanitize-cases.json",
+      import.meta.url,
+    );
+    const corpus = JSON.parse(readFileSync(corpusURL, "utf8"));
+    expect(corpus.cases.length).toBeGreaterThan(0);
+
+    for (const testCase of corpus.cases) {
+      const sanitized = sanitizeReportHTML(testCase.input);
+      for (const wanted of testCase.must_contain || []) {
+        expect(sanitized, `${testCase.name}: must contain ${wanted}`).toContain(
+          wanted,
+        );
+      }
+      for (const unwanted of testCase.must_not_contain || []) {
+        expect(
+          sanitized,
+          `${testCase.name}: must not contain ${unwanted}`,
+        ).not.toContain(unwanted);
+      }
+    }
   });
 });
