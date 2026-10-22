@@ -157,3 +157,30 @@ python scripts/render_scenario_checklist.py \
 ```bash
 MAX_MAIN_LOOP_ITERATIONS=80
 ```
+
+## 判定原则（补充）
+
+### 单次运行不能归因
+
+模型输出有方差：同一个场景会在不同运行里通过和失败。因此
+
+- **失败归因必须能在多次运行里复现，才算缺陷。**
+- 只出现一次的失败记为 `flaky`，不当作缺陷，但也不忽略——它是稳定性问题，需要单独跟踪。
+- `--repeat N`（建议 N≥3）是拿到可信结论的最低要求；`flaky` 与 `fail` 一样以非零退出。
+
+实际教训：单次基线里 `07_retail_short`、`manufacturing_long`、`retail_alias_headers`、
+`sales_quality_gaps` 都显示"通过"，重复跑之后才暴露出 2/3 或 1/2。其中一个
+（`manufacturing_long`）背后是真缺陷：非法工具参数让事件持久化失败。
+
+### 歧义场景双接受
+
+"提问"和"显式说明假设后继续"都是合法路径（见 `docs/agentic-principles.zh-CN.md` 第 7 条）。
+凡是歧义类的场景（口径、粒度、单位、别名、跨语言字段），`terminal_types` 必须同时包含
+`run_completed` 与 `user_request_input`，并配置 `answers` 与 `resume_if_asked`。
+
+非歧义场景保持严格：放宽只会让断言失去意义。
+
+### 失败要结构化
+
+任何工具失败都必须带 `error_code`（`failures_must_be_structured`）。不要写"某个工具必须失败"
+这类依赖模型故意犯错的负向用例——测的其实是运气。

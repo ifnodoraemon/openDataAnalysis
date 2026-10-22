@@ -4,10 +4,14 @@ task_length: short
 prompt: 请快速分析这份零售门店数据，给出趋势、门店对比和产品线表现。
 files:
   - retail_alias_headers.csv
+answers:
+  - dt 按日期解析、gmv 按成交总额解析，其余列按值域推断后使用。
 acceptance:
-  terminal_types: [run_completed]
+  terminal_types: [run_completed, user_request_input]
   report_finalized: true
   no_error: true
+  resume_if_asked: true
 manual_review:
   - 对 dt 和 gmv 的解释来自值与任务上下文，并明确记录。
   - 不因非标准列名直接放弃分析。
+  - 列名别名是可暴露的歧义，提问或显式假设都合法。

@@ -5,10 +5,14 @@ prompt: 请分析各渠道销售和投放效率，说明趋势变化和渠道差
 files:
   - mixed_lang_sales.csv
   - mixed_lang_spend.csv
+answers:
+  - 中英文字段按值域对齐为同一含义后合并，不做语言相关的排除。
 acceptance:
-  terminal_types: [run_completed]
+  terminal_types: [run_completed, user_request_input]
   report_finalized: true
   no_error: true
+  resume_if_asked: true
 manual_review:
   - 跨语言字段解释有值域或用户上下文依据。
   - 不仅凭列名语言差异断言字段不兼容。
+  - 跨语言字段映射是可暴露的歧义，提问或显式假设都合法。
