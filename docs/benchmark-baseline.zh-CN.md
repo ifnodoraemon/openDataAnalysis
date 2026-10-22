@@ -53,7 +53,11 @@ invalid Chat Completions response: choice[0].tool_calls[0] arguments: duplicate 
 `23_financial_ledger_large` 在修复后不再死于解析，转而撞上 50 轮上限。日志显示模型反复用
 `status=observed` 写工作记忆但没给 `source_result_ids`，被契约挡回后重试，消耗轮次。
 
-把 `MAX_MAIN_LOOP_ITERATIONS` 提到 80 后该场景通过。这说明：
+把 `MAX_MAIN_LOOP_ITERATIONS` 提到 80 后该场景通过。
+
+**但要注意方差**：止损机制实现后，把上限退回 50 再跑一次，23 同样通过，而该次运行里
+`repeated_failure_blocked` 计数为 0——模型这次没有进入那个循环。单次运行不能证明
+"上限必需"或"止损生效"，两个结论都只能由多次运行分布来定。这说明：
 - 轮次上限做成可配是对的（这条改动正是为此）；
 - 但模型反复违反同一个工具契约时，仅靠 repeat notice 提醒不足以止损，
   需要一个"同一错误码连续 N 次即终止或强制换路"的机制（尚未实现）。
