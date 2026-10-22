@@ -12,6 +12,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 BASE_URL="http://127.0.0.1"
 TIMEOUT="120"
+REPEAT="1"
 POSITIONAL_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -29,6 +30,17 @@ while [ $# -gt 0 ]; do
                 exit 64
             fi
             TIMEOUT="$2"
+            shift 2
+            ;;
+        --repeat)
+            # A single run cannot tell a fixed defect from model variance: the
+            # same scenario passes and fails across runs. Repeating turns the
+            # result into a rate.
+            if [ $# -lt 2 ]; then
+                echo "错误：--repeat 缺少参数值" >&2
+                exit 64
+            fi
+            REPEAT="$2"
             shift 2
             ;;
         --help|-h)
@@ -80,6 +92,7 @@ echo ""
 total=0
 passed=0
 failed=0
+flaky=0
 results=()
 
 print_failure_output() {
@@ -123,27 +136,44 @@ scenario_timeout() {
 for scenario_id in "${SCENARIOS[@]}"; do
     total=$((total + 1))
     scenario_budget=$(scenario_timeout "$scenario_id")
-    echo "--- [$total] 正在运行：$scenario_id（超时 ${scenario_budget}s）---"
+    scenario_passes=0
+    last_exit_code=0
+    for attempt in $(seq 1 "$REPEAT"); do
+        echo "--- [$total] 正在运行：$scenario_id（第 $attempt/$REPEAT 次，超时 ${scenario_budget}s）---"
 
-    set +e
-    output=$(node "$SCRIPT_DIR/run_scenario.js" \
-        --id "$scenario_id" \
-        --base-url "$BASE_URL" \
-        --timeout "$scenario_budget" 2>&1)
-    exit_code=$?
-    set -e
+        set +e
+        output=$(node "$SCRIPT_DIR/run_scenario.js" \
+            --id "$scenario_id" \
+            --base-url "$BASE_URL" \
+            --timeout "$scenario_budget" 2>&1)
+        exit_code=$?
+        set -e
 
-    if [ $exit_code -eq 0 ]; then
-        echo "  ✅ 通过"
+        if [ $exit_code -eq 0 ]; then
+            echo "  ✅ 通过"
+            scenario_passes=$((scenario_passes + 1))
+        else
+            last_exit_code=$exit_code
+            echo "  ❌ 失败（退出码=$exit_code）"
+            print_failure_output "$output"
+        fi
+    done
+
+    if [ "$scenario_passes" -eq "$REPEAT" ]; then
+        status="pass"
         passed=$((passed + 1))
-        results+=("{\"id\":\"$scenario_id\",\"status\":\"pass\"}")
-    else
-        echo "  ❌ 失败（退出码=$exit_code）"
-        print_failure_output "$output"
+    elif [ "$scenario_passes" -eq 0 ]; then
+        status="fail"
         failed=$((failed + 1))
-        results+=("{\"id\":\"$scenario_id\",\"status\":\"fail\",\"exit_code\":$exit_code}")
+    else
+        # Passing sometimes is its own defect class: it hides behind a single
+        # run and surfaces in production.
+        status="flaky"
+        flaky=$((flaky + 1))
     fi
+    echo "  → ${status}（$scenario_passes/$REPEAT）"
     echo ""
+    results+=("{\"id\":\"$scenario_id\",\"status\":\"$status\",\"runs\":$REPEAT,\"passes\":$scenario_passes,\"exit_code\":$last_exit_code}")
 done
 
 # 输出汇总 JSON
@@ -151,7 +181,9 @@ pass_rate=$(python3 -c 'import sys; p=int(sys.argv[1]); t=int(sys.argv[2]); prin
 summary_json=$(cat <<EOF
 {
     "total": $total,
+    "repeat": $REPEAT,
     "passed": $passed,
+    "flaky": $flaky,
     "failed": $failed,
     "pass_rate": "$pass_rate",
     "scenarios": [$(IFS=,; echo "${results[*]}")]
@@ -170,7 +202,11 @@ mkdir -p "$ROOT_DIR/tmp"
 echo "$summary_json" > "$ROOT_DIR/tmp/smoke-test-summary.json"
 
 if [ $failed -gt 0 ]; then
-    echo "❌ 共有 $failed 个场景失败"
+    echo "❌ 共有 $failed 个场景每次运行都失败"
+    exit 1
+fi
+if [ $flaky -gt 0 ]; then
+    echo "⚠️ 共有 $flaky 个场景不稳定（有时通过、有时失败）——单次运行看不出这类缺陷"
     exit 1
 fi
 
