@@ -34,6 +34,9 @@ type Engine struct {
 	// pendingNotices carries the advisories queued for the next request.
 	repeatCalls    map[string]int
 	pendingNotices []RuntimeContextBlock
+	// failureStreaks counts repeated deterministic failures per tool and error
+	// code, so a dead loop is stopped instead of burning the iteration budget.
+	failureStreaks map[string]int
 	// pendingSuspensionID is the tool call the run suspended on. Its result is
 	// deliberately absent until the user answers, so pairing repair must not
 	// synthesize an outcome for it.
@@ -841,6 +844,7 @@ func (e *Engine) Run(ctx context.Context, userInput string, getRuntimeVars func(
 				}
 
 				result, success, contractErr := normalizeToolExecutionResult(toolCall.Function.Name, result, execErr)
+				e.recordToolOutcome(toolCall.Function.Name, result, success)
 				if contractErr != nil {
 					execErr = contractErr
 					log.Printf("Tool %s returned an invalid result contract: %v", toolCall.Function.Name, contractErr)
@@ -1457,4 +1461,77 @@ func sanitizeToolError(msg string) string {
 		msg = msg[:500] + "...(truncated)"
 	}
 	return msg
+}
+
+// Deterministic tool failures that repeat are a dead loop, not progress: the
+// model cannot satisfy the contract by trying again. These codes are excluded
+// from streak counting because they describe the environment, not the call.
+var nonDeterministicToolFailures = map[string]struct{}{
+	"tool_unavailable": {},
+	"tool_timeout":     {},
+	"execution_error":  {},
+}
+
+// repeatedFailureThreshold is how many identical deterministic failures one
+// tool may produce before the runtime stops letting it be called again.
+const defaultRepeatedToolFailureThreshold = 3
+
+func repeatedToolFailureThreshold() int {
+	if config.Cfg != nil && config.Cfg.MaxRepeatedToolFailures > 0 {
+		return config.Cfg.MaxRepeatedToolFailures
+	}
+	return defaultRepeatedToolFailureThreshold
+}
+
+// recordToolOutcome tracks deterministic failure streaks per tool and error
+// code. A success clears the streak: the contract is satisfiable after all.
+func (e *Engine) recordToolOutcome(toolName, result string, success bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.failureStreaks == nil {
+		e.failureStreaks = make(map[string]int)
+	}
+	if success {
+		for key := range e.failureStreaks {
+			if strings.HasPrefix(key, toolName+"\x00") {
+				delete(e.failureStreaks, key)
+			}
+		}
+		return
+	}
+	code := toolResultErrorCode(result)
+	if code == "" {
+		code = "execution_error"
+	}
+	if _, skip := nonDeterministicToolFailures[code]; skip {
+		return
+	}
+	e.failureStreaks[toolName+"\x00"+code]++
+}
+
+// repeatedFailureBlock reports whether a tool has exhausted its deterministic
+// failure budget, and with which error code.
+func (e *Engine) repeatedFailureBlock(toolName string) (string, int, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	threshold := repeatedToolFailureThreshold()
+	prefix := toolName + "\x00"
+	for key, count := range e.failureStreaks {
+		if !strings.HasPrefix(key, prefix) || count < threshold {
+			continue
+		}
+		return strings.TrimPrefix(key, prefix), count, true
+	}
+	return "", 0, false
+}
+
+// toolResultErrorCode extracts the machine-readable code from a structured
+// failure result.
+func toolResultErrorCode(result string) string {
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(result), &payload); err != nil {
+		return ""
+	}
+	code, _ := payload["error_code"].(string)
+	return strings.TrimSpace(code)
 }

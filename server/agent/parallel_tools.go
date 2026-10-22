@@ -81,7 +81,17 @@ func (e *Engine) planToolCalls(ctx context.Context, calls []LLMToolCall) ([]plan
 			// object — duplicate keys, truncation, stray markup. That is its
 			// output, not a transport failure: report it as a failed call so the
 			// model can correct it instead of losing the whole run.
-			if err := validateToolCallArguments(args); err != nil {
+			if code, count, blocked := e.repeatedFailureBlock(call.Function.Name); blocked {
+				// The same call has already failed deterministically several
+				// times. Letting it run again spends the turn on a loop that
+				// cannot succeed; the model gets the facts and must change
+				// approach.
+				admission = tools.Admission{
+					Kind:   tools.AdmissionDeny,
+					Code:   "repeated_failure_blocked",
+					Reason: fmt.Sprintf("tool %s has failed %d times with error_code=%s in this run; repeating the same call cannot succeed", call.Function.Name, count, code),
+				}
+			} else if err := validateToolCallArguments(args); err != nil {
 				admission = tools.Admission{
 					Kind:   tools.AdmissionDeny,
 					Code:   "invalid_tool_arguments",

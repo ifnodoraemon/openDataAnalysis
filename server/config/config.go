@@ -37,6 +37,10 @@ type Config struct {
 	// action tools are exempt because abandoning a commit mid-flight would make
 	// its outcome unknown.
 	ToolCallTimeoutSeconds int
+	// MaxRepeatedToolFailures bounds how many identical deterministic tool
+	// failures one tool may produce per run before the runtime stops letting it
+	// be called. A repeated contract failure is a dead loop, not progress.
+	MaxRepeatedToolFailures int
 	// MaxMainLoopIterations bounds one agent turn. A run that exceeds it is a
 	// runaway, not a long task: the limit exists so a looping model cannot burn
 	// an unbounded budget. It is configurable because "long enough" depends on
@@ -132,6 +136,7 @@ func Load() {
 		LLMContextWindowTokens:     getEnvInt("LLM_CONTEXT_WINDOW_TOKENS", 128000),
 		ToolCallTimeoutSeconds:     getEnvInt("TOOL_CALL_TIMEOUT_SECONDS", 300),
 		MaxMainLoopIterations:      getEnvInt("MAX_MAIN_LOOP_ITERATIONS", 50),
+		MaxRepeatedToolFailures:    getEnvInt("MAX_REPEATED_TOOL_FAILURES", 3),
 		LLMDebug:                   getEnvBool("LLM_DEBUG", false),
 		LLMDebugDir:                getEnv("LLM_DEBUG_DIR", "./data/llm-debug"),
 		ServerPort:                 getEnv("SERVER_PORT", "8080"),
@@ -278,6 +283,9 @@ func (c *Config) ValidateProductionReadiness() error {
 	}
 	if c.MaxMainLoopIterations < 0 {
 		return fmt.Errorf("MAX_MAIN_LOOP_ITERATIONS must not be negative")
+	}
+	if c.MaxRepeatedToolFailures < 0 {
+		return fmt.Errorf("MAX_REPEATED_TOOL_FAILURES must not be negative")
 	}
 	if c.LLMProvider == "anthropic" {
 		if err := validateExactConfigValue("LLM_BASE_URL", c.LLMBaseURL, true); err != nil {
