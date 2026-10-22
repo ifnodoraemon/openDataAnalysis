@@ -279,7 +279,7 @@ func TestEngineInjectsJobCompletionIntoRuntimeContext(t *testing.T) {
 	waitForJobStatus(t, manager, job.ID, JobStatusSucceeded)
 
 	engine := &Engine{policy: "system", jobs: manager}
-	bundle := engine.buildBundle("", nil, nil)
+	bundle := engine.buildBundle("", nil, nil, nil)
 
 	found := false
 	for _, block := range bundle.RuntimeContext {
@@ -295,7 +295,7 @@ func TestEngineInjectsJobCompletionIntoRuntimeContext(t *testing.T) {
 	}
 
 	// The next request must not repeat it.
-	next := engine.buildBundle("", nil, nil)
+	next := engine.buildBundle("", nil, nil, nil)
 	for _, block := range next.RuntimeContext {
 		if block.Name == "background_job_finished" {
 			t.Fatalf("the completion notice must be delivered once, got %#v", block)

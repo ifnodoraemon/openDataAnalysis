@@ -153,12 +153,13 @@ func (b *Builder) BuildView(ctx context.Context, request BuildRequest) *agent.Re
 		id := sliceKeyID(slice)
 		if pngBytes, ok := cached[id]; ok {
 			view.Slices = append(view.Slices, agent.ReportViewSlice{
-				BlockID: slice.BlockID,
-				Kind:    slice.Kind,
-				Part:    slice.Part,
-				Width:   b.viewportWidth,
-				Height:  slice.Height,
-				PNG:     pngBytes,
+				BlockID:     slice.BlockID,
+				Kind:        slice.Kind,
+				Part:        slice.Part,
+				Width:       b.viewportWidth,
+				Height:      slice.Height,
+				PNG:         pngBytes,
+				ContentHash: b.blockHash(request, slice.BlockID),
 			})
 			continue
 		}
@@ -171,22 +172,31 @@ func (b *Builder) BuildView(ctx context.Context, request BuildRequest) *agent.Re
 			continue
 		}
 		view.Slices = append(view.Slices, agent.ReportViewSlice{
-			BlockID: image.BlockID,
-			Kind:    image.Kind,
-			Part:    image.Part,
-			Width:   image.Width,
-			Height:  image.Height,
-			PNG:     image.PNG,
+			BlockID:     image.BlockID,
+			Kind:        image.Kind,
+			Part:        image.Part,
+			Width:       image.Width,
+			Height:      image.Height,
+			PNG:         image.PNG,
+			ContentHash: b.blockHash(request, image.BlockID),
 		})
 	}
 	return view
 }
 
-func (b *Builder) sliceKey(request BuildRequest, slice Slice) string {
-	contentHash := ""
-	if request.BlockHashes != nil {
-		contentHash = request.BlockHashes[slice.BlockID]
+// blockHash returns the block's content hash, or "" when the caller did not
+// supply one. The coordinator treats "" as "cannot prove unchanged", which is the
+// safe direction: a spurious full view costs tokens, a spurious partial view
+// hides content from the model.
+func (b *Builder) blockHash(request BuildRequest, blockID string) string {
+	if request.BlockHashes == nil {
+		return ""
 	}
+	return request.BlockHashes[blockID]
+}
+
+func (b *Builder) sliceKey(request BuildRequest, slice Slice) string {
+	contentHash := b.blockHash(request, slice.BlockID)
 	return SliceKey(
 		strconv.Itoa(request.ReportVersion),
 		slice.BlockID,

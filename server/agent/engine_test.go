@@ -459,7 +459,7 @@ func TestApplyCompactionReplacesSpanWithSummary(t *testing.T) {
 		t.Fatalf("a summary carries the facts, so nothing should be reported as omitted, got %d", engine.omittedHistoryMessages)
 	}
 
-	bundle := engine.buildBundle("", nil, nil)
+	bundle := engine.buildBundle("", nil, nil, nil)
 	found := false
 	for _, block := range bundle.RuntimeContext {
 		if block.Name == "history_summary" {

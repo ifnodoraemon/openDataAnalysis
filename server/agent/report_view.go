@@ -28,6 +28,9 @@ type ReportView struct {
 	Facts       json.RawMessage
 	Slices      []ReportViewSlice
 	NotCaptured []ReportViewSkipped
+	// UnchangedBlocks lists blocks the model already saw at an earlier version,
+	// so a partial view stays honest about what it is not showing.
+	UnchangedBlocks []string
 }
 
 // ReportViewSlice is one image of the view, aligned to a report block.
@@ -38,6 +41,9 @@ type ReportViewSlice struct {
 	Width   int
 	Height  int
 	PNG     []byte
+	// ContentHash is the block's content hash at capture time. It lets the caller
+	// send only the slices whose block changed since the model last looked.
+	ContentHash string
 }
 
 // ReportViewSkipped records a block the capture could not produce, so its absence
@@ -70,6 +76,7 @@ type reportViewBlockFact struct {
 	Chunk         string                 `json:"chunk,omitempty"`
 	Viewport      *reportViewBlockSize   `json:"viewport,omitempty"`
 	Blocks        []reportViewBlockSlice `json:"blocks"`
+	Unchanged     []string               `json:"unchanged_blocks,omitempty"`
 	NotCaptured   []ReportViewSkipped    `json:"not_captured,omitempty"`
 	RenderFacts   json.RawMessage        `json:"render_facts,omitempty"`
 }
@@ -114,6 +121,7 @@ func (v *ReportView) RuntimeContextBlocks() []RuntimeContextBlock {
 			if v.ViewportWidth > 0 {
 				fact.Viewport = &reportViewBlockSize{Width: v.ViewportWidth, DPR: v.ViewportDPR}
 			}
+			fact.Unchanged = v.UnchangedBlocks
 			fact.NotCaptured = v.NotCaptured
 			fact.RenderFacts = v.Facts
 		} else {

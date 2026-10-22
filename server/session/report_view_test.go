@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -193,4 +194,141 @@ func TestSessionWithoutCaptureCoordinatorIsInert(t *testing.T) {
 		t.Fatal("expected no coordinator on a bare session")
 	}
 	session.CloseReportView()
+}
+
+// publish installs a view as if a capture had completed, for delivery tests.
+func publish(coordinator *ReportViewCoordinator, view *agent.ReportView) {
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	coordinator.view = view
+	coordinator.readyVersion = view.ReportVersion
+}
+
+func viewWithHashes(t *testing.T, version int, hashes map[string]string) *agent.ReportView {
+	t.Helper()
+	view := &agent.ReportView{
+		ReportVersion: version,
+		CapturedAt:    "dirty_blocks",
+		ViewportWidth: 1200,
+		ViewportDPR:   1,
+		Facts:         json.RawMessage(`{"ok":true}`),
+	}
+	blockIDs := make([]string, 0, len(hashes))
+	for blockID := range hashes {
+		blockIDs = append(blockIDs, blockID)
+	}
+	sort.Strings(blockIDs)
+	for _, blockID := range blockIDs {
+		view.Slices = append(view.Slices, agent.ReportViewSlice{
+			BlockID:     blockID,
+			Kind:        "markdown",
+			Part:        "1/1",
+			Width:       1200,
+			Height:      960,
+			PNG:         []byte{0x89, 'P'},
+			ContentHash: hashes[blockID],
+		})
+	}
+	return view
+}
+
+func sliceBlockIDs(view *agent.ReportView) []string {
+	if view == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(view.Slices))
+	for _, slice := range view.Slices {
+		ids = append(ids, slice.BlockID)
+	}
+	return ids
+}
+
+// TestForRequestSendsFullViewFirstThenOnlyDirtyBlocks is the cost contract of the
+// whole feature: unchanged images must not be re-sent every turn.
+func TestForRequestSendsFullViewFirstThenOnlyDirtyBlocks(t *testing.T) {
+	coordinator := NewReportViewCoordinator(&fakeReportViewBuilder{}, "http://client/", time.Second)
+	defer coordinator.Close()
+
+	publish(coordinator, viewWithHashes(t, 1, map[string]string{"b1": "h1", "b2": "h2", "b3": "h3"}))
+	first := coordinator.ForRequest()
+	if len(first.Slices) != 3 {
+		t.Fatalf("the first delivery must be the full view, got %d slices", len(first.Slices))
+	}
+	if len(first.UnchangedBlocks) != 0 {
+		t.Fatalf("the first delivery cannot have unchanged blocks: %v", first.UnchangedBlocks)
+	}
+
+	// Same version again: the model already saw it, so nothing is sent at all.
+	if again := coordinator.ForRequest(); again != nil {
+		t.Fatalf("an unchanged version must not be re-delivered, got %d slices", len(again.Slices))
+	}
+
+	// Only b2 changed.
+	publish(coordinator, viewWithHashes(t, 2, map[string]string{"b1": "h1", "b2": "h2-changed", "b3": "h3"}))
+	dirty := coordinator.ForRequest()
+	if ids := sliceBlockIDs(dirty); len(ids) != 1 || ids[0] != "b2" {
+		t.Fatalf("expected only b2 to be sent, got %v", ids)
+	}
+	if len(dirty.UnchangedBlocks) != 2 || dirty.UnchangedBlocks[0] != "b1" || dirty.UnchangedBlocks[1] != "b3" {
+		t.Fatalf("unchanged blocks must be named, got %v", dirty.UnchangedBlocks)
+	}
+	if dirty.ReportVersion != 2 {
+		t.Fatalf("dirty view lost its version stamp: %d", dirty.ReportVersion)
+	}
+
+	// A layout change invalidates every block: the delivery is the full view again.
+	publish(coordinator, viewWithHashes(t, 3, map[string]string{"b1": "h1x", "b2": "h2x", "b3": "h3x"}))
+	full := coordinator.ForRequest()
+	if len(full.Slices) != 3 {
+		t.Fatalf("expected all blocks after a global change, got %d", len(full.Slices))
+	}
+}
+
+// TestForRequestFallsBackToFullWithoutHashes: a capture without block hashes
+// cannot prove a block is unchanged, so the full view is the only safe answer.
+func TestForRequestFallsBackToFullWithoutHashes(t *testing.T) {
+	coordinator := NewReportViewCoordinator(&fakeReportViewBuilder{}, "http://client/", time.Second)
+	defer coordinator.Close()
+
+	coordinator.mu.Lock()
+	coordinator.view = viewWithHashes(t, 1, map[string]string{"b1": "", "b2": ""})
+	coordinator.readyVersion = 1
+	coordinator.mu.Unlock()
+	if view := coordinator.ForRequest(); len(view.Slices) != 2 {
+		t.Fatalf("expected a full first delivery, got %d", len(view.Slices))
+	}
+
+	publish(coordinator, viewWithHashes(t, 2, map[string]string{"b1": "", "b2": ""}))
+	if view := coordinator.ForRequest(); len(view.Slices) != 2 {
+		t.Fatalf("without hashes every block is dirty, got %d", len(view.Slices))
+	}
+}
+
+// TestForRequestStillDeliversFactsOnlyView: a failed capture advances the version
+// but has no images; the model must still learn that, exactly once.
+func TestForRequestStillDeliversFactsOnlyView(t *testing.T) {
+	coordinator := NewReportViewCoordinator(&fakeReportViewBuilder{}, "http://client/", time.Second)
+	defer coordinator.Close()
+
+	failed := &agent.ReportView{ReportVersion: 1, Facts: json.RawMessage(`{"ok":false,"reason":"capture_failed"}`)}
+	publish(coordinator, failed)
+	view := coordinator.ForRequest()
+	if view == nil || len(view.Slices) != 0 {
+		t.Fatalf("expected a facts-only delivery, got %+v", view)
+	}
+	if blocks := view.RuntimeContextBlocks(); len(blocks) != 1 || len(blocks[0].Parts) != 0 {
+		t.Fatalf("facts-only view should render one image-free block, got %+v", blocks)
+	}
+	if again := coordinator.ForRequest(); again != nil {
+		t.Fatal("the same failure must not be delivered twice")
+	}
+}
+
+func TestForRequestAfterCloseSendsNothing(t *testing.T) {
+	coordinator := NewReportViewCoordinator(&fakeReportViewBuilder{}, "http://client/", time.Second)
+	publish(coordinator, viewWithHashes(t, 1, map[string]string{"b1": "h1"}))
+	coordinator.Close()
+	if view := coordinator.ForRequest(); view != nil {
+		t.Fatalf("a closed coordinator must not deliver views, got %+v", view)
+	}
 }

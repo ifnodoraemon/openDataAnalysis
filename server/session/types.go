@@ -297,7 +297,7 @@ func New(id, workspaceID, userID, cacheRoot string, fileService *service.FileSer
 	// service the session behaves exactly as before, with no images anywhere.
 	if coordinator := newSessionReportViewCoordinator(); coordinator != nil {
 		s.reportView = coordinator
-		s.Engine.SetReportViewProvider(coordinator.Current)
+		s.Engine.SetReportViewProvider(coordinator.ForRequest)
 	}
 
 	return s, nil

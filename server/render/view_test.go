@@ -185,3 +185,23 @@ func TestBuildViewProducesValidPayloadForLongReport(t *testing.T) {
 		}
 	}
 }
+
+// The coordinator filters by ContentHash; without it every block looks dirty and
+// incremental delivery silently degrades to a full view on every turn.
+func TestBuildViewStampsSliceContentHashes(t *testing.T) {
+	client := &fakeCaptureClient{page: solidPage(t, 1200, 1920, color.RGBA{A: 255}), layout: buildLayout()}
+	builder := NewBuilder(client, NewMemoryCache(8), BuilderOptions{})
+	view := builder.BuildView(context.Background(), BuildRequest{
+		HTML:          "<html></html>",
+		ReportVersion: 4,
+		BlockHashes:   map[string]string{"b1": "hash-b1"},
+	})
+	if len(view.Slices) == 0 {
+		t.Fatal("expected slices")
+	}
+	for _, slice := range view.Slices {
+		if slice.ContentHash != "hash-b1" {
+			t.Fatalf("slice %s lost its content hash: %q", slice.BlockID, slice.ContentHash)
+		}
+	}
+}

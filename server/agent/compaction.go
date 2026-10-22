@@ -41,7 +41,7 @@ const (
 
 // buildBundleLocked assembles the layered prompt for one request. The caller
 // must hold e.mu.
-func (e *Engine) buildBundleLocked(userTask string, getRuntimeVars func() []RuntimeContextBlock, continuationFacts []RuntimeContextBlock) *PromptBundle {
+func (e *Engine) buildBundleLocked(userTask string, getRuntimeVars func() []RuntimeContextBlock, continuationFacts []RuntimeContextBlock, view *ReportView) *PromptBundle {
 	bundle := &PromptBundle{Policy: e.policy, Task: userTask}
 	if getRuntimeVars != nil {
 		bundle.RuntimeContext = append(bundle.RuntimeContext, getRuntimeVars()...)
@@ -68,19 +68,33 @@ func (e *Engine) buildBundleLocked(userTask string, getRuntimeVars func() []Runt
 	// The report view goes last: it changes on every capture, so placing it
 	// earlier would invalidate the provider's prefix cache for everything after
 	// it. A nil view is the normal state before the first capture completes.
-	if e.reportView != nil {
-		if view := e.reportView(); view != nil {
-			bundle.RuntimeContext = append(bundle.RuntimeContext, view.RuntimeContextBlocks()...)
-		}
+	if view != nil {
+		bundle.RuntimeContext = append(bundle.RuntimeContext, view.RuntimeContextBlocks()...)
 	}
 	bundle.History = append([]ConversationItem(nil), e.history...)
 	return bundle
 }
 
-func (e *Engine) buildBundle(userTask string, getRuntimeVars func() []RuntimeContextBlock, continuationFacts []RuntimeContextBlock) *PromptBundle {
+func (e *Engine) buildBundle(userTask string, getRuntimeVars func() []RuntimeContextBlock, continuationFacts []RuntimeContextBlock, view *ReportView) *PromptBundle {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.buildBundleLocked(userTask, getRuntimeVars, continuationFacts)
+	return e.buildBundleLocked(userTask, getRuntimeVars, continuationFacts, view)
+}
+
+// takeReportView fetches the view for one request.
+//
+// buildBundle runs twice when history is compacted (before and after), and the
+// provider hands views out with delivery semantics: calling it twice would
+// consume the view on the build that is thrown away, so the request that is
+// actually sent would carry no images. Taking it once, up front, avoids that.
+func (e *Engine) takeReportView() *ReportView {
+	e.mu.Lock()
+	provider := e.reportView
+	e.mu.Unlock()
+	if provider == nil {
+		return nil
+	}
+	return provider()
 }
 
 // pressureTokens returns the best available estimate of the next request's
@@ -209,7 +223,8 @@ func (e *Engine) prepareRequestBundle(
 	continuationFacts []RuntimeContextBlock,
 	toolSpecs []tools.ToolSpec,
 ) *PromptBundle {
-	bundle := e.buildBundle(userTask, getRuntimeVars, continuationFacts)
+	view := e.takeReportView()
+	bundle := e.buildBundle(userTask, getRuntimeVars, continuationFacts, view)
 	pressure := e.pressureTokens(EstimatePromptTokens(bundle, toolSpecs))
 	trigger := contextCompactTriggerTokens()
 	if pressure > trigger {
@@ -225,7 +240,7 @@ func (e *Engine) prepareRequestBundle(
 				method = HistoryCompactionMethodTrim
 			}
 			e.applyCompaction(shadowed, pinned, summary)
-			bundle = e.buildBundle(userTask, getRuntimeVars, continuationFacts)
+			bundle = e.buildBundle(userTask, getRuntimeVars, continuationFacts, view)
 			emit(RuntimeEvent{
 				Type: EventHistoryCompacted,
 				Data: HistoryCompactedData{

@@ -985,7 +985,7 @@ func isSuccessfulDeliveryBoundaryResult(result string) bool {
 }
 
 func (e *Engine) finalResponseAfterFinalize(ctx context.Context, getRuntimeVars func() []RuntimeContextBlock) (string, error) {
-	bundle := e.buildBundle("", getRuntimeVars, nil)
+	bundle := e.buildBundle("", getRuntimeVars, nil, e.takeReportView())
 	baseHistory := append([]ConversationItem(nil), bundle.History...)
 
 	// The continuation runs without tools, so models that "want one more

@@ -163,7 +163,7 @@ func TestEngineInjectsReportViewLast(t *testing.T) {
 
 	bundle := engine.buildBundle("task", func() []RuntimeContextBlock {
 		return []RuntimeContextBlock{{Name: "facts", Role: LLMRoleUser, Content: "session facts"}}
-	}, nil)
+	}, nil, engine.takeReportView())
 
 	if len(bundle.RuntimeContext) != 2 {
 		t.Fatalf("expected facts plus view, got %d blocks", len(bundle.RuntimeContext))
@@ -186,14 +186,34 @@ func TestEngineWithoutViewProviderIsUnchanged(t *testing.T) {
 	engine := &Engine{policy: "policy"}
 	bundle := engine.buildBundle("task", func() []RuntimeContextBlock {
 		return []RuntimeContextBlock{{Name: "facts", Role: LLMRoleUser, Content: "session facts"}}
-	}, nil)
+	}, nil, engine.takeReportView())
 	if len(bundle.RuntimeContext) != 1 {
 		t.Fatalf("expected only the injected facts, got %d blocks", len(bundle.RuntimeContext))
 	}
 	absent := &Engine{policy: "policy"}
 	absent.SetReportViewProvider(func() *ReportView { return nil })
-	empty := absent.buildBundle("task", nil, nil)
+	empty := absent.buildBundle("task", nil, nil, absent.takeReportView())
 	if len(empty.RuntimeContext) != 0 {
 		t.Fatalf("nil view must not add a block, got %d", len(empty.RuntimeContext))
+	}
+}
+
+// TestReportViewNamesUnchangedBlocks: after the first delivery the model only
+// receives changed slices, so the fact payload has to say what it is not showing.
+// Silently omitting blocks would read as "these blocks no longer exist".
+func TestReportViewNamesUnchangedBlocks(t *testing.T) {
+	view := testReportView(1)
+	view.UnchangedBlocks = []string{"blk_scope", "blk_orders"}
+	blocks := view.RuntimeContextBlocks()
+	if len(blocks) != 1 {
+		t.Fatalf("expected one block, got %d", len(blocks))
+	}
+	for _, want := range []string{`"unchanged_blocks":["blk_scope","blk_orders"]`, `"report_version":17`} {
+		if !strings.Contains(blocks[0].Content, want) {
+			t.Fatalf("fact payload missing %s: %s", want, blocks[0].Content)
+		}
+	}
+	if len(blocks[0].Parts) != 1 {
+		t.Fatalf("expected only the changed slice, got %d parts", len(blocks[0].Parts))
 	}
 }
