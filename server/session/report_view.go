@@ -270,3 +270,64 @@ func (s *Session) CloseReportView() {
 	}
 	s.reportView.Close()
 }
+
+// RequestManual forces the next delivery to include the view even if the model
+// has already seen this version: the user explicitly asked to look at it.
+//
+// A capture is scheduled only when the current view is older than the report;
+// asking to see a fresh view must not cost a five-second render for nothing.
+func (c *ReportViewCoordinator) RequestManual(version int, html string, hashes map[string]string) {
+	if c == nil || c.builder == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.deliveredVersion = 0
+	c.deliveredHashes = nil
+	current := c.view
+	c.mu.Unlock()
+
+	if current == nil || current.ReportVersion < version {
+		c.Request(version, "manual_screen", html, hashes)
+	}
+}
+
+// CaptureNow runs one capture and waits for it.
+//
+// This is the only blocking capture path, used at the delivery boundary: the
+// model should get one look at the finalized report before it writes its final
+// answer, and by then nothing else will trigger a capture. Everywhere else stays
+// asynchronous. The caller bounds it with its own context.
+func (c *ReportViewCoordinator) CaptureNow(ctx context.Context, version int, capturedAt, html string, hashes map[string]string) *agent.ReportView {
+	if c == nil || c.builder == nil || version <= 0 {
+		return nil
+	}
+	view := c.builder.BuildView(ctx, render.BuildRequest{
+		HTML:          html,
+		AssetBaseURL:  c.assetBaseURL,
+		ReportVersion: version,
+		CapturedAt:    capturedAt,
+		BlockHashes:   hashes,
+	})
+	if view == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return view
+	}
+	// Keep the freshest published view; equal versions still replace, because the
+	// finalize step can change the title while leaving the block hashes alone.
+	if view.ReportVersion >= c.readyVersion {
+		c.view = view
+		c.readyVersion = view.ReportVersion
+	}
+	// Force the next request to carry it in full.
+	c.deliveredVersion = 0
+	c.deliveredHashes = nil
+	return view
+}

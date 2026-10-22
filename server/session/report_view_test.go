@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -330,5 +331,112 @@ func TestForRequestAfterCloseSendsNothing(t *testing.T) {
 	coordinator.Close()
 	if view := coordinator.ForRequest(); view != nil {
 		t.Fatalf("a closed coordinator must not deliver views, got %+v", view)
+	}
+}
+
+func TestRequestManualForcesRedeliveryOfSameVersion(t *testing.T) {
+	coordinator := NewReportViewCoordinator(&fakeReportViewBuilder{}, "http://client/", time.Second)
+	defer coordinator.Close()
+
+	publish(coordinator, viewWithHashes(t, 1, map[string]string{"b1": "h1", "b2": "h2"}))
+	if view := coordinator.ForRequest(); len(view.Slices) != 2 {
+		t.Fatalf("expected the full first delivery, got %d", len(view.Slices))
+	}
+	if again := coordinator.ForRequest(); again != nil {
+		t.Fatal("the same version must not be delivered twice on its own")
+	}
+
+	// The user asked to look at the report: same version, but deliver it again.
+	coordinator.RequestManual(1, "<html></html>", map[string]string{"b1": "h1", "b2": "h2"})
+	manual := coordinator.ForRequest()
+	if manual == nil || len(manual.Slices) != 2 {
+		t.Fatalf("a manual request must re-deliver the full view, got %+v", manual)
+	}
+}
+
+func TestRequestManualCapturesWhenViewIsStale(t *testing.T) {
+	builder := &fakeReportViewBuilder{}
+	coordinator := NewReportViewCoordinator(builder, "http://client/", time.Second)
+	defer coordinator.Close()
+
+	publish(coordinator, viewWithHashes(t, 1, map[string]string{"b1": "h1"}))
+	coordinator.ForRequest()
+
+	coordinator.RequestManual(2, "<html></html>", map[string]string{"b1": "h2"})
+	waitFor(t, "a capture for version 2", func() bool {
+		return len(builder.builtVersions()) == 1 && builder.builtVersions()[0] == 2
+	})
+	waitFor(t, "the version 2 view", func() bool {
+		view := coordinator.Current()
+		return view != nil && view.ReportVersion == 2
+	})
+}
+
+type blockingBuilder struct {
+	canceled bool
+}
+
+func (b *blockingBuilder) BuildView(ctx context.Context, request render.BuildRequest) *agent.ReportView {
+	if err := ctx.Err(); err != nil {
+		b.canceled = true
+		return nil
+	}
+	return &agent.ReportView{ReportVersion: request.ReportVersion, Facts: json.RawMessage(`{"ok":true}`)}
+}
+
+// hashedViewBuilder returns a view carrying one slice whose hash tracks the
+// version, so delivery filtering can be exercised without a browser.
+type hashedViewBuilder struct{}
+
+func (hashedViewBuilder) BuildView(ctx context.Context, request render.BuildRequest) *agent.ReportView {
+	return &agent.ReportView{
+		ReportVersion: request.ReportVersion,
+		CapturedAt:    request.CapturedAt,
+		Facts:         json.RawMessage(`{"ok":true}`),
+		Slices: []agent.ReportViewSlice{{
+			BlockID:     "b1",
+			Kind:        "markdown",
+			Part:        "1/1",
+			Width:       1200,
+			Height:      900,
+			PNG:         []byte{0x89},
+			ContentHash: "h" + strconv.Itoa(request.ReportVersion),
+		}},
+	}
+}
+
+func TestCaptureNowPublishesAndForcesDelivery(t *testing.T) {
+	builder := hashedViewBuilder{}
+	coordinator := NewReportViewCoordinator(builder, "http://client/", time.Second)
+	defer coordinator.Close()
+
+	view := coordinator.CaptureNow(context.Background(), 4, "finalize_precheck", "<html></html>", map[string]string{"b1": "h4"})
+	if view == nil || view.ReportVersion != 4 {
+		t.Fatalf("expected a version 4 view, got %+v", view)
+	}
+	if current := coordinator.Current(); current == nil || current.ReportVersion != 4 {
+		t.Fatalf("the capture should have been published, got %+v", current)
+	}
+	delivered := coordinator.ForRequest()
+	if delivered == nil || len(delivered.Slices) != 1 {
+		t.Fatalf("the finalize capture must be force-delivered, got %+v", delivered)
+	}
+}
+
+func TestCaptureNowHonorsContextCancellation(t *testing.T) {
+	builder := &blockingBuilder{}
+	coordinator := NewReportViewCoordinator(builder, "http://client/", time.Second)
+	defer coordinator.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if view := coordinator.CaptureNow(ctx, 6, "finalize_precheck", "<html></html>", nil); view != nil {
+		t.Fatalf("a canceled capture must not produce a view, got %+v", view)
+	}
+	if !builder.canceled {
+		t.Fatal("the builder should observe the canceled context")
+	}
+	if current := coordinator.Current(); current != nil {
+		t.Fatalf("a failed capture must not publish, got %+v", current)
 	}
 }

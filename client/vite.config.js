@@ -29,7 +29,9 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://localhost:8080",
+      // Overridable so the API can run on another port when 8080 is taken by
+      // something else on the same machine.
+      "/api": process.env.ODA_API_TARGET || "http://localhost:8080",
     },
   },
 });

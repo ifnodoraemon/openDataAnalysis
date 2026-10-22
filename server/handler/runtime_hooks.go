@@ -107,10 +107,14 @@ func newRuntimeEventDispatcher(ctx context.Context, sess *session.Session, ident
 			deliverToRun(runID, agent.RuntimeEvent{Type: agent.EventStateReportEditUpdated, Data: data})
 		},
 		finalizeReport: func() error {
-			// Requested before finalizing so a capture that started earlier this turn
-			// can still land; it is never awaited.
-			triggerReportCapture(sess, "finalize_precheck")
-			return finalizeAndPersistReport(ctx, sess, identity, runID)
+			if err := finalizeAndPersistReport(ctx, sess, identity, runID); err != nil {
+				return err
+			}
+			// After finalizing, not before: the title and author only exist once the
+			// report is finalized, and this capture is the model's last look at the
+			// report as delivered.
+			finalizeReportView(sess)
+			return nil
 		},
 		setRunStatus: func(status domain.RunStatus, errMsg *string) {
 			if err := withPersistenceContext(ctx, func(persistCtx context.Context) error {

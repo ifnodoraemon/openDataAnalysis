@@ -77,6 +77,7 @@ func main() {
 			api.Get("/api/runs", handler.ListRunsHandler)
 			api.Get("/api/runs/{runID}", handler.GetRunHandler)
 			api.Get("/api/runs/{runID}/report", handler.GetRunReportHandler)
+			api.Post("/api/sessions/{sessionID}/report/view", handler.CaptureReportViewHandler)
 			api.Get("/api/files/{fileID}", handler.DownloadFileHandler)
 
 			api.Get("/api/sessions/{sessionID}/sources", handler.SessionSourcesHandler)

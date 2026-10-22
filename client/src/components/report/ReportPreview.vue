@@ -71,9 +71,23 @@
           </button>
         </div>
       </template>
-      <p v-else class="edit-hint">
-        划词选中报告内容后引用到左侧对话；也可以点击章节引用整段。
-      </p>
+      <template v-else>
+        <p class="edit-hint">
+          划词选中报告内容后引用到左侧对话；也可以点击章节引用整段。
+        </p>
+        <div class="edit-actions">
+          <button
+            class="toolbar-btn"
+            :disabled="isRunning || reportViewBusy"
+            @click="requestModelView"
+          >
+            {{ reportViewBusy ? "已请求…" : "让模型看这屏" }}
+          </button>
+          <span v-if="reportViewNotice" class="report-view-notice">{{
+            reportViewNotice
+          }}</span>
+        </div>
+      </template>
     </div>
     <div class="preview-area">
       <div v-if="!reportHTML" class="empty-state">
@@ -115,6 +129,10 @@ const activeRun = computed(() => store.getRun(store.activeRunId) || null);
 const selectedReport = computed(() => selectedRun.value?.report || null);
 const isRunning = computed(() => store.isRunning);
 const reportFrame = ref(null);
+// Manual view capture: ask the backend to show the model what the user is
+// looking at. The view arrives on the model's next turn, not in this response.
+const reportViewBusy = ref(false);
+const reportViewNotice = ref("");
 const showExportMenu = ref(false);
 const selectedBlockId = ref("");
 const selectedFragmentIndex = ref("");
@@ -193,6 +211,32 @@ function clearSelection() {
   selectedSelectionEnd.value = null;
   selectedByText.value = false;
   applySelectionHighlight("");
+}
+
+async function requestModelView() {
+  const sessionID = store.sessionId;
+  if (!sessionID) return;
+  reportViewBusy.value = true;
+  reportViewNotice.value = "";
+  try {
+    const response = await fetch(
+      `/api/sessions/${encodeURIComponent(sessionID)}/report/view`,
+      { method: "POST" },
+    );
+    if (response.status === 409) {
+      reportViewNotice.value = "后台未启用报告截图";
+      return;
+    }
+    if (!response.ok) {
+      reportViewNotice.value = "请求失败";
+      return;
+    }
+    reportViewNotice.value = "已请求，模型下次发言时可见";
+  } catch (error) {
+    reportViewNotice.value = "请求失败";
+  } finally {
+    reportViewBusy.value = false;
+  }
 }
 
 function handleFrameLoad() {
@@ -868,6 +912,12 @@ function waitForFrameReady(frameDocument) {
   margin: 0;
   color: var(--text-muted);
   font-size: 0.85rem;
+}
+
+.report-view-notice {
+  align-self: center;
+  color: var(--text-muted);
+  font-size: 0.78rem;
 }
 
 .empty-state {
