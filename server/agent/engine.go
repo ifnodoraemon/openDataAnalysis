@@ -933,7 +933,10 @@ func validateToolCallBatch(registry *tools.Registry, calls []LLMToolCall) error 
 	for _, call := range calls {
 		tool, err := registry.Get(call.Function.Name)
 		if err != nil {
-			return err
+			// A name the model invented is its own output, not a runtime
+			// failure: dispatch reports it per call so the rest of the batch and
+			// the run survive.
+			continue
 		}
 		if toolCapability(tool).RunControl == "suspend" {
 			suspending++

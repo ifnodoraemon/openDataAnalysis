@@ -12,8 +12,8 @@
 | 15_unit_mismatch_explicit | 提问后收敛，未出报告 | 验收口径（已修） |
 | 30_timeseries_multidim | 提问后收敛，未出报告 | 验收口径（已修） |
 | 28_hr_crosstab | 420s 超时 | 超时预算（已修） |
-| 23_financial_ledger_large | `模型服务调用失败` | 模型输出非法 JSON（引擎问题） |
-| 25_employee_wide | `模型服务调用失败` | 模型输出非法 JSON（引擎问题） |
+| 23_financial_ledger_large | `模型服务调用失败` | 模型输出非法 JSON（**已修**） |
+| 25_employee_wide | `模型服务调用失败` | 模型输出非法 JSON（**已修**） |
 | 17_delegate_child_tool_failure_recovery | 完成但未 finalize | 模型行为 |
 | 18_delegate_partial_recovery | 完成但未 finalize | 模型行为 |
 
@@ -25,7 +25,7 @@
 
 28 的 `task_length` 是 medium（420s），实测需要更多时间，改为 long（600s）。
 
-### 未修：模型输出非法 JSON 会让整个 run 失败
+### 已修：模型输出非法 JSON 会让整个 run 失败
 
 23 与 25 的真实原因（服务端日志）：
 
@@ -37,6 +37,12 @@ invalid Chat Completions response: choice[0].tool_calls[0] arguments: duplicate 
 模型在工具参数里写出了**重复的 JSON key**。严格解码拒绝后，引擎把整轮 run 判为 `llm_request_failed` 并结束。
 
 这是健壮性问题，不是场景问题：一次参数格式抖动就丢失整轮工作。契约严格本身没错，但这类"模型写出了语法上可修复的 JSON"应该按可恢复的工具失败反馈给模型重试，而不是终止 run。
+
+修法：
+- 响应校验只校验 id/name/type，不再因参数 JSON 非法而判整个响应失败——参数是模型输出，不是传输错误。
+- 派发阶段校验参数，非法时返回 `error_code=invalid_tool_arguments` 的结构化失败，不执行该调用，模型可自行修正后重试。
+- 同一类问题一并处理：模型编造不存在的工具名现在返回 `unknown_tool` 失败，而不是终止整轮。
+- Google 路径重建请求时对非法参数退化为空对象，避免下一轮因历史里的坏参数再次失败。
 
 ### 未修：17/18 从未尝试 finalize
 

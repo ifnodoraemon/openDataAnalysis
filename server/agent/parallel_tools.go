@@ -3,6 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+
+	"github.com/ifnodoraemon/openDataAnalysis/internal/jsoncontract"
 
 	"github.com/ifnodoraemon/openDataAnalysis/config"
 	"github.com/ifnodoraemon/openDataAnalysis/tools"
@@ -63,12 +66,28 @@ func (e *Engine) planToolCalls(ctx context.Context, calls []LLMToolCall) ([]plan
 	for _, call := range calls {
 		tool, err := e.registry.Get(call.Function.Name)
 		if err != nil {
-			return nil, err
+			// Unknown tool: report it as a failed call instead of aborting.
+			plan = append(plan, plannedToolCall{
+				call:      call,
+				admission: tools.Admission{Kind: tools.AdmissionDeny, Code: "unknown_tool", Reason: err.Error()},
+			})
+			continue
 		}
 		args := json.RawMessage(call.Function.Arguments)
 		capability := toolCapability(tool)
 		admission := tools.DecideToolCall(tool, args, e)
 		if admission.Kind == tools.AdmissionAllow {
+			// A model occasionally emits arguments that are not a valid JSON
+			// object — duplicate keys, truncation, stray markup. That is its
+			// output, not a transport failure: report it as a failed call so the
+			// model can correct it instead of losing the whole run.
+			if err := validateToolCallArguments(args); err != nil {
+				admission = tools.Admission{
+					Kind:   tools.AdmissionDeny,
+					Code:   "invalid_tool_arguments",
+					Reason: err.Error(),
+				}
+			}
 			if checker, ok := tool.(tools.AvailabilityTool); ok {
 				if checkErr := probeToolAvailability(ctx, checker); checkErr != nil {
 					admission = tools.Admission{
@@ -138,4 +157,17 @@ func runPlannedToolCall(ctx context.Context, registry *tools.Registry, call LLMT
 		return future.wait()
 	}
 	return retryableToolExec(ctx, registry, call.Function.Name, json.RawMessage(call.Function.Arguments))
+}
+
+// validateToolCallArguments checks that a tool call carries a strict JSON
+// object. It runs at dispatch so the failure is attributable to one call.
+func validateToolCallArguments(args json.RawMessage) error {
+	if len(args) == 0 {
+		return fmt.Errorf("tool arguments are empty; a JSON object is required")
+	}
+	var payload map[string]interface{}
+	if err := jsoncontract.Decode(args, &payload); err != nil {
+		return fmt.Errorf("tool arguments are not a valid JSON object: %w", err)
+	}
+	return nil
 }

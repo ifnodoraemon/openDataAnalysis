@@ -535,10 +535,8 @@ func validateResponsesAPIResponse(resp *responsesAPIResponse) error {
 			if strings.TrimSpace(item.CallID) != item.CallID || strings.TrimSpace(item.Name) != item.Name {
 				return fmt.Errorf("output[%d] function_call identifiers must not be padded", i)
 			}
-			var args map[string]interface{}
-			if err := jsoncontract.Decode([]byte(item.Arguments), &args); err != nil {
-				return fmt.Errorf("output[%d] function_call arguments: %w", i, err)
-			}
+			// See the chat-completions path: malformed arguments are reported at
+			// dispatch so the model can correct them on the next step.
 		default:
 			return fmt.Errorf("output[%d] has unsupported type %q", i, item.Type)
 		}
@@ -787,10 +785,8 @@ func validateChatCompletionsResponse(resp *chatCompletionsResponse) error {
 			if strings.TrimSpace(toolCall.ID) != toolCall.ID || strings.TrimSpace(toolCall.Function.Name) != toolCall.Function.Name {
 				return fmt.Errorf("choice[%d].tool_calls[%d] identifiers must not be padded", i, j)
 			}
-			var args map[string]interface{}
-			if err := jsoncontract.Decode([]byte(toolCall.Function.Arguments), &args); err != nil {
-				return fmt.Errorf("choice[%d].tool_calls[%d] arguments: %w", i, j, err)
-			}
+			// Argument validity is checked at dispatch, where a malformed call
+			// becomes a recoverable tool failure instead of a dead run.
 		}
 	}
 	return nil

@@ -107,9 +107,13 @@ func (l *LLMClient) chatGoogle(ctx context.Context, bundle *PromptBundle, toolSp
 			}
 			if len(h.ToolCalls) > 0 {
 				for _, tc := range h.ToolCalls {
+					// A call whose arguments the model emitted malformed is kept
+					// in history with the runtime's structured failure next to
+					// it. Replaying it must not fail the request, so the
+					// unparsable arguments travel as an empty object.
 					var args map[string]interface{}
 					if err := jsoncontract.Decode([]byte(tc.Function.Arguments), &args); err != nil {
-						return nil, fmt.Errorf("Google request tool call %s has invalid arguments: %w", tc.ID, err)
+						args = map[string]interface{}{}
 					}
 					toolNames[tc.ID] = tc.Function.Name
 					parts = append(parts, geminiPart{FunctionCall: &geminiFunctionCall{
