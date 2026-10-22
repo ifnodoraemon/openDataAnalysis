@@ -56,6 +56,8 @@ async function getBrowser() {
     browserPromise = puppeteer
       .launch({
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        // Read-only root filesystem: the profile has to live on a writable mount.
+        userDataDir: process.env.CHROME_USER_DATA_DIR || "/tmp/chrome-profile",
         args: [
           "--no-sandbox",
           "--disable-dev-shm-usage",

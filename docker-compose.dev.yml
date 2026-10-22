@@ -1,0 +1,186 @@
+# Dev stack: postgres for metadata, local disk for objects, everything in docker.
+#
+# Build the images with host networking first, then start the stack. This host's
+# default bridge truncates large HTTP downloads: `go mod download` inside a build
+# container fails with "unexpected EOF" on multi-MB module zips, while the same
+# download over the host network succeeds. BuildKit refuses `network: host`
+# without an explicit privilege, so the builds stay out of compose:
+#
+#   for svc in server client python-executor render-executor; do
+#     docker build --network host -t data-analysis-dev-$svc ./$svc
+#   done
+#   docker compose -f docker-compose.dev.yml up -d
+#
+# (compose tags images as <project>-<service>; the project name is below.)
+#
+# Why this exists next to docker-compose.yml: that file pulls minio/minio, whose
+# Docker Hub images were withdrawn upstream (the pull now fails with "denied"),
+# so the S3 variant cannot be built at all. This file keeps the same service
+# topology and the same control plane (postgres), and points object storage at a
+# local directory instead. Use docker-compose.yml once a maintained S3-compatible
+# image is chosen.
+name: data-analysis-dev
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: data-analysis-dev-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: oda
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-oda_password}
+      POSTGRES_DB: oda
+    volumes:
+      - dev-pg-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oda -d oda"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  python-executor:
+    build: ./python-executor
+    container_name: data-analysis-dev-python
+    restart: unless-stopped
+    environment:
+      PROXY_TOKEN: ${PROXY_TOKEN:?set PROXY_TOKEN in .env at the repo root (see .env.example)}
+      PYTHON_MAX_TIMEOUT_SECONDS: ${EXECUTOR_MAX_TIMEOUT_SECONDS:-120}
+      MEMORY_LIMIT_MB: ${EXECUTOR_MEMORY_LIMIT_MB:-512}
+      XDG_CACHE_HOME: /tmp/xdg-cache
+      MPLCONFIGDIR: /tmp/mplconfigdir
+    volumes:
+      - python-workspace:/app/workspace
+    networks:
+      - executor-network
+    mem_limit: 1g
+    pids_limit: 128
+    cpus: 2.0
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=2).status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  render-executor:
+    build: ./render-executor
+    container_name: data-analysis-dev-render
+    restart: unless-stopped
+    environment:
+      PROXY_TOKEN: ${PROXY_TOKEN:?set PROXY_TOKEN in .env at the repo root (see .env.example)}
+      PORT: 8082
+      MAX_CONCURRENT_CAPTURES: ${RENDER_MAX_CONCURRENT:-2}
+      CAPTURE_TIMEOUT_MS: ${RENDER_CAPTURE_TIMEOUT_MS:-8000}
+    # The capture service loads report assets from the client origin, so it joins
+    # the app network; it never talks to postgres.
+    networks:
+      - app-network
+      - executor-network
+    mem_limit: 1g
+    shm_size: 512m
+    pids_limit: 256
+    cpus: 2.0
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8082/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+
+  server:
+    build: ./server
+    container_name: data-analysis-dev-server
+    restart: unless-stopped
+    env_file: ./server/.env
+    environment:
+      METADATA_STORE: postgres
+      POSTGRES_DSN: postgres://oda:${POSTGRES_PASSWORD:-oda_password}@postgres:5432/oda?sslmode=disable
+      STORAGE_PROVIDER: local
+      STORAGE_ROOT: /app/data/storage
+      CACHE_ROOT: /app/data/cache
+      TEMP_DIR: /app/data/tmp
+      PROXY_TOKEN: ${PROXY_TOKEN:?set PROXY_TOKEN in .env at the repo root (see .env.example)}
+      RENDER_EXECUTOR_URL: http://render-executor:8082
+      RENDER_ASSET_BASE_URL: http://client:8080/
+      AUTH_COOKIE_SECURE: "false"
+      # Seed the local account from DEFAULT_USER_* in server/.env. Off by default
+      # in config because production provisions identities explicitly; a dev stack
+      # with no account cannot be logged into at all.
+      BOOTSTRAP_DEFAULT_IDENTITY: "true"
+    volumes:
+      - ./data-dev:/app/data
+      - python-workspace:/app/python-workspace
+    networks:
+      app-network:
+        # client/nginx.conf proxies to data-analysis-server:8080, so the stack
+        # must expose that name regardless of the container name used here.
+        aliases:
+          - data-analysis-server
+      executor-network: {}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      python-executor:
+        condition: service_healthy
+      render-executor:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    mem_limit: 1g
+    pids_limit: 256
+    cpus: 2.0
+    security_opt:
+      - no-new-privileges:true
+
+  client:
+    build: ./client
+    container_name: data-analysis-dev-client
+    restart: unless-stopped
+    ports:
+      - "${ODA_HTTP_PORT:-8090}:8080"
+    networks:
+      - app-network
+      - executor-network
+    depends_on:
+      server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    mem_limit: 256m
+    pids_limit: 64
+    cpus: 0.5
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  app-network:
+    driver: bridge
+  executor-network:
+    driver: bridge
+
+volumes:
+  dev-pg-data:
+  python-workspace:

@@ -177,7 +177,9 @@ services:
     container_name: data-analysis-client
     restart: unless-stopped
     ports:
-      - "80:8080"
+      # Host port is configurable because 80/8080 are commonly taken on a dev box
+      # (and 8080 is also this stack's internal server port).
+      - "${ODA_HTTP_PORT:-80}:8080"
     networks:
       - app-network
       # Also on the executor network so the capture service can fetch /assets from

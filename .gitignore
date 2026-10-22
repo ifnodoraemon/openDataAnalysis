@@ -16,6 +16,7 @@ server/.env
 
 # Data cache
 /data/
+/data-dev/
 /python-workspace/
 /server/data/cache/*.db
 /server/data/cache/*.db-shm

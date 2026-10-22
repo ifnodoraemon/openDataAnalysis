@@ -10,7 +10,11 @@ COPY --chmod=0444 server.js /app/server.js
 
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
     NODE_PATH=/usr/src/app/node_modules \
-    PORT=8082
+    PORT=8082 \
+    # The runtime filesystem is read-only, so Chromium cannot write its profile or
+    # crash database to the image user's home. Point HOME at the tmpfs instead;
+    # without this, launch dies with "chrome_crashpad_handler: --database is required".
+    HOME=/tmp
 
 # The image ships as uid 1000 (chrome) with no capabilities; the compose service
 # additionally drops all caps and attaches it to a network with no egress.
