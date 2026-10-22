@@ -462,7 +462,13 @@ async function main() {
   }
 
   const scenario = loadScenarioById(args.scenarioId);
-  const outDir = path.join(OUTPUT_ROOT, `${nowStamp()}-${scenario.data.id}`);
+  // Parallel runs of one scenario can start within the same second, so the
+  // stamp alone is not a unique key; the suffix keeps their artifacts apart.
+  const outBase = path.join(OUTPUT_ROOT, `${nowStamp()}-${scenario.data.id}`);
+  let outDir = outBase;
+  for (let suffix = 2; fs.existsSync(outDir); suffix += 1) {
+    outDir = `${outBase}-${suffix}`;
+  }
   fs.mkdirSync(outDir, { recursive: true });
   activeTimelinePath = path.join(outDir, "timeline.log");
   const startedAt = Date.now();

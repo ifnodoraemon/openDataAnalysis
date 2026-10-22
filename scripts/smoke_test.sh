@@ -13,6 +13,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BASE_URL="http://127.0.0.1"
 TIMEOUT="120"
 REPEAT="1"
+JOBS="1"
 POSITIONAL_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -30,6 +31,17 @@ while [ $# -gt 0 ]; do
                 exit 64
             fi
             TIMEOUT="$2"
+            shift 2
+            ;;
+        --jobs)
+            # Runs are independent: each scenario gets its own session, its own
+            # analysis database and its own artifacts. The only shared resource
+            # is the model gateway, so jobs is bounded by that.
+            if [ $# -lt 2 ]; then
+                echo "错误：--jobs 缺少参数值" >&2
+                exit 64
+            fi
+            JOBS="$2"
             shift 2
             ;;
         --repeat)
@@ -133,32 +145,50 @@ scenario_timeout() {
     esac
 }
 
+RUNS_DIR="$ROOT_DIR/tmp/run-status"
+rm -rf "$RUNS_DIR"
+mkdir -p "$RUNS_DIR"
+
+# One file per (scenario, attempt) keeps parallel workers from sharing state.
+task_args=""
+for scenario_id in "${SCENARIOS[@]}"; do
+    for attempt in $(seq 1 "$REPEAT"); do
+        task_args="$task_args$scenario_id $attempt\n"
+    done
+done
+
+run_one() {
+    local sid="$1"
+    local attempt="$2"
+    local budget
+    budget=$(scenario_timeout "$sid")
+    local log="$RUNS_DIR/$sid.$attempt.log"
+    if node "$SCRIPT_DIR/run_scenario.js" \
+        --id "$sid" \
+        --base-url "$BASE_URL" \
+        --timeout "$budget" > "$log" 2>&1; then
+        echo ok > "$RUNS_DIR/$sid.$attempt.status"
+    else
+        echo fail > "$RUNS_DIR/$sid.$attempt.status"
+    fi
+}
+
+export -f run_one scenario_timeout
+export ROOT_DIR SCRIPT_DIR BASE_URL TIMEOUT RUNS_DIR
+
+echo "并行度：$JOBS，每个场景重复 $REPEAT 次，共 $(( ${#SCENARIOS[@]} * REPEAT )) 次运行"
+echo ""
+
+if [ "$JOBS" -le 1 ]; then
+    while read -r sid attempt; do run_one "$sid" "$attempt"; done < <(printf "$task_args")
+else
+    printf "$task_args" | xargs -P "$JOBS" -n 2 bash -c 'run_one "$0" "$1"'
+fi
+
 for scenario_id in "${SCENARIOS[@]}"; do
     total=$((total + 1))
-    scenario_budget=$(scenario_timeout "$scenario_id")
-    scenario_passes=0
-    last_exit_code=0
-    for attempt in $(seq 1 "$REPEAT"); do
-        echo "--- [$total] 正在运行：$scenario_id（第 $attempt/$REPEAT 次，超时 ${scenario_budget}s）---"
-
-        set +e
-        output=$(node "$SCRIPT_DIR/run_scenario.js" \
-            --id "$scenario_id" \
-            --base-url "$BASE_URL" \
-            --timeout "$scenario_budget" 2>&1)
-        exit_code=$?
-        set -e
-
-        if [ $exit_code -eq 0 ]; then
-            echo "  ✅ 通过"
-            scenario_passes=$((scenario_passes + 1))
-        else
-            last_exit_code=$exit_code
-            echo "  ❌ 失败（退出码=$exit_code）"
-            print_failure_output "$output"
-        fi
-    done
-
+    scenario_passes=$(grep -l '^ok$' "$RUNS_DIR/$scenario_id".*.status 2>/dev/null | wc -l)
+    scenario_passes=${scenario_passes//[^0-9]/}
     if [ "$scenario_passes" -eq "$REPEAT" ]; then
         status="pass"
         passed=$((passed + 1))
@@ -166,14 +196,18 @@ for scenario_id in "${SCENARIOS[@]}"; do
         status="fail"
         failed=$((failed + 1))
     else
-        # Passing sometimes is its own defect class: it hides behind a single
-        # run and surfaces in production.
         status="flaky"
         flaky=$((flaky + 1))
     fi
-    echo "  → ${status}（$scenario_passes/$REPEAT）"
-    echo ""
-    results+=("{\"id\":\"$scenario_id\",\"status\":\"$status\",\"runs\":$REPEAT,\"passes\":$scenario_passes,\"exit_code\":$last_exit_code}")
+    echo "  ${status}（$scenario_passes/$REPEAT） $scenario_id"
+    if [ "$status" != "pass" ]; then
+        for log in "$RUNS_DIR/$scenario_id".*.log; do
+            if ! grep -q '^ok$' "${log%.log}.status" 2>/dev/null; then
+                print_failure_output "$(tail -n 40 "$log")"
+            fi
+        done
+    fi
+    results+=("{\"id\":\"$scenario_id\",\"status\":\"$status\",\"runs\":$REPEAT,\"passes\":$scenario_passes}")
 done
 
 # 输出汇总 JSON
