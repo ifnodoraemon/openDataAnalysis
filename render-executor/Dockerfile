@@ -17,7 +17,10 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
 USER chrome
 EXPOSE 8082
 
+# Shell form so ${PORT} is expanded: the service port is configurable, and a
+# healthcheck pinned to the default would report healthy-but-wrong or unhealthy
+# when PORT is overridden.
 HEALTHCHECK --interval=10s --timeout=3s --retries=6 \
-  CMD wget -qO- http://127.0.0.1:8082/healthz >/dev/null 2>&1 || exit 1
+  CMD wget -qO- "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1 || exit 1
 
 CMD ["node", "/app/server.js"]
