@@ -141,11 +141,20 @@ sha256( block_html ‖ chart_option ‖ layout_css ‖ body_class
 超时、Chrome 崩溃、资源 404 一律不抛到 run 上：返回
 `capture_facts{ok:false, reason, block_id}`，注入时只给事实不给图。
 
-## 4. 注入规格
+## 4. 注入规格（已落地）
 
-- 新 runtime context block：`name="report_view"`，`role=user`。
-- 位置：`buildBundle` 末尾，jobs completion notice 之后。
+- runtime context block：`name="report_view"`，`role=user`，由
+  `ReportView.RuntimeContextBlocks()` 生成（`server/agent/report_view.go`）。
+- 位置：`buildBundle` 末尾，jobs completion notice 之后，由
+  `Engine.SetReportViewProvider` 提供数据源。
   理由：它每轮都变，放前面会让整个前缀缓存失效，prefill 成本和延迟随轮数线性上涨。
+- **分块**：每个 block 最多 20 张图（`maxReportViewImagesPerBlock`），
+  一行切片长报告会拆成 `chunk: "1/3"` 这样的多个 block。
+  不这么做的直接后果是超出 `maxMessageImages`，请求被网关拒掉。
+  事实与 `not_captured` 只放在第一块，后续块标 `continuation: true`，不重复占 token。
+- **视图不进历史**，每轮按当前版本重建。因此每轮都会重新付一次图片 token——
+  这就是为什么增量（只发脏块）是必需的，而不是优化项：全量视图 29 张约 36k token/轮。
+- provider 返回 nil 表示"还没有就绪的捕获"，本轮只给事实不给图，**永不阻塞等待**。
 - 内容 = 文本事实 + 图片 parts：
 
 ```json
@@ -167,7 +176,10 @@ sha256( block_html ‖ chart_option ‖ layout_css ‖ body_class
 ```
 
 - 版本戳必须带 `report_version`（`ReportState.MutationVersion`）。否则模型会把图和过期状态对应。
-- 每轮只注入**当前版本**的切片，不累积历史图。
+- 每轮只注入**当前版本**的切片，不累积历史图。版本号缺失（`report_version <= 0`）
+  的视图直接丢弃，避免模型拿着过期截图推理。
+- 无法发送的切片（无 PNG、尺寸非法、单边超 4096）在构建时丢弃，
+  让捕获缺陷退化成"少一张图"，而不是"请求被拒"。
 - token 计价：按 **provider 降采样之后**的有效像素计，而不是原始面积——
   否则 1200×1500 会被高估约 38%。公式：
 
@@ -331,10 +343,19 @@ provider 画像重新规划切片，不需要重启浏览器。
 1200×960 切片计价 1534 token（不是原始面积的 1536/2400）；
 非法载荷在 bundle 校验阶段被拒。
 
-### P2b：注入链路（待做）
+### P2b-1：视图槽位（已落地）
 
-- 捕获结果作为 `report_view` runtime context block 注入（§4），带版本戳。
-- 缓存 + 脏块增量 + 异步 job（§5.4）。
+- `ReportView` 类型 + `ReportView.RuntimeContextBlocks()`（分块、版本戳、事实透传）。
+- `Engine.SetReportViewProvider` + bundle 末尾注入。
+- 验收（已达成）：视图必须是最后一个 runtime block（保护前缀缓存）；
+  45 张切片拆成 3 块且每块 ≤20 图、通过载荷校验；
+  捕获失败时退化为只有事实的块；无法发送的切片被丢弃而不是让请求失败；
+  未就绪（nil）与非过期（`report_version<=0`）视图都不注入。
+
+### P2b-2：捕获数据源（待做）
+
+- 捕获结果落对象存储（hash 键）+ 脏块增量 + 异步 job（§5.4）。
+- 把真实捕获接到 `SetReportViewProvider`，替换测试里的假数据。
 - 验收：一次报告 run 中模型能引用截图中可见的版式问题；
   图片 token 计入后压缩触发点符合预期。
 

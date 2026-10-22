@@ -48,6 +48,11 @@ type Engine struct {
 	// jobs is the session's background job manager. Finished jobs are reported
 	// to the model as runtime facts so they need not be polled for.
 	jobs *JobManager
+	// reportView supplies the current rendered report view, or nil when no
+	// capture is ready yet. The runtime never waits for a capture: a missing view
+	// simply means this request carries facts only. It is invoked under the
+	// engine lock, so it must not call back into the Engine.
+	reportView func() *ReportView
 	// promptTokens and completionTokens accumulate provider-reported usage for
 	// this run so the caller can persist cost facts.
 	promptTokens         int
@@ -303,6 +308,15 @@ func (e *Engine) SetReportState(state *tools.ReportState) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.reportState = state
+}
+
+// SetReportViewProvider attaches the source of the current report view. It is
+// polled once per request, so the provider must be cheap and never block: an
+// unready capture is reported as nil, not waited for.
+func (e *Engine) SetReportViewProvider(provider func() *ReportView) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.reportView = provider
 }
 
 // SetJobManager attaches the session's background job manager, so completed

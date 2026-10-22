@@ -65,6 +65,14 @@ func (e *Engine) buildBundleLocked(userTask string, getRuntimeVars func() []Runt
 	if e.jobs != nil {
 		bundle.RuntimeContext = append(bundle.RuntimeContext, e.jobs.TakeCompletedNotices()...)
 	}
+	// The report view goes last: it changes on every capture, so placing it
+	// earlier would invalidate the provider's prefix cache for everything after
+	// it. A nil view is the normal state before the first capture completes.
+	if e.reportView != nil {
+		if view := e.reportView(); view != nil {
+			bundle.RuntimeContext = append(bundle.RuntimeContext, view.RuntimeContextBlocks()...)
+		}
+	}
 	bundle.History = append([]ConversationItem(nil), e.history...)
 	return bundle
 }
