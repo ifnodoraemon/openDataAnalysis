@@ -21,11 +21,22 @@ Local development is standardized on Docker Compose.
 
 ```bash
 cp server/.env.example server/.env
+cp .env.example .env
 # Configure LLM_PROVIDER / LLM_API_PROTOCOL / LLM_API_ENDPOINT / LLM_API_KEY / LLM_MODEL / AUTH_SECRET.
 docker compose up -d --build
 ```
 
-Open `http://localhost`.
+Open `http://localhost` (set `ODA_HTTP_PORT=8090` when port 80 is taken).
+
+The stack brings up six services: postgres, the S3-compatible object store
+(RustFS), a one-shot bucket init container, the Go server, the Vue client behind
+nginx, the Python executor, and the headless report-render executor. The server
+fails closed if its bucket is missing, which is why the init container is part of
+the stack rather than a manual step.
+
+MinIO images were withdrawn from Docker Hub, so the object store is RustFS. It
+speaks the same S3 API; `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` are still the
+variable names, for compatibility with existing `.env` files.
 
 For `LLM_PROVIDER=openai`, select `LLM_API_PROTOCOL=responses` or
 `LLM_API_PROTOCOL=chat_completions` explicitly. Compatible-provider hostnames and
@@ -43,7 +54,17 @@ docker compose down
 
 ## Deployment Modes
 
-The default Docker Compose setup is a development profile. It uses local SQLite metadata, local object storage, in-process run execution, and session SQLite analysis scratch DBs. Python artifacts are ingested into the configured object-storage interface.
+Two compose profiles are provided:
+
+- `docker-compose.yml` — the full stack: PostgreSQL for metadata, RustFS for
+  objects, plus the Python and headless-render executors as separate containers.
+- `docker-compose.dev.yml` — the same services without object storage: PostgreSQL
+  for metadata, the local filesystem for artifacts, and a seeded default account
+  so a fresh database is usable immediately. Build its images with host networking
+  first; the file header documents the commands.
+
+In both cases run execution is in-process, and analysis scratch data lives in
+per-session SQLite files.
 
 Production must be configured explicitly with `DEPLOYMENT_MODE=production`. In that mode the server fails closed while any local or single-process backend is still selected:
 

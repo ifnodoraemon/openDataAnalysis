@@ -19,26 +19,51 @@ services:
       timeout: 3s
       retries: 5
 
-  minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
-    container_name: data-analysis-minio
+  # RustFS replaces MinIO: minio/minio was withdrawn from Docker Hub, so the
+  # previous image can no longer be pulled at all. RustFS speaks the same S3 API,
+  # and the credentials keep the MINIO_ROOT_* names so existing .env files work.
+  object-store:
+    image: rustfs/rustfs:latest
+    container_name: data-analysis-object-store
     restart: unless-stopped
-    command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      RUSTFS_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      RUSTFS_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      RUSTFS_VOLUMES: /data
     ports:
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:9001:9001"
     volumes:
-      - minio-data:/data
+      - object-store-data:/data
     networks:
       - app-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
+
+  # The server fails fast when its bucket is missing, so the bucket is part of the
+  # stack rather than a manual post-install step. Idempotent by design.
+  object-store-init:
+    image: public.ecr.aws/aws-cli/aws-cli:latest
+    container_name: data-analysis-object-store-init
+    depends_on:
+      object-store:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      AWS_DEFAULT_REGION: us-east-1
+      S3_BUCKET: ${S3_BUCKET:-oda-storage}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        aws --endpoint-url http://object-store:9000 s3api head-bucket --bucket "$$S3_BUCKET" 2>/dev/null \
+          || aws --endpoint-url http://object-store:9000 s3api create-bucket --bucket "$$S3_BUCKET"
+    networks:
+      - app-network
+    restart: "no"
 
   server:
     build: ./server
@@ -49,7 +74,7 @@ services:
       METADATA_STORE: postgres
       POSTGRES_DSN: postgres://oda:${POSTGRES_PASSWORD:-oda_password}@postgres:5432/oda?sslmode=disable
       STORAGE_PROVIDER: s3
-      S3_ENDPOINT: http://minio:9000
+      S3_ENDPOINT: http://object-store:9000
       S3_REGION: us-east-1
       S3_BUCKET: oda-storage
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
@@ -61,6 +86,9 @@ services:
       # allowed over HTTP or browsers drop it (breaking SSE). Set to "true"
       # when deploying behind HTTPS.
       AUTH_COOKIE_SECURE: "false"
+      # Seeding a default account is opt-in: production provisions identities
+      # explicitly. Local .env sets it to true so a fresh database is usable.
+      BOOTSTRAP_DEFAULT_IDENTITY: ${BOOTSTRAP_DEFAULT_IDENTITY:-false}
       # PROXY_TOKEN must match the python-executor; set it once in the root .env
       # so both services share the same value.
       PROXY_TOKEN: ${PROXY_TOKEN:?set PROXY_TOKEN in .env at the repo root (see .env.example)}
@@ -87,8 +115,10 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      minio:
+      object-store:
         condition: service_healthy
+      object-store-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/health"]
       interval: 10s
@@ -216,4 +246,4 @@ networks:
 volumes:
   python-workspace:
   pg-data:
-  minio-data:
+  object-store-data:

@@ -21,11 +21,20 @@
 
 ```bash
 cp server/.env.example server/.env
+cp .env.example .env
 # 显式填写 LLM_PROVIDER / LLM_API_PROTOCOL / LLM_API_ENDPOINT / LLM_API_KEY / LLM_MODEL / AUTH_SECRET
 docker compose up -d --build
 ```
 
-浏览器访问 `http://localhost`。
+浏览器访问 `http://localhost`；80 被占用时用 `ODA_HTTP_PORT=8090` 指定其他端口。
+
+栈内共六个服务：PostgreSQL、S3 兼容对象存储（RustFS）、一次性建桶容器、Go 服务端、
+nginx 后面的 Vue 前端，以及 Python 执行器与报告渲染执行器。服务端在 bucket 缺失时会
+直接启动失败，所以建桶是栈的一部分，而不是安装后的手工步骤。
+
+对象存储从 MinIO 换成 RustFS：MinIO 的镜像已从 Docker Hub 撤下、无法再拉取，
+RustFS 使用同一套 S3 API。变量名仍沿用 `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`，
+以兼容已有的 `.env`。
 
 当 `LLM_PROVIDER=openai` 时，必须显式选择 `LLM_API_PROTOCOL=responses` 或
 `LLM_API_PROTOCOL=chat_completions`。运行时不会根据兼容服务的域名或模型名猜测、改写协议和 endpoint。
@@ -42,7 +51,15 @@ docker compose down
 
 ## 部署模式
 
-默认 Docker Compose 是开发 profile。它使用本地 SQLite 元数据、本地对象存储、进程内 run 执行和 session SQLite 分析工作库；Python 产物会写入已配置的对象存储接口。
+仓库提供两套 compose：
+
+- `docker-compose.yml`：完整栈，PostgreSQL 管元数据、RustFS 管对象存储，
+  Python 执行器与报告渲染执行器各自独立成容器。
+- `docker-compose.dev.yml`：不含对象存储的轻量变体，元数据仍走 PostgreSQL，
+  产物落本地目录，并默认预置一个账号，空库起来就能登录。
+  该文件的头部写了"先用宿主网络构建镜像"的命令。
+
+两者都是进程内 run 执行，分析工作库存放于 session 级 SQLite。
 
 生产部署必须显式设置 `DEPLOYMENT_MODE=production`。在该模式下，只要仍选择以下本地或单进程后端，服务会拒绝启动：
 
