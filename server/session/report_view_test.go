@@ -12,6 +12,7 @@ import (
 	"github.com/ifnodoraemon/openDataAnalysis/agent"
 	"github.com/ifnodoraemon/openDataAnalysis/config"
 	"github.com/ifnodoraemon/openDataAnalysis/render"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type fakeReportViewBuilder struct {
@@ -474,5 +475,54 @@ func TestCaptureNowHonorsContextCancellation(t *testing.T) {
 	}
 	if current := coordinator.Current(); current != nil {
 		t.Fatalf("a failed capture must not publish, got %+v", current)
+	}
+}
+
+func deliveryMetric(t *testing.T, kind string) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	for _, family := range families {
+		if family.GetName() != "oda_report_view_delivery_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, pair := range metric.GetLabel() {
+				if pair.GetName() == "kind" && pair.GetValue() == kind {
+					return metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// TestForRequestRecordsDeliveryKind: full vs dirty vs none has to be visible in
+// metrics, otherwise nobody can tell whether the incremental path is working.
+func TestForRequestRecordsDeliveryKind(t *testing.T) {
+	coordinator := NewReportViewCoordinator(&fakeReportViewBuilder{}, "http://client/", time.Second)
+	defer coordinator.Close()
+
+	noneBefore := deliveryMetric(t, "none")
+	fullBefore := deliveryMetric(t, "full")
+	dirtyBefore := deliveryMetric(t, "dirty")
+
+	publish(coordinator, viewWithHashes(t, 1, map[string]string{"b1": "h1", "b2": "h2"}))
+	coordinator.ForRequest() // first delivery: full
+	if got := deliveryMetric(t, "full"); got != fullBefore+1 {
+		t.Fatalf("full delivery not counted: %v -> %v", fullBefore, got)
+	}
+
+	coordinator.ForRequest() // nothing new
+	if got := deliveryMetric(t, "none"); got != noneBefore+1 {
+		t.Fatalf("empty delivery not counted: %v -> %v", noneBefore, got)
+	}
+
+	publish(coordinator, viewWithHashes(t, 2, map[string]string{"b1": "h1", "b2": "h2-changed"}))
+	coordinator.ForRequest() // one block changed: dirty
+	if got := deliveryMetric(t, "dirty"); got != dirtyBefore+1 {
+		t.Fatalf("dirty delivery not counted: %v -> %v", dirtyBefore, got)
 	}
 }

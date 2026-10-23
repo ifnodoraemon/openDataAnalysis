@@ -784,3 +784,25 @@ option + 报告 layout。只改无关块时，其他块的哈希不变，切片�
 compose 里写的是 `${REPORT_VIEW_CAPTURE:-images}`——栈开箱即用地展示完整能力；
 裸部署与基准脚本则保持代码默认的 `off`。启动日志每行都带
 `report_view_capture=...`，方便确认当前实际生效的档位。
+
+## 16. 捕获指标（已落地）
+
+这组指标回答一个原本只能翻容器日志才能知道的问题：**哪类报告总是渲染失败。**
+
+| 指标 | 类型 | 含义 |
+| --- | --- | --- |
+| `oda_report_capture_total{result}` | counter | 捕获尝试，`ok` / `failed` |
+| `oda_report_capture_failures_total{reason}` | counter | 失败原因：`not_configured` / `capture_failed` / `crop_failed` |
+| `oda_report_capture_duration_seconds` | histogram | 单次捕获全程（稳定 + 截图 + 裁剪），桶到 30s |
+| `oda_report_capture_slices` | histogram | 每次成功捕获的切片数；`facts` 模式下恒为 0 |
+| `oda_report_view_delivery_total{kind}` | counter | 投递类型：`full` / `dirty` / `facts` / `none` |
+
+两个值得注意的读法：
+
+- **`delivery_total{kind="none"}` 高**是健康信号——说明增量在起作用（版本没推进就不发）。
+  如果它接近 0 而 `full` 很高，说明增量没有生效，每轮都在重发整份视图。
+- **`capture_slices` 恒为 0 且 `capture_total{result="ok"}` 在涨**，说明部署跑在
+  `facts` 模式。这是最容易"以为开了图片、其实没开"的地方。
+
+失败不抛错、只计数：捕获失败是降级为纯事实视图，run 继续，所以用 counter 记录，
+而不是打 error 日志刷屏。

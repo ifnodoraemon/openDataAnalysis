@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/ifnodoraemon/openDataAnalysis/agent"
+	"github.com/ifnodoraemon/openDataAnalysis/metrics"
 )
 
 // Builder turns a report document into the view the model reads.
@@ -85,6 +87,18 @@ type captureFailureFacts struct {
 // BuildView captures, slices, and crops the current report. It never returns nil
 // for a stamped version: an unavailable view is itself a fact.
 func (b *Builder) BuildView(ctx context.Context, request BuildRequest) *agent.ReportView {
+	startedAt := time.Now()
+	defer func() {
+		// One observation per attempt, whatever the outcome: a capture that never
+		// completes is exactly what an operator needs to see.
+		metrics.ReportCaptureDuration.WithLabelValues().Observe(time.Since(startedAt).Seconds())
+	}()
+	fail := func(reason string, view *agent.ReportView) *agent.ReportView {
+		metrics.ReportCaptureTotal.WithLabelValues("failed").Inc()
+		metrics.ReportCaptureFailure.WithLabelValues(reason).Inc()
+		return view
+	}
+
 	view := &agent.ReportView{
 		ReportVersion: request.ReportVersion,
 		CapturedAt:    request.CapturedAt,
@@ -93,7 +107,7 @@ func (b *Builder) BuildView(ctx context.Context, request BuildRequest) *agent.Re
 	}
 	if b.client == nil {
 		view.Facts = mustMarshalFacts(captureFailureFacts{OK: false, Reason: "capture_not_configured"})
-		return view
+		return fail("not_configured", view)
 	}
 
 	capture, err := b.client.Capture(ctx, CaptureRequest{
@@ -109,9 +123,10 @@ func (b *Builder) BuildView(ctx context.Context, request BuildRequest) *agent.Re
 			Detail:   err.Error(),
 			Captured: request.CapturedAt,
 		})
-		return view
+		return fail("capture_failed", view)
 	}
 	view.Facts = capture.Facts
+	metrics.ReportCaptureTotal.WithLabelValues("ok").Inc()
 	if b.factsOnly {
 		// Facts are the deliverable in this mode; cropping would only cost CPU.
 		return view
@@ -150,7 +165,7 @@ func (b *Builder) BuildView(ctx context.Context, request BuildRequest) *agent.Re
 			Detail:   cropErr.Error(),
 			Captured: request.CapturedAt,
 		})
-		return view
+		return fail("crop_failed", view)
 	}
 	fresh := make(map[string]SliceImage, len(cropped))
 	keyByID := make(map[string]string, len(pending))
@@ -197,6 +212,7 @@ func (b *Builder) BuildView(ctx context.Context, request BuildRequest) *agent.Re
 			ContentHash: b.blockHash(request, image.BlockID),
 		})
 	}
+	metrics.ReportCaptureSlices.WithLabelValues().Observe(float64(len(view.Slices)))
 	return view
 }
 

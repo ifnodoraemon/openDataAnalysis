@@ -10,6 +10,8 @@ import (
 	"image/png"
 	"strings"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // fakeCaptureClient is the browser-free stand-in for the executor.
@@ -244,5 +246,68 @@ func TestBuildViewFactsOnlySkipsImages(t *testing.T) {
 	}
 	if !strings.Contains(blocks[0].Content, "charts_mounted") {
 		t.Fatalf("facts block lost the payload: %s", blocks[0].Content)
+	}
+}
+
+// captureMetric reads one labeled counter from the default registry, so the test
+// needs no extra dependency beyond client_golang.
+func captureMetric(t *testing.T, name string, labels map[string]string) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			matched := true
+			for key, want := range labels {
+				found := false
+				for _, pair := range metric.GetLabel() {
+					if pair.GetName() == key && pair.GetValue() == want {
+						found = true
+						break
+					}
+				}
+				if !found {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+// TestBuildViewRecordsCaptureMetrics: capture outcome must be observable without
+// reading container logs, otherwise "which reports keep failing to render" stays
+// unanswerable in production.
+func TestBuildViewRecordsCaptureMetrics(t *testing.T) {
+	okBefore := captureMetric(t, "oda_report_capture_total", map[string]string{"result": "ok"})
+	failedBefore := captureMetric(t, "oda_report_capture_total", map[string]string{"result": "failed"})
+	reasonBefore := captureMetric(t, "oda_report_capture_failures_total", map[string]string{"reason": "capture_failed"})
+
+	layout := Layout{
+		Scroll: Size{W: 1200, H: 960},
+		Blocks: []BlockRect{{BlockID: "b1", Kind: "markdown", Y: 0, H: 960, W: 1200}},
+	}
+	okClient := &fakeCaptureClient{page: solidPage(t, 1200, 960, color.RGBA{A: 255}), layout: layout, facts: json.RawMessage(`{}`)}
+	NewBuilder(okClient, NewMemoryCache(4), BuilderOptions{}).BuildView(context.Background(), BuildRequest{HTML: "<html></html>", ReportVersion: 1})
+	if got := captureMetric(t, "oda_report_capture_total", map[string]string{"result": "ok"}); got != okBefore+1 {
+		t.Fatalf("successful capture was not counted: %v -> %v", okBefore, got)
+	}
+
+	failingClient := &fakeCaptureClient{err: errors.New("chromium crashed")}
+	NewBuilder(failingClient, NewMemoryCache(4), BuilderOptions{}).BuildView(context.Background(), BuildRequest{HTML: "<html></html>", ReportVersion: 2})
+	if got := captureMetric(t, "oda_report_capture_total", map[string]string{"result": "failed"}); got != failedBefore+1 {
+		t.Fatalf("failed capture was not counted: %v -> %v", failedBefore, got)
+	}
+	if got := captureMetric(t, "oda_report_capture_failures_total", map[string]string{"reason": "capture_failed"}); got != reasonBefore+1 {
+		t.Fatalf("failure reason was not counted: %v -> %v", reasonBefore, got)
 	}
 }

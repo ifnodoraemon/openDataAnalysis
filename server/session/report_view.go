@@ -10,6 +10,7 @@ import (
 
 	"github.com/ifnodoraemon/openDataAnalysis/agent"
 	"github.com/ifnodoraemon/openDataAnalysis/config"
+	"github.com/ifnodoraemon/openDataAnalysis/metrics"
 	"github.com/ifnodoraemon/openDataAnalysis/render"
 )
 
@@ -151,14 +152,26 @@ func (c *ReportViewCoordinator) ForRequest() *agent.ReportView {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed || c.view == nil {
+		metrics.ReportViewDelivery.WithLabelValues("none").Inc()
 		return nil
 	}
 	if c.view.ReportVersion <= c.deliveredVersion {
+		metrics.ReportViewDelivery.WithLabelValues("none").Inc()
 		return nil
 	}
 	view := c.dirtyOnlyLocked(c.view)
 	c.deliveredVersion = c.view.ReportVersion
 	c.deliveredHashes = hashesOfView(c.view)
+	// Distinguishing full from dirty is how an operator can tell whether the
+	// incremental path is actually working in production.
+	switch {
+	case len(view.Slices) == 0:
+		metrics.ReportViewDelivery.WithLabelValues("facts").Inc()
+	case len(view.Slices) == len(c.view.Slices):
+		metrics.ReportViewDelivery.WithLabelValues("full").Inc()
+	default:
+		metrics.ReportViewDelivery.WithLabelValues("dirty").Inc()
+	}
 	return view
 }
 

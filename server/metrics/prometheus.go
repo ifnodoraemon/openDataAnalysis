@@ -51,6 +51,22 @@ var (
 	AnalysisResultsTotal       = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "oda_analysis_results_total", Help: "Structured analysis results recorded by tool."}, []string{"tool"})
 	ReportFinalizeTotal        = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "oda_report_finalize_total", Help: "Report finalize attempts by result."}, []string{"status"})
 	SemanticConfirmationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "oda_semantic_confirmations_total", Help: "Semantic confirmations by scope and provenance."}, []string{"scope", "provenance"})
+
+	// Report view capture: the only way to answer "which reports keep failing to
+	// render" without grepping container logs.
+	ReportCaptureTotal    = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "oda_report_capture_total", Help: "Report view capture attempts by result."}, []string{"result"})
+	ReportCaptureFailure  = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "oda_report_capture_failures_total", Help: "Report view capture failures by reason."}, []string{"reason"})
+	ReportCaptureDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "oda_report_capture_duration_seconds",
+		Help:    "Wall time of one capture, including render settlement and cropping.",
+		Buckets: []float64{0.5, 1, 2, 3, 5, 8, 12, 20, 30},
+	}, nil)
+	ReportCaptureSlices = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "oda_report_capture_slices",
+		Help:    "Slice count per successful capture (0 in facts-only mode).",
+		Buckets: []float64{0, 1, 2, 4, 8, 16, 32, 64},
+	}, nil)
+	ReportViewDelivery = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "oda_report_view_delivery_total", Help: "Report view deliveries by kind."}, []string{"kind"})
 )
 
 func init() {
@@ -64,6 +80,11 @@ func init() {
 	prometheus.MustRegister(AnalysisResultsTotal)
 	prometheus.MustRegister(ReportFinalizeTotal)
 	prometheus.MustRegister(SemanticConfirmationsTotal)
+	prometheus.MustRegister(ReportCaptureTotal)
+	prometheus.MustRegister(ReportCaptureFailure)
+	prometheus.MustRegister(ReportCaptureDuration)
+	prometheus.MustRegister(ReportCaptureSlices)
+	prometheus.MustRegister(ReportViewDelivery)
 }
 
 // Handler returns the unauthenticated Prometheus handler. Prefer
