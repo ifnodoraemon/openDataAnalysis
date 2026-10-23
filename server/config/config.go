@@ -66,8 +66,13 @@ type Config struct {
 	PythonMCPURL        string
 	// RenderExecutorURL points at the headless capture service, and
 	// RenderAssetBaseURL is the origin its report assets resolve against.
-	RenderExecutorURL          string
-	RenderAssetBaseURL         string
+	RenderExecutorURL  string
+	RenderAssetBaseURL string
+	// ReportViewCaptureMode is the capture switch: off, facts or images.
+	// Configuration presence alone must not enable a feature that costs seconds
+	// and tens of thousands of tokens per report edit, so it defaults to off and
+	// deployments opt in explicitly.
+	ReportViewCaptureMode      string
 	PythonMaxTimeoutSec        int
 	ProxyToken                 string
 	PublicAPIBaseURL           string
@@ -159,6 +164,7 @@ func Load() {
 		PythonMCPURL:               getEnv("PYTHON_MCP_URL", "http://python-executor:8081"),
 		RenderExecutorURL:          getEnv("RENDER_EXECUTOR_URL", "http://render-executor:8082"),
 		RenderAssetBaseURL:         getEnv("RENDER_ASSET_BASE_URL", ""),
+		ReportViewCaptureMode:      normalizeCaptureMode(getEnv("REPORT_VIEW_CAPTURE", CaptureModeOff)),
 		PythonMaxTimeoutSec:        getEnvInt("PYTHON_MAX_TIMEOUT_SECONDS", 120),
 		ProxyToken:                 getEnv("PROXY_TOKEN", ""),
 		PublicAPIBaseURL:           getEnv("PUBLIC_API_BASE_URL", ""),
@@ -193,8 +199,11 @@ func Load() {
 	if Cfg.ReportEchartsUrl != "" && !trustedReportScriptURL(Cfg.ReportEchartsUrl) {
 		panic("REPORT_ECHARTS_URL must be an exact same-origin path or an allowed ECharts HTTPS URL")
 	}
+	if !validCaptureMode(Cfg.ReportViewCaptureMode) {
+		panic("REPORT_VIEW_CAPTURE must be one of: off, facts, images")
+	}
 
-	log.Printf("config loaded mode=%s metadata_store=%s storage_provider=%s run_backend=%s analysis_store=%s llm_provider=%s llm_protocol=%s llm_model=%s llm_endpoint=%s",
+	log.Printf("config loaded mode=%s metadata_store=%s storage_provider=%s run_backend=%s analysis_store=%s llm_provider=%s llm_protocol=%s llm_model=%s llm_endpoint=%s report_view_capture=%s",
 		Cfg.DeploymentMode,
 		Cfg.MetadataStore,
 		Cfg.StorageProvider,
@@ -204,6 +213,7 @@ func Load() {
 		Cfg.LLMAPIProtocol,
 		Cfg.LLMModel,
 		Cfg.LLMAPIEndpoint,
+		Cfg.ReportViewCaptureMode,
 	)
 }
 
@@ -504,4 +514,28 @@ func getEnvInt(key string, defaultValue int) int {
 		panic(fmt.Sprintf("%s must be an integer", key))
 	}
 	return result
+}
+
+const (
+	// CaptureModeOff disables report view capture entirely.
+	CaptureModeOff = "off"
+	// CaptureModeFacts captures and injects render facts but no images: the mode
+	// for environments that need the facts without image tokens or pixel-level
+	// nondeterminism (benchmarks, cost-capped deployments).
+	CaptureModeFacts = "facts"
+	// CaptureModeImages is the full behaviour: facts plus rendered slices.
+	CaptureModeImages = "images"
+)
+
+func normalizeCaptureMode(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func validCaptureMode(mode string) bool {
+	switch mode {
+	case CaptureModeOff, CaptureModeFacts, CaptureModeImages:
+		return true
+	default:
+		return false
+	}
 }

@@ -205,3 +205,44 @@ func TestBuildViewStampsSliceContentHashes(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildViewFactsOnlySkipsImages is the contract of REPORT_VIEW_CAPTURE=facts:
+// the capture still runs (so the facts are real) but nothing image-shaped is
+// produced, which is what keeps benchmark runs deterministic and cheap.
+func TestBuildViewFactsOnlySkipsImages(t *testing.T) {
+	layout := Layout{
+		Scroll: Size{W: 1200, H: 1920},
+		Blocks: []BlockRect{{BlockID: "b1", Kind: "markdown", Y: 0, H: 1920, W: 1200}},
+	}
+	client := &fakeCaptureClient{
+		page:   solidPage(t, 1200, 1920, color.RGBA{A: 255}),
+		layout: layout,
+		facts:  json.RawMessage(`{"charts_mounted":2,"overflow_x":false}`),
+	}
+	builder := NewBuilder(client, NewMemoryCache(8), BuilderOptions{FactsOnly: true})
+	view := builder.BuildView(context.Background(), BuildRequest{
+		HTML:          "<html></html>",
+		ReportVersion: 5,
+		BlockHashes:   map[string]string{"b1": "h1"},
+	})
+	if client.captures != 1 {
+		t.Fatalf("facts mode must still capture once, got %d", client.captures)
+	}
+	if len(view.Slices) != 0 {
+		t.Fatalf("facts mode must not produce slices, got %d", len(view.Slices))
+	}
+	if !strings.Contains(string(view.Facts), "charts_mounted") {
+		t.Fatalf("facts were lost: %s", view.Facts)
+	}
+	// The delivered payload is a single image-free block carrying the facts.
+	blocks := view.RuntimeContextBlocks()
+	if len(blocks) != 1 {
+		t.Fatalf("expected one facts block, got %d", len(blocks))
+	}
+	if len(blocks[0].Parts) != 0 {
+		t.Fatalf("facts block must carry no images, got %d parts", len(blocks[0].Parts))
+	}
+	if !strings.Contains(blocks[0].Content, "charts_mounted") {
+		t.Fatalf("facts block lost the payload: %s", blocks[0].Content)
+	}
+}

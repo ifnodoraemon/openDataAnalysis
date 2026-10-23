@@ -172,16 +172,46 @@ func TestReportViewCoordinatorIsConfigGated(t *testing.T) {
 		t.Fatal("capture must stay disabled without configuration")
 	}
 
-	config.Cfg = &config.Config{RenderExecutorURL: "http://render-executor:8082", ProxyToken: "token"}
+	// The switch is the gate: a fully configured executor must not enable capture.
+	config.Cfg = &config.Config{
+		RenderExecutorURL:     "http://render-executor:8082",
+		RenderAssetBaseURL:    "http://client:8080/",
+		ProxyToken:            "token",
+		ReportViewCaptureMode: config.CaptureModeOff,
+	}
+	if coordinator := newSessionReportViewCoordinator(); coordinator != nil {
+		coordinator.Close()
+		t.Fatal("capture must stay disabled when the switch is off")
+	}
+
+	config.Cfg = &config.Config{
+		RenderExecutorURL:     "http://render-executor:8082",
+		ProxyToken:            "token",
+		ReportViewCaptureMode: config.CaptureModeImages,
+	}
 	if coordinator := newSessionReportViewCoordinator(); coordinator != nil {
 		coordinator.Close()
 		t.Fatal("capture must stay disabled without an asset origin")
 	}
 
+	// facts mode is a valid, lighter configuration.
 	config.Cfg = &config.Config{
-		RenderExecutorURL:  "http://render-executor:8082",
-		RenderAssetBaseURL: "http://client:8080/",
-		ProxyToken:         "token",
+		RenderExecutorURL:     "http://render-executor:8082",
+		RenderAssetBaseURL:    "http://client:8080/",
+		ProxyToken:            "token",
+		ReportViewCaptureMode: config.CaptureModeFacts,
+	}
+	factsCoordinator := newSessionReportViewCoordinator()
+	if factsCoordinator == nil {
+		t.Fatal("facts mode should be enabled once fully configured")
+	}
+	factsCoordinator.Close()
+
+	config.Cfg = &config.Config{
+		RenderExecutorURL:     "http://render-executor:8082",
+		RenderAssetBaseURL:    "http://client:8080/",
+		ProxyToken:            "token",
+		ReportViewCaptureMode: config.CaptureModeImages,
 	}
 	coordinator := newSessionReportViewCoordinator()
 	if coordinator == nil {

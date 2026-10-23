@@ -27,12 +27,17 @@ type Builder struct {
 	sliceHeight   int
 	viewportWidth int
 	viewportDPR   int
+	factsOnly     bool
 }
 
 type BuilderOptions struct {
 	SliceHeight   int
 	ViewportWidth int
 	ViewportDPR   int
+	// FactsOnly skips slicing and cropping: the capture still runs so the render
+	// facts are real, but no image is produced. This is the mode for environments
+	// that must not pay image tokens or accept pixel-level nondeterminism.
+	FactsOnly bool
 }
 
 func NewBuilder(client CaptureClient, cache Cache, options BuilderOptions) *Builder {
@@ -48,7 +53,14 @@ func NewBuilder(client CaptureClient, cache Cache, options BuilderOptions) *Buil
 	if dpr <= 0 {
 		dpr = 1
 	}
-	return &Builder{client: client, cache: cache, sliceHeight: height, viewportWidth: width, viewportDPR: dpr}
+	return &Builder{
+		client:        client,
+		cache:         cache,
+		sliceHeight:   height,
+		viewportWidth: width,
+		viewportDPR:   dpr,
+		factsOnly:     options.FactsOnly,
+	}
 }
 
 // BuildRequest carries what the builder needs from report state.
@@ -100,6 +112,10 @@ func (b *Builder) BuildView(ctx context.Context, request BuildRequest) *agent.Re
 		return view
 	}
 	view.Facts = capture.Facts
+	if b.factsOnly {
+		// Facts are the deliverable in this mode; cropping would only cost CPU.
+		return view
+	}
 
 	slices := PlanSlices(capture.Layout, b.sliceHeight)
 	if len(slices) == 0 {

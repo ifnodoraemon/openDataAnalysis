@@ -271,10 +271,19 @@ func newSessionReportViewCoordinator() *ReportViewCoordinator {
 	if config.Cfg == nil {
 		return nil
 	}
+	// The switch is the whole gate: configuring an executor must not silently
+	// enable a feature that costs seconds and tens of thousands of tokens per
+	// report edit, and operators need a way to degrade without unconfiguring.
+	mode := config.Cfg.ReportViewCaptureMode
+	if mode == "" || mode == config.CaptureModeOff {
+		return nil
+	}
 	if strings.TrimSpace(config.Cfg.RenderExecutorURL) == "" {
+		log.Printf("report view capture is %q but RENDER_EXECUTOR_URL is empty; capture disabled", mode)
 		return nil
 	}
 	if strings.TrimSpace(config.Cfg.RenderAssetBaseURL) == "" {
+		log.Printf("report view capture is %q but RENDER_ASSET_BASE_URL is empty; capture disabled", mode)
 		return nil
 	}
 	client, err := render.NewClient(render.ClientConfig{
@@ -287,7 +296,9 @@ func newSessionReportViewCoordinator() *ReportViewCoordinator {
 		return nil
 	}
 	var cache render.Cache = render.NewMemoryCache(256)
-	builder := render.NewBuilder(client, cache, render.BuilderOptions{})
+	builder := render.NewBuilder(client, cache, render.BuilderOptions{
+		FactsOnly: mode == config.CaptureModeFacts,
+	})
 	return NewReportViewCoordinator(builder, config.Cfg.RenderAssetBaseURL, 20*time.Second)
 }
 

@@ -5,6 +5,10 @@
 # 需要: node >= 18, 服务器已启动, server/.env 配置完整
 # 环境变量:
 #   SMOKE_SCENARIOS - 自定义场景 ID 列表（空格分隔）；未设置时发现并运行全部场景
+#
+# 注意: 服务端必须 REPORT_VIEW_CAPTURE=off 才能用作基准基线。捕获会为每次报告
+# 变更增加 4-5 秒并注入图片 token，静默改变超时预算与 token 账目。
+# 启动日志里的 report_view_capture= 字段是唯一可靠的确认方式。
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

@@ -237,3 +237,32 @@ func TestGetEnvInt(t *testing.T) {
 	}()
 	_ = getEnvInt("TEST_INT_KEY", 42)
 }
+
+func TestNormalizeCaptureMode(t *testing.T) {
+	cases := map[string]string{
+		"off":     CaptureModeOff,
+		" OFF ":   CaptureModeOff,
+		"facts":   CaptureModeFacts,
+		"Facts":   CaptureModeFacts,
+		"images":  CaptureModeImages,
+		" IMAGES": CaptureModeImages,
+	}
+	for input, want := range cases {
+		if got := normalizeCaptureMode(input); got != want {
+			t.Errorf("normalizeCaptureMode(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestValidCaptureMode(t *testing.T) {
+	for _, mode := range []string{CaptureModeOff, CaptureModeFacts, CaptureModeImages} {
+		if !validCaptureMode(mode) {
+			t.Errorf("%q should be a valid capture mode", mode)
+		}
+	}
+	for _, mode := range []string{"", "on", "all", "image", "IMAGES"} {
+		if validCaptureMode(mode) {
+			t.Errorf("%q should be rejected (mode must be normalized first)", mode)
+		}
+	}
+}
