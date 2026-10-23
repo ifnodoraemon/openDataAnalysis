@@ -736,11 +736,31 @@ option + 报告 layout。只改无关块时，其他块的哈希不变，切片�
 - 没有块哈希时一律全量：证明不了"没变"，就不能假装没变。
 
 
-### 容器栈内验证（已通过）
+### 容器栈内验证（已通过，含真实 run）
 
-正式 compose 栈（PostgreSQL + RustFS + 渲染执行器）内实测：
+正式 compose 栈（PostgreSQL + RustFS + 渲染执行器 + 真实 LLM）内跑通了一次
+完整流程：上传 CSV → 发起对话 → 模型写报告 → 自动捕获 → 定稿。
 
-- 渲染容器能从 client 容器取到 `/assets` 并完成捕获：
-  `{"blocks":1,"charts":1,"missing":[],"blocked":[],"png_kb":8}`
-- `POST /api/sessions/{id}/report/view` 在无报告的会话上返回 409 并说明原因，
-  在有报告的会话上返回 202 并触发捕获。
+捕获日志按时间还原了设计意图：
+
+```
+01:32:11  block_count=0   首次写入，草稿还空
+01:32:15  block_count=1   写完第一个 block
+01:32:20  block_count=2   写完第二个 block
+01:32:23  block_count=2   finalize 同步捕获（页面 1983px，含图表）
+```
+
+一次 run 期间共 4 次捕获，而不是每个工具调用一次——单飞 + 最新优先按预期合并了。
+
+更直接的证据是模型自己的结论文本：
+
+> 报告已生成并定稿（**渲染检查通过：无横向溢出、无图表缺失、无错误**）
+
+这句话只可能来自 `render_facts`：模型确实读到了渲染事实并据此判断版式。
+这正是这个功能最初要解决的问题。
+
+另外两项也验证过：
+
+- 渲染容器能从 client 容器取到 `/assets` 并完成捕获
+  （`{"charts":1,"missing":[],"blocked":[],"png_kb":8}`）；
+- `POST /api/sessions/{id}/report/view` 在无报告会话上返回 409 并说明原因。
